@@ -1,0 +1,9 @@
+__pycache__/
+.vscode/
+
+assets/
+datasets/
+output/
+wandb/
+
+wandb.env
