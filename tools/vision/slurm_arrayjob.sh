@@ -1,5 +1,6 @@
 #!/bin/bash
 # Author(s): James Owers (james.f.owers@gmail.com)
+# Modified for use in UoE research clusters
 #
 # example usage:
 # ```

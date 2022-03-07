@@ -9,7 +9,7 @@ from collections import defaultdict
 
 import ijson
 from tqdm import tqdm
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 from detectron2.data import MetadataCatalog
 from detectron2.structures import BoxMode
 
@@ -121,6 +121,7 @@ class FewShotDataset(IterableDataset):
                 for cat_type, cats in self.sampleables.items()
             }
 
+            to_yield = []
             for cat_type in ["cls", "att", "rel"]:
                 # Yield N-way K-shot episodes of single category type (one of cls/att/rel) with
                 # K support instances & I-K query instances for each category
@@ -128,10 +129,20 @@ class FewShotDataset(IterableDataset):
                     sampled_cats = shuffled_sampleables[cat_type][:self.N]
                     shuffled_sampleables[cat_type] = shuffled_sampleables[cat_type][self.N:]
 
-                    yield {
+                    to_yield.append({
                         cat_type: self._sample_insts(sampled_cats, cat_type),
                         "shot": self.K
-                    }
+                    })
+            
+            # Need to collate sampled episodes in a single list and then yield each (instead of
+            # yielding on fly in the loop above) in order to distribute different episodes to
+            # each dataloader worker...
+            wid = get_worker_info().id
+            nw = get_worker_info().num_workers
+            for i in range(len(to_yield) // nw):
+                epi_ind = i*nw + wid
+                if epi_ind < len(to_yield):
+                    yield to_yield[epi_ind]
     
     def __len__(self):
         """Dataset length defined only in context of evaluation"""

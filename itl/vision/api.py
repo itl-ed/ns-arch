@@ -240,7 +240,8 @@ class VisionModule():
         values for each class/attribute/relation category 
 
         Args:
-
+            few_shot: (int, int, int) tuple (optional), hyperparams defining few-shot learning
+                episodes -- (N=# ways, K=# shots, I=# instances per category per episode)
         """
         # Designate datasets to use in config
         self.cfg.DATASETS.TEST = ("vg_test",)
@@ -267,9 +268,6 @@ class VisionModule():
         Interactively test the vision model's behavior on images stored in some directory,
         entering REPL for infinite loop of select-inference-visualize sequence.
         (Mostly for development purpose, maybe removed afterwards...)
-
-        Args:
-
         """
         self.model.predicates = self.predicates
 

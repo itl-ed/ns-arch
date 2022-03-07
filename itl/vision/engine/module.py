@@ -4,6 +4,7 @@ as PyTorch Lightning LightningModule, implementing training & inference logics.
 Taken partially and extended from tools/lightning_train_net.py at detectron2 main repo.
 """
 import os
+import json
 import time
 import uuid
 import logging
@@ -197,7 +198,7 @@ class SceneGraphGenerator(LightningModule):
         results = OrderedDict()
         for dataset_name in self.cfg.DATASETS.TEST:
             if self.few_shot:
-                results[dataset_name] = self._evaluators[0].evaluate()
+                _, results[dataset_name] = self._evaluators[0].evaluate()
             else:
                 # Only aggregate stats are used
                 _, det_res_avg = self._evaluators[0].evaluate()
@@ -238,7 +239,7 @@ class SceneGraphGenerator(LightningModule):
         self._evaluators = []
         for dataset_name in self.cfg.DATASETS.TEST:
             if self.few_shot:
-                fs_evaluator = VGFewShotEvaluator()
+                fs_evaluator = VGFewShotEvaluator(dataset_name)
                 fs_evaluator.reset()
                 self._evaluators = [fs_evaluator]
             else:
@@ -271,7 +272,13 @@ class SceneGraphGenerator(LightningModule):
         results_avg = OrderedDict()
         for dataset_name in self.cfg.DATASETS.TEST:
             if self.few_shot:
-                results_avg[dataset_name] = self._evaluators[0].evaluate()
+                results = self._evaluators[0].evaluate()
+                results_per_cat[dataset_name] = {
+                    f"{task}_test": results[0][task] for task in results[0]
+                }
+                results_avg[dataset_name] = {
+                    f"{task}_test": results[1][task] for task in results[1]
+                }
             else:
                 det_res_per_cat, det_res_avg = self._evaluators[0].evaluate()
                 clf_res_per_cat, clf_res_avg = self._evaluators[1].evaluate()
@@ -294,7 +301,7 @@ class SceneGraphGenerator(LightningModule):
         if len(results_avg) == 1:
             results_per_cat = list(results_per_cat.values())[0]
             results_avg = list(results_avg.values())[0]
-        
+
         flattened_results_per_cat = flatten_results_dict(results_per_cat)
         flattened_results_avg = flatten_results_dict(results_avg)
         for k, v in flattened_results_avg.items():
@@ -306,110 +313,124 @@ class SceneGraphGenerator(LightningModule):
                     "Got '{}: {}' instead.".format(k, v)
                 ) from e
         
-        md = MetadataCatalog.get(self.cfg.DATASETS.TEST[0])
-
-        # Categories sorted by occurrence freq
-        cls_sort_inds = np.argsort(-np.array(md.classes_counts))
-        att_sort_inds = np.argsort(-np.array(md.attributes_counts))
-        rel_sort_inds = np.argsort(-np.array(md.relations_counts))
-
-        # String names & frequencies by sorted indices
-        cls_names_sorted = [md.classes[i] for i in cls_sort_inds]
-        att_names_sorted = [md.attributes[i] for i in att_sort_inds]
-        rel_names_sorted = [md.relations[i] for i in rel_sort_inds]
-        cls_counts_sorted = [md.classes_counts[i] for i in cls_sort_inds]
-        att_counts_sorted = [md.attributes_counts[i] for i in att_sort_inds]
-        rel_counts_sorted = [md.relations_counts[i] for i in rel_sort_inds]
-
-        # Collect all metrics by sorted indices
-        cls_res_sorted = {
-            k.split("_")[-1]: np.array(v)[cls_sort_inds]
-            for k, v in flattened_results_per_cat.items() if "cls" in k
-        }
-        att_res_sorted = {
-            k.split("_")[-1]: np.array(v)[att_sort_inds]
-            for k, v in flattened_results_per_cat.items() if "att" in k
-        }
-        rel_res_sorted = {
-            k.split("_")[-1]: np.array(v)[rel_sort_inds]
-            for k, v in flattened_results_per_cat.items() if "rel" in k
-        }
-
-        # Evaluation metric tables to log
-        cls_table = wandb.Table(
-            data=list(zip(cls_names_sorted, cls_counts_sorted, *cls_res_sorted.values())),
-            columns=["Name", "Frequency"]+list(cls_res_sorted.keys())
-        )
-        att_table = wandb.Table(
-            data=list(zip(att_names_sorted, att_counts_sorted, *att_res_sorted.values())),
-            columns=["Name", "Frequency"]+list(att_res_sorted.keys())
-        )
-        rel_table = wandb.Table(
-            data=list(zip(rel_names_sorted, rel_counts_sorted, *rel_res_sorted.values())),
-            columns=["Name", "Frequency"]+list(rel_res_sorted.keys())
-        )
-
-        # Category embedding tables to log
-        bp = self.base_model.roi_heads.box_predictor
-        cls_embs = wandb.Table(
-            data=[
-                [md.classes[i]]+c.tolist()
-                for i, c in enumerate(bp.cls_codes.weight.detach())
-            ],
-            columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
-        )
-        att_embs = wandb.Table(
-            data=[
-                [md.attributes[i]]+a.tolist()
-                for i, a in enumerate(bp.att_codes.weight.detach())
-            ],
-            columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
-        )
-        rel_embs = wandb.Table(
-            data=[
-                [md.relations[i]]+r.tolist()
-                for i, r in enumerate(bp.rel_codes.weight.detach())
-            ],
-            columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
-        )
-        
         if comm.is_main_process():
+            # First print metrics to stdout
+            print(json.dumps(results_avg, indent=4))
+
             if not self.offline and self.wandb_id:
                 # Writing evaluation metrics and some analysis results on test data
                 # to the loaded W&B run
-                from dotenv import load_dotenv
-                load_dotenv("wandb.env")
+                from dotenv import find_dotenv, load_dotenv
+                load_dotenv(find_dotenv(raise_error_if_not_found=True))
+
+                table_header = list(flattened_results_per_cat.keys())[0].split("/")[0]
+
+                md = MetadataCatalog.get(self.cfg.DATASETS.TEST[0])
+
+                # Categories sorted by occurrence freq
+                cls_sort_inds = np.argsort(-np.array(md.classes_counts))
+                att_sort_inds = np.argsort(-np.array(md.attributes_counts))
+                rel_sort_inds = np.argsort(-np.array(md.relations_counts))
+
+                # String names & frequencies by sorted indices
+                cls_names_sorted = [md.classes[i] for i in cls_sort_inds]
+                att_names_sorted = [md.attributes[i] for i in att_sort_inds]
+                rel_names_sorted = [md.relations[i] for i in rel_sort_inds]
+                cls_counts_sorted = [md.classes_counts[i] for i in cls_sort_inds]
+                att_counts_sorted = [md.attributes_counts[i] for i in att_sort_inds]
+                rel_counts_sorted = [md.relations_counts[i] for i in rel_sort_inds]
+
+                # Collect all metrics by sorted indices
+                cls_res_sorted = {
+                    k.split("_")[-1]: np.array(v)[cls_sort_inds]
+                    for k, v in flattened_results_per_cat.items() if "cls" in k
+                }
+                att_res_sorted = {
+                    k.split("_")[-1]: np.array(v)[att_sort_inds]
+                    for k, v in flattened_results_per_cat.items() if "att" in k
+                }
+                rel_res_sorted = {
+                    k.split("_")[-1]: np.array(v)[rel_sort_inds]
+                    for k, v in flattened_results_per_cat.items() if "rel" in k
+                }
+
+                # Evaluation metric tables to log
+                cls_table = wandb.Table(
+                    data=list(zip(cls_names_sorted, cls_counts_sorted, *cls_res_sorted.values())),
+                    columns=["Name", "Frequency"]+list(cls_res_sorted.keys())
+                )
+                att_table = wandb.Table(
+                    data=list(zip(att_names_sorted, att_counts_sorted, *att_res_sorted.values())),
+                    columns=["Name", "Frequency"]+list(att_res_sorted.keys())
+                )
+                rel_table = wandb.Table(
+                    data=list(zip(rel_names_sorted, rel_counts_sorted, *rel_res_sorted.values())),
+                    columns=["Name", "Frequency"]+list(rel_res_sorted.keys())
+                )
 
                 wandb.init(resume="must", id=self.wandb_id)
 
                 for k, v in flattened_results_avg.items():
                     wandb.run.summary[k] = v
                 
-                wandb.log({
-                    "cls_table": cls_table,
-                    "att_table": att_table,
-                    "rel_table": rel_table,
+                if self.few_shot:
+                    wandb.log({
+                        f"{table_header}/cls_AP": wandb.plot.scatter(
+                            cls_table, "Frequency", "AP", title="Few-shot class AP"
+                        ),
+                        f"{table_header}/att_AP": wandb.plot.scatter(
+                            att_table, "Frequency", "AP", title="Few-shot attribute AP"
+                        ),
+                        f"{table_header}/rel_AP": wandb.plot.scatter(
+                            att_table, "Frequency", "AP", title="Few-shot relation AP"
+                        )
+                    })
+                else:
+                    # Category embedding tables to log
+                    bp = self.base_model.roi_heads.box_predictor
+                    cls_embs = wandb.Table(
+                        data=[
+                            [md.classes[i]]+c.tolist()
+                            for i, c in enumerate(bp.cls_codes.weight.detach())
+                        ],
+                        columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
+                    )
+                    att_embs = wandb.Table(
+                        data=[
+                            [md.attributes[i]]+a.tolist()
+                            for i, a in enumerate(bp.att_codes.weight.detach())
+                        ],
+                        columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
+                    )
+                    rel_embs = wandb.Table(
+                        data=[
+                            [md.relations[i]]+r.tolist()
+                            for i, r in enumerate(bp.rel_codes.weight.detach())
+                        ],
+                        columns=["Name"]+[f"D{d}" for d in range(bp.CODE_SIZE)]
+                    )
 
-                    "cls_mAP@0.5": wandb.plot.scatter(
-                        cls_table, "Frequency", "mAP@0.5", title="Class mAP@0.5"
-                    ),
-                    "cls_recall@100": wandb.plot.scatter(
-                        cls_table, "Frequency", "recall@100", title="Class recall@100"
-                    ),
-                    "att_mAP@0.5": wandb.plot.scatter(
-                        att_table, "Frequency", "mAP@0.5", title="Attribute mAP@0.5"
-                    ),
-                    "att_recall@100": wandb.plot.scatter(
-                        att_table, "Frequency", "recall@100", title="Attribute recall@100"
-                    ),
-                    "rel_recall@100": wandb.plot.scatter(
-                        rel_table, "Frequency", "recall@100", title="Relation recall@100"
-                    ),
+                    wandb.log({
+                        f"{table_header}/cls_AP@0.5": wandb.plot.scatter(
+                            cls_table, "Frequency", "AP@0.5", title="Class AP@0.5"
+                        ),
+                        f"{table_header}/cls_recall@100": wandb.plot.scatter(
+                            cls_table, "Frequency", "recall@100", title="Class recall@100"
+                        ),
+                        f"{table_header}/att_AP@0.5": wandb.plot.scatter(
+                            att_table, "Frequency", "AP@0.5", title="Attribute AP@0.5"
+                        ),
+                        f"{table_header}/att_recall@100": wandb.plot.scatter(
+                            att_table, "Frequency", "recall@100", title="Attribute recall@100"
+                        ),
+                        f"{table_header}/rel_recall@100": wandb.plot.scatter(
+                            rel_table, "Frequency", "recall@100", title="Relation recall@100"
+                        ),
 
-                    "cls_embs": cls_embs,
-                    "att_embs": att_embs,
-                    "rel_embs": rel_embs
-                })
+                        "cls_embs": cls_embs,
+                        "att_embs": att_embs,
+                        "rel_embs": rel_embs
+                    })
 
                 wandb.finish()
     

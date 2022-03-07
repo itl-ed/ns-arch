@@ -5,7 +5,7 @@ while making sure handlers used by detectron2 are properly registered as well
 import os
 
 import wandb
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from iopath.common.file_io import PathManager as PathManagerBase
 from iopath.common.file_io import PathHandler, HTTPURLHandler, get_cache_dir
 from detectron2.utils.file_io import Detectron2Handler
@@ -24,7 +24,7 @@ class WandbHandler(PathHandler):
 
     def __init__(self):
         super().__init__()
-        load_dotenv("wandb.env")
+        load_dotenv(find_dotenv(raise_error_if_not_found=True))
 
     def _get_supported_prefixes(self):
         return [self.PREFIX]
@@ -40,12 +40,14 @@ class WandbHandler(PathHandler):
 
         # Download ckpt file if not exists
         local_dir_path = os.path.join(
-            get_cache_dir(), entity, project, run.name
+            get_cache_dir(), f"{entity}_{project}_{run.id}"
         )
-        os.makedirs(local_dir_path, exist_ok=True)
-        run.file("/".join(ckpt_file)).download(root=local_dir_path, replace=True)
+        local_ckpt_path = os.path.join(local_dir_path, *ckpt_file)
+        if not os.path.isfile(local_ckpt_path):
+            os.makedirs(local_dir_path, exist_ok=True)
+            run.file("/".join(ckpt_file)).download(root=local_dir_path)
         
-        return os.path.join(local_dir_path, *ckpt_file)
+        return local_ckpt_path
     
     def _open(self, path, mode="r", **kwargs):
         return PathManager.open(self._get_local_path(path), mode, **kwargs)

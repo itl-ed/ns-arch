@@ -6,4 +6,4 @@ datasets/
 output/
 wandb/
 
-wandb.env
+.env

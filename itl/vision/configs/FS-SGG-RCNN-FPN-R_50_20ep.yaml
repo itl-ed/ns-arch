@@ -36,10 +36,10 @@ MODEL:
   KEYPOINT_ON: False
 SOLVER:
   IMS_PER_BATCH: 1    # Used as surrogate for {# episodes per batch}
-  BASE_LR: 0.005
+  BASE_LR: 0.0025
   GAMMA: 0.3
-  STEPS: (150000, 250000)
-  MAX_ITER: 270000
+  STEPS: (50000, 85000)
+  MAX_ITER: 96000
   REFERENCE_WORLD_SIZE: 1
   # For VisualGenome, * iterations with batch size * roughly correspond to * epochs
 TEST:

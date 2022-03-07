@@ -302,11 +302,11 @@ class VGDetEvaluator(_VGBatchEvaluator):
         # latter, promptly disregard None values (i.e. categories with no ground-truth
         # occurrences)
         metrics_per_cat = {
-            f"{cat_type}_mAP@{thresh}": APs
+            f"{cat_type}_AP@{thresh}": APs
             for thresh, APs in metrics.items()
         }
         metrics_avg = {
-            field: np.mean([ap for ap in APs if ap is not None])
+            field.replace("AP", "mAP"): np.mean([ap for ap in APs if ap is not None])
             for field, APs in metrics_per_cat.items()
         }
 
@@ -361,7 +361,7 @@ class VGClfEvaluator(_VGBatchEvaluator):
             for cat_type in ["cls", "att", "rel"]
         }    # Recall values to aggregate
 
-        for i, ((img_id, bbox), cls_scores, att_scores, rel_scores) in pbar:
+        for i, ((img_id, _), cls_scores, att_scores, rel_scores) in pbar:
             ann = gt_ann[img_id]
 
             if len(ann) == 0:
@@ -510,75 +510,16 @@ class VGFewShotEvaluator(DatasetEvaluator):
     predictions and don't have to be loaded from files, and model outputs are much more
     lightweight: thus considerably more straightforward to implement evaluation.
     """
-    def __init__(self):
-        self._cpu_device = torch.device("cpu")
+    def __init__(self, dataset_name):
+        self._dataset_name = dataset_name
+        md = MetadataCatalog.get(self._dataset_name)
 
-    def reset(self):
-        """ Prepare empty dict to store results """
-        self._predictions = {
-            "cls": [],
-            "att": [],
-            "rel": []
+        self._predicates = {
+            "cls": md.classes,
+            "att": md.attributes,
+            "rel": md.relations
         }
 
-    def process(self, inputs, outputs):
-        """ Aggregating predictions + ground_truths """
-        for _, output in zip(inputs, outputs):
-            for cat_type, pred in output.items():
-                self._predictions[cat_type].append(pred)
-
-    def evaluate(self):
-        """ Compute evaluation metrics """
-        comm.synchronize()
-        all_predictions = comm.gather(self._predictions, dst=0)
-        if not comm.is_main_process():
-            return {}
-
-        predictions = { "cls": [], "att": [], "rel": [] }
-        for preds in all_predictions:
-            for cat_type in preds:
-                predictions[cat_type] += preds[cat_type]
-        del all_predictions
-
-        average_precisions = { "cls": {}, "att": {}, "rel": {} }
-        for cat_type in predictions:
-            for ep_result in predictions[cat_type]:
-                scores = ep_result["scores"].to(self._cpu_device)
-                ground_truth = ep_result["ground_truth"].to(self._cpu_device)
-
-                sort_inds = np.argsort(-scores)
-
-                # Compute precision-recall curve(s)
-                pred_is_TP = torch.take_along_dim(ground_truth, sort_inds, dim=-1)
-                TPs = pred_is_TP.cumsum(dim=-1)
-                FPs = (1 - pred_is_TP).cumsum(dim=-1)
-                precision = TPs / (TPs+FPs)
-                recall = TPs / ground_truth.sum(dim=-1, keepdim=True)
-
-                for i, c in enumerate(ep_result["categories"]):
-                    average_precisions[cat_type][c] = _AP_from_PR(
-                        precision[i,:], recall[i,:]
-                    )
-
-        metrics = {
-            "few_shot": {
-                f"{cat_type}_mAP": np.mean([ap for ap in APs.values() if ap is not None])
-                for cat_type, APs in average_precisions.items()
-            }
-        }
-        
-        return metrics
-
-
-class VGFewShotEvaluator(DatasetEvaluator):
-    """
-    Evaluate few-shot category classification performance with the mean average precision
-    (mAP) metric -- with AP not as in typical object detection task, but within each few-shot
-    recognition episode. Contrary to _VGBatchEvaluators, annotations are provided along the
-    predictions and don't have to be loaded from files, and model outputs are much more
-    lightweight: thus considerably more straightforward to implement evaluation.
-    """
-    def __init__(self):
         self._cpu_device = torch.device("cpu")
 
     def reset(self):
@@ -628,14 +569,23 @@ class VGFewShotEvaluator(DatasetEvaluator):
                         precision[i,:], recall[i,:]
                     )
 
-        metrics = {
+        metrics_per_cat = {
+            "few_shot": {
+                f"{cat_type}_AP": [
+                    APs[c] if c in APs else None
+                    for c in range(len(self._predicates[cat_type]))
+                ]
+                for cat_type, APs in average_precisions.items()
+            }
+        }
+        metrics_avg = {
             "few_shot": {
                 f"{cat_type}_mAP": np.mean([ap for ap in APs.values() if ap is not None])
                 for cat_type, APs in average_precisions.items()
             }
         }
         
-        return metrics
+        return metrics_per_cat, metrics_avg
 
 
 class _NullMax():
@@ -649,7 +599,7 @@ class _NullMax():
 
 def _AP_from_PR(precision, recall):
     """
-    Calculation of mAP from precision-recall curve, in PASCAL VOC (after 2008) style.
+    Calculation of AP from precision-recall curve, in PASCAL VOC (after 2008) style.
     Taken mostly from evaluation/pascal_voc_evaluation.py at detectron2 main repo.
     """
     if recall.isnan().sum() > 0:

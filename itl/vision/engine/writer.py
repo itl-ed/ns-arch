@@ -7,7 +7,7 @@ from collections import defaultdict
 
 import yaml
 import wandb
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from torch.utils.tensorboard import SummaryWriter
 from detectron2.utils.events import (
     EventWriter,
@@ -32,7 +32,7 @@ class WandbWriter(EventWriter):
         self.window_size = window_size
         self.last_write = defaultdict(lambda: -1)
 
-        load_dotenv("wandb.env")
+        load_dotenv(find_dotenv(raise_error_if_not_found=True))
         exp_dir_path = os.path.join(self.model.cfg.OUTPUT_DIR, self.model.exp_name)
         os.makedirs(exp_dir_path, exist_ok=True)
 
