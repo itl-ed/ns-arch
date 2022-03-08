@@ -34,7 +34,7 @@ __all__ = ["VisionModule"]
 logger = logging.getLogger("vision.module")
 logger.setLevel(logging.INFO)
 
-class VisionModule():
+class VisionModule:
 
     def __init__(self, opts, initial_load=True):
         """
@@ -294,13 +294,19 @@ class VisionModule():
             visualize: bool (optional); whether to show visualization of inference result
                 on a pop-up window
         Returns:
+            raw input image array (C*H*W) processed by the vision module
 
         """
         self.dm.setup("test")
         self.model.eval()
 
         if isinstance(image, str):
-            input = [self.dm.mapper_batch["test"]({ "file_name": image })]
+            input = { "file_name": image }
+            if bboxes is None:
+                input = [self.dm.mapper_batch["test"](input)]
+            else:
+                raise NotImplementedError
+                input = [self.dm.mapper_batch["test_props"](input)]
         else:
             raise NotImplementedError
 
@@ -310,7 +316,15 @@ class VisionModule():
             if visualize:
                 visualize_sg_predictions(input, output, self.predicates)
         
-        return input[0]["image"], output
+        pred_value_fields = output[0].get_fields()
+        pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
+
+        vis_scene = [
+            { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
+            for obj in pred_values
+        ]
+
+        return input[0]["image"], vis_scene
 
     @has_model
     def add_concept(self):

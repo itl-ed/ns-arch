@@ -65,5 +65,17 @@ def parse_arguments():
     parser.add_argument("-rt", "--resume_training",
         action="store_true",
         help="Whether to resume training")
+    
+
+    ## Options for language module
+    parser.add_argument("-gp", "--grammar_image_path",
+        type=str,
+        default="./assets/grammars/erg-2018-x86-64-0.9.34.dat",
+        help="Path to pre-compiled grammar image file (Default: ./assets/grammars/erg-2018-x86-64-0.9.34.dat)")
+    parser.add_argument("-ap", "--ace_binary_path",
+        type=str,
+        default="./assets/binaries/ace-0.9.34",
+        help="Path to directory containing ACE binary file (Default: ./output)")
+    
 
     return parser.parse_args()

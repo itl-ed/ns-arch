@@ -4,19 +4,24 @@ Outermost wrapper containing ITL agent API
 import readline
 import rlcompleter
 
+from .memory import LongTermMemoryModule
 from .vision import VisionModule
 from .vision.utils.completer import DatasetImgsCompleter
+from .lang import LanguageModule
+from .cognitive_reasoning import CognitiveReasonerModule
+from .practical_reasoning import PracticalReasonerModule
 
 
-class ITLAgent():
+class ITLAgent:
 
     def __init__(self, opts):
-        # self.lt_mem = LongTermMemory()
+        self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
-        # self.lang = LanguageModule()
-        # self.cognitive = CognitiveReasoningModule()
-        # self.practical = PracticalReasoningModule()
+        self.lang = LanguageModule(opts, lex=...)
+        self.cognitive = CognitiveReasonerModule()
+        self.practical = PracticalReasonerModule()
 
+        # Image file selection CUI
         self.dcompleter = DatasetImgsCompleter()
         readline.parse_and_bind("tab: complete")
 
@@ -67,15 +72,46 @@ class ITLAgent():
             # scene graph
             vis_raw, vis_scene = self.vision.predict(img_f, visualize=True)
 
-            # Inform the dialogue manager of the visual context
-            # self.dm.situate(vis_raw, vis_scene)
+            # Inform the language module of the visual context
+            self.lang.situate(vis_raw, vis_scene)
         
         # Restore default completer
         readline.set_completer(rlcompleter.Completer().complete)
     
     def _lang_inp(self):
         """Language input prompt (from user)"""
-        ...
+
+        print("")
+        print("Sys> Awaiting user input...")
+        print("Sys> Enter 'n' for skipping language input")
+
+        usr_in = ""
+        while usr_in == "":
+            print("U> ", end="")
+            usr_in = input()
+            print("")
+
+            # Understand the user input in the context of the dialogue
+            try:
+                if usr_in == "n":
+                    print(f"Sys> Skipped language input")
+                    break
+                else:
+                    agenda_new = self.lang.understand(usr_in)
+                    # self.practical.agenda += agenda_new
+
+            except IndexError as e:
+                print("Sys> Ungrammatical input, try again")
+                continue
+            except ValueError as e:
+                print(f"Sys> {e.args[0]}")
+                continue
+            except NotImplementedError:
+                print("Sys> Sorry, can't handle the input sentence (yet)")
+                continue
+
+            else:
+                break
     
     def _update_belief(self):
         """Form beliefs based on visual and/or language input"""

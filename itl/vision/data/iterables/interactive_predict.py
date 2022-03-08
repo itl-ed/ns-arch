@@ -3,8 +3,6 @@ For testing prediction: an interactive IterableDataset where the user is prompte
 an image to process, either by entering file names or randomly, implemented as a subclass
 of torch.utils.data.IterableDataset
 """
-import os
-import random
 import readline
 
 from torch.utils.data import IterableDataset

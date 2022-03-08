@@ -1,1 +1,3 @@
 -r itl/vision/requirements.txt
+-r itl/lang/requirements.txt
+-r itl/cognitive_reasoning/requirements.txt
