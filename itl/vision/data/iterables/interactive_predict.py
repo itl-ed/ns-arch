@@ -9,6 +9,8 @@ import readline
 
 from torch.utils.data import IterableDataset
 
+from ...utils.completer import DatasetImgsCompleter
+
 
 class InteractiveDataset(IterableDataset):
     """
@@ -18,29 +20,16 @@ class InteractiveDataset(IterableDataset):
     def __init__(self, img_dir_path):
         self.img_dir_path = img_dir_path
 
-        self.images_in_dir = [
-            img
-            for img in os.listdir(self.img_dir_path)
-            if os.path.isfile(os.path.join(self.img_dir_path, img))
-        ]
-
-        # Register autocompleter for REPL
-        def _completer(text, state):
-            options = [img for img in self.images_in_dir if img.startswith(text)]
-            if state < len(options):
-                return options[state]
-            else:
-                return None
-
+        self.dcompleter = DatasetImgsCompleter()
         readline.parse_and_bind("tab: complete")
-        readline.set_completer(_completer)
+        readline.set_completer(self.dcompleter.complete)
     
     def __iter__(self):
         print("")
 
         while True:
             while True:
-                print(f"Sys> Choose an image to process ({len(self.images_in_dir)} files in total)")
+                print(f"Sys> Choose an image to process")
                 print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
                 usr_in = input("U> ")
                 print("")
@@ -48,22 +37,22 @@ class InteractiveDataset(IterableDataset):
                 try:
                     if usr_in == "n":
                         print(f"Sys> Cancelled image selection")
-                        img = None
+                        img_f = None
                         break
                     elif usr_in == "r":
-                        img = random.sample(self.images_in_dir, 1)[0]
+                        img_f = self.dcompleter.sample()
                     else:
-                        if usr_in not in self.images_in_dir:
-                            raise ValueError(f"Sys> Image file {usr_in} does not exist, try again")
-                        img = usr_in
+                        if usr_in not in self.dcompleter:
+                            raise ValueError(f"Image file {usr_in} does not exist")
+                        img_f = usr_in
 
                 except ValueError as e:
-                    print(e)
+                    print(f"Sys> {e}, try again")
 
                 else:
-                    print(f"Sys> Selected image file: {img}")
+                    print(f"Sys> Selected image file: {img_f}")
                     break
             
-            if img is None: break
+            if img_f is None: break
 
-            yield { "file_name": os.path.join(self.img_dir_path, img) }
+            yield { "file_name": img_f }

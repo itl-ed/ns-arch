@@ -13,5 +13,5 @@ if __name__ == "__main__":
     os.environ["FVCORE_CACHE"] = ...
 
     opts = parse_arguments()
-    vm = VisionModule(opts)
-    vm.train(exp_name=opts.exp_name, resume=opts.resume_training)
+    vision = VisionModule(opts)
+    vision.train(exp_name=opts.exp_name, resume=opts.resume_training)

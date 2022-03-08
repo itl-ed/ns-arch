@@ -167,21 +167,19 @@ class VGDataModule(LightningDataModule):
             splits = []
 
         # VG dataset mappers
-        if self.few_shot:
-            self.mapper = {
-                "train": VGFewShotMapper(
-                    self.cfg, is_train=True, augmentations=self.train_aug_transforms
-                ),
-                "test": VGFewShotMapper(self.cfg, is_train=False)
-            }
-        else:
-            self.mapper = {
-                "train": VGBatchMapper(
-                    self.cfg, is_train=True, augmentations=self.train_aug_transforms
-                ),
-                "test": VGBatchMapper(self.cfg, is_train=False),
-                "test_props": VGBatchMapper(self.cfg, is_train=False, provide_proposals=True)
-            }
+        self.mapper_batch = {
+            "train": VGBatchMapper(
+                self.cfg, is_train=True, augmentations=self.train_aug_transforms
+            ),
+            "test": VGBatchMapper(self.cfg, is_train=False),
+            "test_props": VGBatchMapper(self.cfg, is_train=False, provide_proposals=True)
+        }
+        self.mapper_fs = {
+            "train": VGFewShotMapper(
+                self.cfg, is_train=True, augmentations=self.train_aug_transforms
+            ),
+            "test": VGFewShotMapper(self.cfg, is_train=False)
+        }
 
         # Load and store VG metadata in MetadataCatalog
         with open(f"{self.data_dir}/metadata.json") as meta_f:
@@ -215,24 +213,25 @@ class VGDataModule(LightningDataModule):
 
                 # Number of predicates info
                 if spl == "train":
-                    self.mapper["train"].num_preds = num_preds
+                    self.mapper_batch["train"].num_preds = num_preds
+                    self.mapper_fs["train"].num_preds = num_preds
                 else:
-                    self.mapper["test"].num_preds = num_preds
-                    if "test_props" in self.mapper:
-                        self.mapper["test_props"].num_preds = num_preds
+                    self.mapper_batch["test"].num_preds = num_preds
+                    self.mapper_batch["test_props"].num_preds = num_preds
+                    self.mapper_fs["test"].num_preds = num_preds
 
     def train_dataloader(self):
         if self.few_shot:
             loader = build_detection_train_loader(
                 FewShotDataset(self.cfg.DATASETS.TRAIN[0], self.few_shot),
-                mapper=self.mapper["train"],
+                mapper=self.mapper_fs["train"],
                 num_workers=self.cfg.DATALOADER.NUM_WORKERS,
                 total_batch_size=self.cfg.SOLVER.IMS_PER_BATCH,
                 aspect_ratio_grouping=False
             )
         else:
             loader = build_detection_train_loader(
-                self.cfg, mapper=self.mapper["train"],
+                self.cfg, mapper=self.mapper_batch["train"],
                 num_workers=self.cfg.DATALOADER.NUM_WORKERS
             )
 
@@ -249,17 +248,17 @@ class VGDataModule(LightningDataModule):
         if self.few_shot:
             loaders = build_detection_test_loader(
                 FewShotDataset(self.cfg.DATASETS.TEST[0], self.few_shot, is_train=False),
-                mapper=self.mapper["test"],
+                mapper=self.mapper_fs["test"],
                 num_workers=self.cfg.DATALOADER.NUM_WORKERS
             )
         else:
             loaders = [
                 build_detection_test_loader(
-                    self.cfg, self.cfg.DATASETS.TEST, mapper=self.mapper["test"],
+                    self.cfg, self.cfg.DATASETS.TEST, mapper=self.mapper_batch["test"],
                     num_workers=self.cfg.DATALOADER.NUM_WORKERS
                 ),
                 build_detection_test_loader(
-                    self.cfg, self.cfg.DATASETS.TEST, mapper=self.mapper["test_props"],
+                    self.cfg, self.cfg.DATASETS.TEST, mapper=self.mapper_batch["test_props"],
                     num_workers=self.cfg.DATALOADER.NUM_WORKERS
                 )
             ]
@@ -269,5 +268,5 @@ class VGDataModule(LightningDataModule):
     def predict_dataloader(self):
         return build_detection_test_loader(
             InteractiveDataset(os.path.join(self.data_dir, "images")),
-            mapper=self.mapper["test"]
+            mapper=self.mapper_batch["test"]
         )

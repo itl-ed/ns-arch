@@ -1,5 +1,5 @@
 """
-Top vision processing module API that exposes only the high-level functionalities
+Vision processing module API that exposes only the high-level functionalities
 required by the ITL agent: training (both batch & few-shot mode), inference (full
 scene graph generation & classification given bbox), few-shot registration of new
 concepts
@@ -26,6 +26,7 @@ from .data import VGDataModule
 from .engine import SceneGraphGenerator
 from .utils import has_model, rename_resnet_params
 from .utils.path_manager import PathManager
+from .utils.visualize import visualize_sg_predictions
 
 __all__ = ["VisionModule"]
 
@@ -46,7 +47,8 @@ class VisionModule():
         # Fetch detectron config from path, then update corresponding fields with
         # provided command line arguments
         cfg = get_cfg()
-        cfg.merge_from_file(opts.config_file_path)
+        if opts.config_file_path:
+            cfg.merge_from_file(opts.config_file_path)
 
         ### TEMPORARY for search experiments; TODO: erase properly ###
         cfg.MODEL.ROI_HEADS.WEIGHT_EXPONENT = opts.weight_exponent
@@ -277,7 +279,7 @@ class VisionModule():
         trainer.predict(self.model, self.dm)
 
     @has_model
-    def predict(self):
+    def predict(self, image, bboxes=None, visualize=False):
         """
         Model inference in either one of two modes: 1) full scene graph generation mode,
         where the module is only given an image and needs to return its estimation of
@@ -286,11 +288,29 @@ class VisionModule():
         made for only those instances.
 
         Args:
-
+            image: str; input image, passed as path to image file (for now; TODO: enable
+                passing image ndarrays directly as well)
+            bboxes: N*4 array-like (optional); set of bounding boxes provided
+            visualize: bool (optional); whether to show visualization of inference result
+                on a pop-up window
         Returns:
 
         """
-        ...
+        self.dm.setup("test")
+        self.model.eval()
+
+        if isinstance(image, str):
+            input = [self.dm.mapper_batch["test"]({ "file_name": image })]
+        else:
+            raise NotImplementedError
+
+        with torch.no_grad():
+            output = self.model.base_model.inference(input, do_postprocess=False)
+            
+            if visualize:
+                visualize_sg_predictions(input, output, self.predicates)
+        
+        return input[0]["image"], output
 
     @has_model
     def add_concept(self):
