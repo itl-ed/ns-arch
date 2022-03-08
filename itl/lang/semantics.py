@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 
 from delphin import ace, predicate
@@ -10,7 +11,7 @@ class SemanticParser:
     """
     def __init__(self, grammar, ace_bin):
         self.grammar = grammar
-        self.ace_bin = ace_bin
+        self.ace_bin = os.path.join(ace_bin, "ace")
 
     def nl_parse(self, usr_in):
         parse = {
