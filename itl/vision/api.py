@@ -9,12 +9,14 @@ import pickle
 import logging
 from itertools import chain
 
+import cv2
 import torch
 import detectron2.data.transforms as T
 import pytorch_lightning as pl
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
 from detectron2.config import get_cfg, CfgNode
+from detectron2.data.detection_utils import convert_image_to_rgb
 from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning.callbacks import ModelCheckpoint
 from fvcore.common.checkpoint import (
@@ -107,6 +109,10 @@ class VisionModule:
                 ckpt_path = opts.load_checkpoint_path
             
             if ckpt_path: self.load_model(ckpt_path)
+        
+        # Latest raw vision perception and prediction outcomes
+        self.vis_raw = None
+        self.vis_scene = None
 
     def train(self, exp_name=None, resume=False, few_shot=None):
         """
@@ -311,7 +317,8 @@ class VisionModule:
             raise NotImplementedError
 
         with torch.no_grad():
-            output = self.model.base_model.inference(input, do_postprocess=False)
+            output = self.model.base_model.inference(input)
+            output = [out["instances"] for out in output]
             
             if visualize:
                 visualize_sg_predictions(input, output, self.predicates)
@@ -319,12 +326,24 @@ class VisionModule:
         pred_value_fields = output[0].get_fields()
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
-        vis_scene = [
-            { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
-            for obj in pred_values
-        ]
+        # Reformat & resize input image
+        img = convert_image_to_rgb(input[0]["image"].permute(1, 2, 0), "BGR")
+        img = cv2.resize(img, dsize=(input[0]["width"], input[0]["height"]))
 
-        return input[0]["image"], vis_scene
+        # Into more intelligible format...
+        scene = {
+            f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
+            for i, obj in enumerate(pred_values)
+        }
+        for oi, obj in scene.items():
+            obj["pred_relations"] = {
+                f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
+                if oi != f"o{j}"
+            }
+
+        # Store results as state in this vision module
+        self.vis_raw = img
+        self.vis_scene = scene
 
     @has_model
     def add_concept(self):

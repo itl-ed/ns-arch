@@ -21,6 +21,10 @@ class DialogueManager:
         """Clear the current dialogue state to start fresh in a new situation"""
         self.__init__()
     
+    def export_state(self):
+        """Export the current dialogue information state as a dict"""
+        return vars(self)
+    
     def _dem_point(self, vis_raw):
         """
         Simple pointing interface for entities quantified by demonstratives
@@ -32,7 +36,7 @@ class DialogueManager:
 
         rects = {}
         for name, ent in self.referents["env"].items():
-            x1, x2, y1, y2 = ent["bbox"]
+            x1, y1, x2, y2 = ent["bbox"]
             r = Rectangle((x1, y1), x2-x1, y2-y1, facecolor=(0.5, 0.8, 1, 0.2))
 
             ax.add_patch(r)
@@ -133,15 +137,13 @@ class DialogueManager:
 
         return ui_status["choice"]
 
-    def understand(self, usr_in, parser, lex, vis_raw):
+    def understand(self, usr_in, parser, lex, vis_raw, agenda):
         """
         Parse language input into MRS, process into ASP-compatible form, and then
-        update dialogue state. Also return new agenda items.
+        update dialogue state. Also add new agenda items to the provided list.
         """
 
         ui = len(self.record)  # Utterance index
-
-        agenda = []
 
         # Processing natural language into appropriate logical form
         parse = parser.nl_parse(usr_in)
@@ -149,6 +151,8 @@ class DialogueManager:
 
         # Fetch arg1 of index (i.e. sentence 'subject' referent)
         index = parse["relations"]["by_id"][parse["index"]]
+        if not len(index["args"]) > 1:
+            raise ValueError("Input is not a sentence")
         index_arg1 = index["args"][1]
 
         # Whether arg1 is bare NP (signalling generic statement)        
@@ -304,7 +308,7 @@ class DialogueManager:
         elif parse["utt_type"] == "ques":
             # Interrogatives
 
-            ## TODO: Move these to 'generate (answer)' part?
+            ## TODO: Move these to 'generate (answer)' part? ##
             # Determine type of question
             q_type = None
 
@@ -339,20 +343,18 @@ class DialogueManager:
             self.referents["dis"].add(f"x{ref}u{ui}")
         
         # Handle neologisms
-        for rel in parse["relations"]["by_id"].values():
-            if not rel["lexical"]: continue
+        # for rel in parse["relations"]["by_id"].values():
+        #     if not rel["lexical"]: continue
 
-            term = (rel["pos"], rel["predicate"])
+        #     term = (rel["pos"], rel["predicate"])
 
-            # Some reserved terms
-            if term[0] == "q" or \
-                term == ("v", "be") or \
-                term == ("v", "have"): continue
+        #     # Some reserved terms
+        #     if term[0] == "q" or \
+        #         term == ("v", "be") or \
+        #         term == ("v", "have"): continue
 
-            if term not in lex.s2d:
-                agenda.append(("resolve_neologism", term))
-
-        return agenda
+        #     if term not in lex.s2d:
+        #         agenda.append(("resolve_neologism", term))
 
 
 def _varnames_format(rules, const_ents, tail):

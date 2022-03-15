@@ -23,29 +23,24 @@ class LanguageModule:
 
         self.vis_raw = None
 
-    def situate(self, vis_raw, vis_scene, objectness_thresh=0.5):
+    def situate(self, vis_raw, vis_scene):
         """
         Put entities in the physical environment into domain of discourse
         """
+        # No-op if no new visual input
+        if vis_raw is None and vis_scene is None:
+            return
+
         # Start a dialogue information state anew
         self.dialogue.refresh()
 
         # Store raw visual perception so that it can be used during 'pointing' gesture
         self.vis_raw = vis_raw
 
-        # Filter by objectness threshold (recognized objects are already ranked by
-        # objectness score)
-        vis_scene = [
-            obj for obj in vis_scene if obj["pred_objectness"] > objectness_thresh
-        ]
-        # Accordingly crop relation prediction matrices
-        for obj in vis_scene:
-            obj["pred_relations"] = obj["pred_relations"][:len(vis_scene)]
-
         # Incorporate parsed scene graph into dialogue context
-        for oi, obj in enumerate(vis_scene):
+        for oi, obj in vis_scene.items():
             bbox = obj["pred_boxes"]
-            self.dialogue.referents["env"][f"o{oi}"] = {
+            self.dialogue.referents["env"][oi] = {
                 "bbox": bbox,
                 "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
             }
@@ -53,8 +48,8 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names = {i: i for i in self.dialogue.referents["env"]}
 
-    def understand(self, usr_in):
-        return self.dialogue.understand(usr_in, self.semantic, self.lexicon, self.vis_raw)
+    def understand(self, usr_in, agenda):
+        self.dialogue.understand(usr_in, self.semantic, self.lexicon, self.vis_raw, agenda)
 
     def generate(self):
         raise NotImplementedError

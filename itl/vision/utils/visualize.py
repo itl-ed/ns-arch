@@ -2,6 +2,7 @@
 For visualizing predictions from scene graph generation models, using detectron2
 visualization toolkits.
 """
+import cv2
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.widgets import Slider
@@ -20,6 +21,7 @@ def visualize_sg_predictions(inputs, predictions, predicates):
     for input, pred in zip(inputs, predictions):
         img = input["image"]
         img = convert_image_to_rgb(img.permute(1, 2, 0), "BGR")
+        img = cv2.resize(img, dsize=(input["width"], input["height"]))
 
         cls_maxs = pred.pred_classes.max(dim=1)
         cls_maxs = [
@@ -54,13 +56,13 @@ def visualize_sg_predictions(inputs, predictions, predicates):
             v_pred = Visualizer(img, None)
             v_pred.overlay_instances(
                 boxes=pred.pred_boxes[thresh_filter].tensor.cpu().numpy(),
-                labels=[f"{float(obj_label):.2f}: {cls_label} / {att_label}"
-                    for obj_label, cls_label, att_label
-                    in zip(
+                labels=[f"o{oi} ({float(obj_label):.2f}): {cls_label} / {att_label}"
+                    for oi, (obj_label, cls_label, att_label)
+                    in enumerate(zip(
                         pred.pred_objectness[thresh_filter],
                         cls_maxs[:thresh_topk],
                         att_maxs[:thresh_topk]
-                    )
+                    ))
                 ]
             )
 
