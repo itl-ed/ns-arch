@@ -162,6 +162,7 @@ class ITLAgent:
                         ))
             
             # Report beliefs from vision only
+            print(f"A>")
             print(f"A> I am seeing these objects:")
             for oi, preds in results_v.items():
                 print(f"A> {TAB}Object {oi}:")
