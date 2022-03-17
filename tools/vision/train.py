@@ -10,8 +10,6 @@ from itl.opts import parse_arguments
 
 
 if __name__ == "__main__":
-    os.environ["FVCORE_CACHE"] = ...
-
     opts = parse_arguments()
     vision = VisionModule(opts)
     vision.train(exp_name=opts.exp_name, resume=opts.resume_training)
