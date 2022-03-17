@@ -140,8 +140,8 @@ class ITLAgent:
 
             # Organize sensemaking results by object, with category sorted by confidences
             results_v = {
-                args[0]: { "cls": [], "att": [], "rel": [] }
-                for pred, args in marginals_v if pred == "object"
+                args[0]: { "obj": score, "cls": [], "att": [], "rel": [] }
+                for (pred, args), score in marginals_v.items() if pred == "object"
             }
             for atom in marginals_v:
                 pred, args = atom
@@ -165,7 +165,7 @@ class ITLAgent:
             print(f"A>")
             print(f"A> I am seeing these objects:")
             for oi, preds in results_v.items():
-                print(f"A> {TAB}Object {oi}:")
+                print(f"A> {TAB}Object {oi} ({preds['obj']:.2f}):")
 
                 cls_preds = [f"{pr[0][0]} ({pr[1]:.2f})" for pr in preds['cls']]
                 print(f"A> {TAB*2}class: {', '.join(cls_preds)}")
@@ -201,6 +201,8 @@ class ITLAgent:
                         print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
                     
                         self.practical.agenda.append(("resolve_mismatch", m))
+            
+            self.vision.reshow_pred()
 
     def _act(self):
         """Choose & execute actions to process agenda items"""

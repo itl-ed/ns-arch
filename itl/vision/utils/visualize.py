@@ -18,10 +18,10 @@ def visualize_sg_predictions(inputs, predictions, predicates):
         predictions (list): a list that contains final predictions from scene graph
             generation models for the input. Should have the same length as inputs.
     """
-    for input, pred in zip(inputs, predictions):
-        img = input["image"]
+    for inp, pred in zip(inputs, predictions):
+        img = inp["image"]
         img = convert_image_to_rgb(img.permute(1, 2, 0), "BGR")
-        img = cv2.resize(img, dsize=(input["width"], input["height"]))
+        img = cv2.resize(img, dsize=(inp["width"], inp["height"]))
 
         cls_maxs = pred.pred_classes.max(dim=1)
         cls_maxs = [
@@ -122,3 +122,5 @@ def visualize_sg_predictions(inputs, predictions, predicates):
         rel_slider.on_changed(rels_render)
 
         plt.show()
+
+        return fig

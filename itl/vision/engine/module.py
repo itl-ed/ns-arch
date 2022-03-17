@@ -62,6 +62,7 @@ class SceneGraphGenerator(LightningModule):
             code_size=self.base_model.roi_heads.box_predictor.CODE_SIZE,
             loss_type=cfg.MODEL.META.FEW_SHOT_LOSS_TYPE
         )
+        self.meta.to(self.base_model.device)
 
         self.start_iter = 0
         self.max_iter = self.cfg.SOLVER.MAX_ITER

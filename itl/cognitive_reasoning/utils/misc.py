@@ -7,7 +7,7 @@ from collections import defaultdict
 import clingo
 
 
-def sample_from_top(prog, k, s=10, w=100):
+def sample_from_top(prog, k, s=5, w=50):
     """
     Find the best model(s) with the highest total weights for the given program, then
     keep sampling models within a slinding cost window until k models are sampled.
@@ -28,11 +28,7 @@ def sample_from_top(prog, k, s=10, w=100):
             models.append((m.symbols(atoms=True), m.cost[0]))
             if m.optimality_proven:
                 cost_floor = m.cost[0]
-    
-    # models = {
-    #     ",".join([str(a) for a in m[0] if a.name != "unsat"]): (m[0], m[1])
-    #     for m in models
-    # }
+
     sampled += [m for m in models if m[1]==cost_floor]
 
     # Then keep sampling models within a sliding cost window until we have k models

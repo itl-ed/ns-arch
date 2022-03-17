@@ -88,6 +88,8 @@ class _VGMapper(DatasetMapper):
         # When ground truth boxes are needed as proposals
         if self.gt_box_proposals:
             target.proposal_boxes = target.gt_boxes
+            if not self.is_train:
+                return target        # Can return during inference
 
         assert hasattr(self, "num_preds"), "VG mapper doesn't have any predicate vocab size info"
 

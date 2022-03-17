@@ -401,7 +401,7 @@ def _log_classification_stats(sims, gt_match, prefix):
 
     Args:
         sims: torch.tensor (N*N); Code-feature agreement logits
-        gt_classes: torch.tensor (N*N); Ground-truth category agreement labels
+        gt_match: torch.tensor (N*N); Ground-truth category agreement labels
         prefix: str; Classification metric name prefix
     """
     storage = get_event_storage()

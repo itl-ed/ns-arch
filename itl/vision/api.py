@@ -13,6 +13,7 @@ import cv2
 import torch
 import detectron2.data.transforms as T
 import pytorch_lightning as pl
+import matplotlib.pyplot as plt
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
 from detectron2.config import get_cfg, CfgNode
@@ -113,6 +114,9 @@ class VisionModule:
         # Latest raw vision perception and prediction outcomes
         self.vis_raw = None
         self.vis_scene = None
+
+        # Visualized prediction summary (pyplot figure)
+        self.vis_summ = None
 
     def train(self, exp_name=None, resume=False, few_shot=None):
         """
@@ -307,28 +311,28 @@ class VisionModule:
         self.model.eval()
 
         if isinstance(image, str):
-            input = { "file_name": image }
+            inp = { "file_name": image }
             if bboxes is None:
-                input = [self.dm.mapper_batch["test"](input)]
+                inp = [self.dm.mapper_batch["test"](inp)]
             else:
                 raise NotImplementedError
-                input = [self.dm.mapper_batch["test_props"](input)]
+                inp = [self.dm.mapper_batch["test_props"](inp)]
         else:
             raise NotImplementedError
 
         with torch.no_grad():
-            output = self.model.base_model.inference(input)
+            output = self.model.base_model.inference(inp)
             output = [out["instances"] for out in output]
             
             if visualize:
-                visualize_sg_predictions(input, output, self.predicates)
+                self.vis_summ = visualize_sg_predictions(inp, output, self.predicates)
         
         pred_value_fields = output[0].get_fields()
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
         # Reformat & resize input image
-        img = convert_image_to_rgb(input[0]["image"].permute(1, 2, 0), "BGR")
-        img = cv2.resize(img, dsize=(input[0]["width"], input[0]["height"]))
+        img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
+        img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
 
         # Into more intelligible format...
         scene = {
@@ -344,6 +348,14 @@ class VisionModule:
         # Store results as state in this vision module
         self.vis_raw = img
         self.vis_scene = scene
+    
+    def reshow_pred(self):
+        assert self.vis_summ is not None, "No predictions have been made yet"
+        dummy = plt.figure()
+        new_manager = dummy.canvas.manager
+        new_manager.canvas.figure = self.vis_summ
+        self.vis_summ.set_canvas(new_manager.canvas)
+        plt.show()
 
     @has_model
     def add_concept(self):
