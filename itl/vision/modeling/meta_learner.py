@@ -32,19 +32,19 @@ class MetaLearner(nn.Module):
         # Code generators for class/attribute/relation categories, implemented as two
         # bottlenecked fully-connected layers
         self.cls_code_gen = nn.Sequential(
-            nn.Linear(code_size, code_size // 2),
+            nn.Linear(code_size, code_size),
             self.relu,
-            nn.Linear(code_size // 2, code_size)
+            nn.Linear(code_size, code_size)
         )
         self.att_code_gen = nn.Sequential(
-            nn.Linear(code_size, code_size // 2),
+            nn.Linear(code_size, code_size),
             self.relu,
-            nn.Linear(code_size // 2, code_size)
+            nn.Linear(code_size, code_size)
         )
         self.rel_code_gen = nn.Sequential(
-            nn.Linear(code_size, code_size // 2),
+            nn.Linear(code_size, code_size),
             self.relu,
-            nn.Linear(code_size // 2, code_size)
+            nn.Linear(code_size, code_size)
         )
 
     def forward(self, episodes, base_model):

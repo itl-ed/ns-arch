@@ -91,6 +91,13 @@ class SceneGraphGenerator(LightningModule):
 
         ckpt["iteration"] = self.storage.iter
 
+        # Don't save meta-learner module parameters if batch training
+        if self.few_shot is None:
+            params = ckpt["state_dict"]
+            for p in list(params.keys()):
+                    if not p.startswith("base_model"):
+                        del params[p]
+
         md = MetadataCatalog.get(self.cfg.DATASETS.TRAIN[0])
         ckpt["predicates"] = {
             "cls": md.classes,
