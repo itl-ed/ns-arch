@@ -16,7 +16,7 @@ import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
-from detectron2.config import get_cfg, CfgNode
+from detectron2.config import get_cfg
 from detectron2.data.detection_utils import convert_image_to_rgb
 from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -53,13 +53,8 @@ class VisionModule:
         if opts.config_file_path:
             cfg.merge_from_file(opts.config_file_path)
 
-        ### TEMPORARY for search experiments; TODO: erase properly ###
         cfg.MODEL.ROI_HEADS.WEIGHT_EXPONENT = opts.weight_exponent
         cfg.MODEL.ROI_HEADS.WEIGHT_TARGET_MEAN = opts.weight_target_mean
-
-        cfg.MODEL.META = CfgNode()
-        cfg.MODEL.META.FEW_SHOT_LOSS_TYPE = opts.few_shot_loss_type
-        ### TEMPORARY for search experiments; TODO: erase properly ###
 
         cfg.SOLVER.MAX_ITER = opts.max_iter
         cfg.OUTPUT_DIR = opts.output_dir_path
@@ -298,8 +293,7 @@ class VisionModule:
         made for only those instances.
 
         Args:
-            image: str; input image, passed as path to image file (for now; TODO: enable
-                passing image ndarrays directly as well)
+            image: str; input image, passed as path to image file
             bboxes: N*4 array-like (optional); set of bounding boxes provided
             visualize: bool (optional); whether to show visualization of inference result
                 on a pop-up window
@@ -310,22 +304,22 @@ class VisionModule:
         self.dm.setup("test")
         self.model.eval()
 
+        # Image data
         if isinstance(image, str):
             inp = { "file_name": image }
-            if bboxes is None:
-                inp = [self.dm.mapper_batch["test"](inp)]
-            else:
-                raise NotImplementedError
-                inp = [self.dm.mapper_batch["test_props"](inp)]
         else:
-            raise NotImplementedError
+            inp = { "image": image }
+
+        # With/without boxes provided
+        if bboxes is None:
+            inp = [self.dm.mapper_batch["test"](inp)]
+        else:
+            inp["annotations"] = bboxes
+            inp = [self.dm.mapper_batch["test_props"](inp)]
 
         with torch.no_grad():
             output = self.model.base_model.inference(inp)
             output = [out["instances"] for out in output]
-            
-            if visualize:
-                self.vis_summ = visualize_sg_predictions(inp, output, self.predicates)
         
         pred_value_fields = output[0].get_fields()
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
@@ -334,7 +328,7 @@ class VisionModule:
         img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
         img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
 
-        # Into more intelligible format...
+        # Label and reorganize into a more intelligible format...
         scene = {
             f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
             for i, obj in enumerate(pred_values)
@@ -344,6 +338,9 @@ class VisionModule:
                 f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
                 if oi != f"o{j}"
             }
+        
+        if visualize:
+            self.vis_summ = visualize_sg_predictions(img, scene, self.predicates)
 
         # Store results as state in this vision module
         self.vis_raw = img

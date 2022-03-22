@@ -3,6 +3,9 @@ Outermost wrapper containing ITL agent API
 """
 import readline
 import rlcompleter
+from collections import OrderedDict
+
+from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
 from .vision import VisionModule
@@ -17,11 +20,15 @@ TAB = "\t"  # For use in format strings
 class ITLAgent:
 
     def __init__(self, opts):
-        self.lt_mem = LongTermMemoryModule(opts)
+        # Initialize component modules
+        self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
         self.lang = LanguageModule(opts, lex=self.lt_mem.lexicon)
         self.cognitive = CognitiveReasonerModule(kb=self.lt_mem.knowledge_base)
         self.practical = PracticalReasonerModule()
+
+        # Initialize empty lexicon with concepts in visual module
+        self.lt_mem.lexicon.fill_from_vision(self.vision.predicates)
 
         # Image file selection CUI
         self.dcompleter = DatasetImgsCompleter()
@@ -121,6 +128,23 @@ class ITLAgent:
             else:
                 valid_input = True
                 break
+        
+        # If a new entity is registered as a result of understanding the latest
+        # input, re-run vision module to update with new predictions for it
+        if len(self.lang.dialogue.referents["env"]) > len(self.vision.vis_scene):
+            bboxes = [
+                {
+                    "bbox": ent["bbox"],
+                    "bbox_mode": BoxMode.XYXY_ABS,
+                    "objectness_scores": self.vision.vis_scene[name]["pred_objectness"]
+                        if name in self.vision.vis_scene else None
+                }
+                for name, ent in self.lang.dialogue.referents["env"].items()
+            ]
+
+            # Predict on latest raw data stored
+            vis_raw_bgr = self.vision.vis_raw[:, :, [2,1,0]]
+            self.vision.predict(vis_raw_bgr, bboxes=bboxes, visualize=True)
     
     def _update_belief(self):
         """Form beliefs based on visual and/or language input"""
@@ -160,6 +184,7 @@ class ITLAgent:
                         results_v[args[0]][cat_type].append((
                             self.lang.lexicon.d2s[(int(cat_ind), cat_type)], args[1], confidence
                         ))
+            results_v = OrderedDict(sorted(results_v.items(), key=lambda v: int(v[0].strip("o"))))
             
             # Report beliefs from vision only
             print(f"A>")
@@ -206,5 +231,4 @@ class ITLAgent:
 
     def _act(self):
         """Choose & execute actions to process agenda items"""
-        for todo in reversed(self.practical.agenda):
-            print(todo)
+        self.practical.act()

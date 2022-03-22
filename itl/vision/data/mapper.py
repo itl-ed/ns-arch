@@ -58,7 +58,15 @@ class _VGMapper(DatasetMapper):
         instances, filtered = utils.filter_empty_instances(instances, return_mask=True)
 
         if self.gt_box_proposals:
+            if all(["objectness_scores" in obj for obj in annos]):
+                instances.pred_objectness = torch.stack([
+                    torch.tensor(obj["objectness_scores"])
+                        if obj["objectness_scores"] is not None
+                        else torch.tensor([1])
+                    for obj in annos
+                ])
             dataset_dict["proposals"] = instances
+
             return
         else:
             dataset_dict["instances"] = instances
@@ -203,12 +211,16 @@ class VGBatchMapper(_VGMapper):
         """
         dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
         # USER: Write your own image loading if it's not from a file
-        image = utils.read_image(dataset_dict["file_name"], format=self.image_format)
+        if "file_name" in dataset_dict:
+            image = utils.read_image(dataset_dict["file_name"], format=self.image_format)
+        else:
+            assert "image" in dataset_dict, "Must provide image data if 'file_name' not given"
+            image = dataset_dict["image"]
 
-        # It really feels guilty to do this...
         try:
             utils.check_image_size(dataset_dict, image)
         except SizeMismatchError:
+            # It really feels guilty to do this...
             logger.debug(f"Size mismatch happened with f{dataset_dict['file_name']}")
 
         # USER: Remove if you don't do semantic/panoptic segmentation.

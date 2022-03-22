@@ -16,7 +16,7 @@ EPS = 1e-10           # Value used for numerical stabilization
 
 class MetaLearner(nn.Module):
 
-    def __init__(self, code_size, loss_type):
+    def __init__(self, code_size):
         """
         Args:
             code_size: int; size of category code (predicate embedding) parametrizing each
@@ -25,12 +25,10 @@ class MetaLearner(nn.Module):
         """
         super().__init__()
 
-        self.loss_type = loss_type
-
         self.relu = nn.ReLU()
 
         # Code generators for class/attribute/relation categories, implemented as two
-        # bottlenecked fully-connected layers
+        # fully-connected layers
         self.cls_code_gen = nn.Sequential(
             nn.Linear(code_size, code_size),
             self.relu,
@@ -70,7 +68,7 @@ class MetaLearner(nn.Module):
             (Same as self.forward())
         
         Returns:
-            Dict[str, torch.tensor]; dict instance containing loss values (NCA, regularization)
+            Dict[str, torch.tensor]; dict instance containing loss values (episode, regularization)
         """
         rh = base_model.roi_heads    # Shortcut for brevity
 
@@ -92,37 +90,25 @@ class MetaLearner(nn.Module):
                     torch.tensor(cs, device=base_model.device) for cs in cats
                 ], dim=0)
 
-                if self.loss_type == "nca":
-                    # Neighborhood componenet analysis (NCA) loss
+                # Categories by instance indices
+                Is = [len(cs) for cs in cats]     # (All instances)
+                Qs = [Ii-K for Ii in Is]          # (Query sets only)
+                I_slices = np.cumsum([0]+Is)      # (Instance indices in cat'ed tensors)
 
-                    # Dot product (code.feature) for every instance pair
-                    sims = (codes[:,None,:] * self.relu(features)[None,:,:]).sum(dim=-1)
+                # Category codes from support set, features from query set
+                S_codes = [codes[I_slices[c]:I_slices[c+1]] for c in range(N)]
+                S_codes = torch.stack([c[:K].mean(dim=0) for c in S_codes], dim=0)
 
-                    # Ground truth category agreement
-                    gt_match = cats_cat[:,None] == cats_cat[None,:]
+                Q_features = [features[I_slices[c]:I_slices[c+1]] for c in range(N)]
+                Q_features = torch.cat([f[K:] for f in Q_features], dim=0)
 
-                else:
-                    # More traditional "support vs. query" training loss
-                    assert self.loss_type == "sq", "Invalid loss type"
-                    
-                    Is = [len(cs) for cs in cats]
-                    Qs = [Ii-K for Ii in Is]
-                    I_slices = np.cumsum([0]+Is)
+                # Dot product (code.feature) between extracted codes vs. query instances
+                sims = (S_codes[:,None,:] * self.relu(Q_features)[None,:,:]).sum(dim=-1)
 
-                    # Category codes from support set, features from query set
-                    S_codes = [codes[I_slices[c]:I_slices[c+1]] for c in range(N)]
-                    S_codes = torch.stack([c[:K].mean(dim=0) for c in S_codes], dim=0)
-
-                    Q_features = [features[I_slices[c]:I_slices[c+1]] for c in range(N)]
-                    Q_features = torch.cat([f[K:] for f in Q_features], dim=0)
-
-                    # Dot product (code.feature) between extracted codes vs. query instances
-                    sims = (S_codes[:,None,:] * self.relu(Q_features)[None,:,:]).sum(dim=-1)
-
-                    gt_match = torch.stack([
-                        F.pad(torch.ones(Qs[c]), (sum(Qs[:c]), sum(Qs[c+1:])))
-                        for c in range(N)
-                    ], dim=0).to(base_model.device)
+                gt_match = torch.stack([
+                    F.pad(torch.ones(Qs[c]), (sum(Qs[:c]), sum(Qs[c+1:])))
+                    for c in range(N)
+                ], dim=0).to(base_model.device)
                 
                 losses[f"loss_fs_{cat_type}"] = \
                     losses[f"loss_fs_{cat_type}"] + F.binary_cross_entropy_with_logits(

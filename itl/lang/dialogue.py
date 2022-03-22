@@ -1,6 +1,9 @@
+import torch
+import torchvision
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-
+from matplotlib.widgets import RectangleSelector
 
 class DialogueManager:
     """Maintain dialogue state and handle NLU, NLG in context"""
@@ -32,24 +35,47 @@ class DialogueManager:
         ax = plt.gca()
         ax.axes.xaxis.set_visible(False)
         ax.axes.yaxis.set_visible(False)
+        ax.set_title("Press 't' to toggle bounding box selector")
         ax.imshow(vis_raw)
 
+        # Bounding boxes for recognized entities
         rects = {}
         for name, ent in self.referents["env"].items():
             x1, y1, x2, y2 = ent["bbox"]
-            r = Rectangle((x1, y1), x2-x1, y2-y1, facecolor=(0.5, 0.8, 1, 0.2))
+            r = Rectangle(
+                (x1, y1), x2-x1, y2-y1,
+                linewidth=1, edgecolor=(0.5, 0.8, 1, 0.6),
+                facecolor=(0.5, 0.8, 1, 0.2)
+            )
 
             ax.add_patch(r)
-            r.set_visible(name.startswith("o"))  # Toggle: object visible, part not
+            r.set_visible(True)
 
             rects[name] = r
         
+        # Tracking UI states
         ui_status = {
             "hovered": {e: False for e in self.referents["env"]},
             "focus": None,
             "clicked": None,
             "choice": None
         }
+
+        # Rectangle selector for drawing new bounding box
+        def bbox_draw_callback(ev_click, ev_release):
+            x1, y1 = ev_click.xdata, ev_click.ydata
+            x2, y2 = ev_release.xdata, ev_release.ydata
+
+            ui_status["choice"] = (x1, y1, x2, y2)
+            plt.close()
+        selector = RectangleSelector(
+            ax, bbox_draw_callback,
+            minspanx=1, minspany=1,
+            spancoords="pixels",
+            useblit=True,
+            interactive=True
+        )
+        selector.set_active(False)
 
         fig = plt.gcf()
 
@@ -97,6 +123,10 @@ class DialogueManager:
             fig.canvas.draw_idle()
         
         def mouse_press(ev):
+            # Ignore when selecting by drawing a new bbox
+            if selector.get_active():
+                return
+
             ui_status["clicked"] = ui_status["focus"]
 
             rect = rects[ui_status["clicked"]]
@@ -105,6 +135,10 @@ class DialogueManager:
             fig.canvas.draw_idle()
 
         def mouse_release(ev):
+            # Ignore when selecting by drawing a new bbox
+            if selector.get_active():
+                return
+
             rect = rects[ui_status["clicked"]]
 
             cont, _ = rect.contains(ev)
@@ -120,20 +154,59 @@ class DialogueManager:
                 ui_status["clicked"] = None
 
                 fig.canvas.draw_idle()
-        
+
         def key_press(ev):
-            if ev.key == "shift":
+            if ev.key == "t":
+                is_active = selector.get_active()
+                selector.set_active(not is_active)
+
                 for r in rects.values():
-                    visible = r.get_visible()
-                    r.set_visible(not visible)
-                
-                fig.canvas.draw_idle()
+                    r.set_visible(is_active)
+
+            fig.canvas.draw_idle()
 
         fig.canvas.mpl_connect("motion_notify_event", hover)
         fig.canvas.mpl_connect("button_press_event", mouse_press)
         fig.canvas.mpl_connect("button_release_event", mouse_release)
         fig.canvas.mpl_connect("key_press_event", key_press)
         plt.show()
+
+        # If the choice is a newly drawn bounding box and doesn't overlap with 
+        # any other box with high IoU, register this as new entity and return
+        is_drawn = type(ui_status["choice"]) is tuple
+        if is_drawn:
+            # First check if there's any existing high-IoU bounding box; by 'high'
+            # we refer to some arbitrary threshold -- let's use 0.8 here
+            drawn_bbox = np.array(ui_status["choice"])
+            env_ref_bboxes = torch.stack(
+                [torch.tensor(e["bbox"]) for e in self.referents["env"].values()]
+            )
+
+            iou_thresh = 0.8
+            ious = torchvision.ops.box_iou(
+                torch.tensor(drawn_bbox)[None,:], env_ref_bboxes
+            )
+            best_match = ious.max(dim=-1)
+
+            if best_match.values.item() > iou_thresh:
+                # Assume the 'pointed' entity is actually this one
+                matched_ent = list(self.referents["env"].keys())[2]
+                print(f"A> I'm going to assume you pointed at '{matched_ent}'...")
+
+                ui_status["choice"] = matched_ent
+            else:
+                # Register the entity as a novel environment referent
+                new_ent = f"o{len(env_ref_bboxes)}"
+                
+                print(f"A> I wasn't aware of this as an entity.")
+                print(f"A> Registering as new object '{new_ent}'...")
+                self.referents["env"][new_ent] = {
+                    "bbox": drawn_bbox,
+                    "area": (drawn_bbox[2]-drawn_bbox[0]) * (drawn_bbox[3]-drawn_bbox[1])
+                }
+                self.referent_names[new_ent] = new_ent
+
+                ui_status["choice"] = new_ent
 
         return ui_status["choice"]
 
@@ -186,9 +259,8 @@ class DialogueManager:
                 if rel["carg"] not in self.referent_names:
                     # Couldn't resolve the name; explicitly ask again for name resolution
                     print(f"A> What were you referring to by '{rel['carg']}'?")
-                    entity = self._dem_point(vis_raw)
 
-                    self.referent_names[rel["carg"]] = entity
+                    self.referent_names[rel["carg"]] = self._dem_point(vis_raw)
 
                 referent = var_map[rel["args"][0]]
                 const_ents.add(referent)
@@ -236,7 +308,6 @@ class DialogueManager:
                     
                     rule_body = [(bl[0], bl[1], tuple(bl[2])) for bl in rule_body]
                     rule_body = list(set(rule_body))  # Remove duplicate literals
-                    rule_body = _filter_implied(rule_body)
 
                     rule = (rule_head, rule_body, choice)
                     rules.append(rule)
@@ -287,14 +358,12 @@ class DialogueManager:
                         constr_body = additional_conds + additional_mains
                         constr_body = [(bl[0], bl[1], tuple(bl[2])) for bl in constr_body]
                         constr_body = list(set(constr_body))  # Remove duplicate literals
-                        constr_body = _filter_implied(constr_body)
 
                         constr = (None, constr_body, False)
                         constraints.append(constr)
                 
                 facts = [(l[0], l[1], tuple(l[2])) for l in facts]
                 facts = list(set(facts))
-                facts = _filter_implied(facts)
 
                 # Facts with no body literals (keep formats consistent for rules and facts)
                 facts = [(l, None, False) for l in facts]
@@ -380,21 +449,3 @@ def _varnames_format(rules, const_ents, tail):
         formatted.append((new_h, new_b, c))
 
     return formatted
-
-
-def _filter_implied(literals):
-    """ Remove literals if already implied by others; for now only consider '_part_of' """
-
-    filtered = []
-
-    for l1 in literals:
-
-        implied = False
-        for l2 in literals:
-            if l1[0] == "part_of" and l1[0] != l2[0] and \
-                    l2[0].endswith("_of") and l1[2] == l2[2]:
-                implied = True; break
-
-        if not implied: filtered.append(l1)
-
-    return filtered

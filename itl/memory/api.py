@@ -8,6 +8,6 @@ from .lexicon import Lexicon
 
 class LongTermMemoryModule:
     
-    def __init__(self, opts):
-        self.lexicon = Lexicon(opts)
+    def __init__(self):
+        self.lexicon = Lexicon()
         self.knowledge_base = ...

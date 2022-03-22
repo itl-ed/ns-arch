@@ -2,125 +2,137 @@
 For visualizing predictions from scene graph generation models, using detectron2
 visualization toolkits.
 """
-import cv2
+from collections import defaultdict
+
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.widgets import Slider
 from detectron2.utils.visualizer import Visualizer
 from detectron2.utils.colormap import random_color
-from detectron2.data.detection_utils import convert_image_to_rgb
 
 
-def visualize_sg_predictions(inputs, predictions, predicates):
+def visualize_sg_predictions(img, scene, predicates):
     """
     Args:
-        inputs (list): a list that contains input to the model.
-        predictions (list): a list that contains final predictions from scene graph
-            generation models for the input. Should have the same length as inputs.
+        img: numpy.array; RGB image data
+        scene: dict; a parsed scene graph, obtained from visual module output
     """
-    for inp, pred in zip(inputs, predictions):
-        img = inp["image"]
-        img = convert_image_to_rgb(img.permute(1, 2, 0), "BGR")
-        img = cv2.resize(img, dsize=(inp["width"], inp["height"]))
+    # Prepare labels for class/attribute/relation predictions; show only the categories
+    # with the highest scores
+    cls_argmaxs = [obj["pred_classes"].argmax(axis=-1) for obj in scene.values()]
+    cls_maxs = [obj["pred_classes"].max(axis=-1) for obj in scene.values()]
+    cls_labels = {
+        oi: (predicates['cls'][i], v)
+        for oi, i, v in zip(scene, cls_argmaxs, cls_maxs)
+    }
 
-        cls_maxs = pred.pred_classes.max(dim=1)
-        cls_maxs = [
-            f"{predicates['cls'][i]} ({v:.2f})"
-            for i, v in zip(cls_maxs.indices, cls_maxs.values)
-        ]
-        att_maxs = pred.pred_attributes.max(dim=1)
-        att_maxs = [
-            f"{predicates['att'][i]} ({v:.2f})"
-            for i, v in zip(att_maxs.indices, att_maxs.values)
-        ]
-        rel_maxs = pred.pred_relations.max(dim=2)
+    att_argmaxs = [obj["pred_attributes"].argmax(axis=-1) for obj in scene.values()]
+    att_maxs = [obj["pred_attributes"].max(axis=-1) for obj in scene.values()]
+    att_labels = {
+        oi: (predicates['att'][i], v)
+        for oi, i, v in zip(scene, att_argmaxs, att_maxs)
+    }
 
-        rel_colors = [
-            random_color(rgb=True, maximum=1) for _ in range(len(predicates['rel']))
-        ]
+    rel_argmaxs = [
+        { obj2: rels.argmax(axis=-1) for obj2, rels in obj["pred_relations"].items() }
+        for obj in scene.values()
+    ]
+    rel_maxs = [
+        { obj2: rels.max(axis=-1) for obj2, rels in obj["pred_relations"].items() }
+        for obj in scene.values()
+    ]
+    rel_labels = {
+        oi: { obj: (predicates['rel'][indices[obj]], values[obj]) for obj in indices }
+        for oi, indices, values in zip(scene, rel_argmaxs, rel_maxs)
+    }
 
-        # Show in pop-up window
-        fig = plt.gcf()
-        ax = plt.gca()
-        ax.axes.xaxis.set_visible(False)
-        ax.axes.yaxis.set_visible(False)
+    rel_colors = defaultdict(lambda: random_color(rgb=True, maximum=1))
 
-        thresholds = { "obj": 0.7, "rel": 0.7 }
+    # Show in pop-up window
+    fig = plt.gcf()
+    ax = plt.gca()
+    ax.axes.xaxis.set_visible(False)
+    ax.axes.yaxis.set_visible(False)
 
-        def render(obj_thresh, rel_thresh):
-            thresh = obj_thresh
-            thresh_filter = (pred.pred_objectness > thresh).view(-1)
-            thresh_topk = int(thresh_filter.sum())
+    thresholds = { "obj": 0.7, "rel": 0.7 }
 
-            # Boxes and classes
-            v_pred = Visualizer(img, None)
-            v_pred.overlay_instances(
-                boxes=pred.pred_boxes[thresh_filter].tensor.cpu().numpy(),
-                labels=[f"o{oi} ({float(obj_label):.2f}): {cls_label} / {att_label}"
-                    for oi, (obj_label, cls_label, att_label)
-                    in enumerate(zip(
-                        pred.pred_objectness[thresh_filter],
-                        cls_maxs[:thresh_topk],
-                        att_maxs[:thresh_topk]
-                    ))
-                ]
-            )
+    def render(obj_thresh, rel_thresh):
+        # Filter predictions to visualize by objectness threshold
+        objs_filtered = sorted(
+            {
+                oi for oi, obj in scene.items()
+                if obj["pred_objectness"] > obj_thresh
+            },
+            key=lambda t: int(t.strip("o"))
+        )
 
-            # Relations; show only those between objects with high objectness scores
-            occurred_rels = []
-            for i in range(thresh_topk):
-                for j in range(thresh_topk):
-                    if i==j: continue
+        # Boxes and classes
+        v_pred = Visualizer(img, None)
+        v_pred.overlay_instances(
+            boxes=np.stack([scene[oi]["pred_boxes"] for oi in objs_filtered]),
+            labels=[
+                f"{oi} ({float(scene[oi]['pred_objectness']):.2f}): "
+                f"{cls_labels[oi][0]} ({cls_labels[oi][1]:.2f}) / "
+                f"{att_labels[oi][0]} ({att_labels[oi][1]:.2f})"
+                for oi in objs_filtered
+            ]
+        )
 
-                    rel_ind = int(rel_maxs.indices[i,j])
-                    score = float(rel_maxs.values[i,j])
+        # Relations; show only those between objects with high objectness scores
+        occurred_rels = []
+        for oi in objs_filtered:
+            for oj in objs_filtered:
+                if oi==oj: continue
 
-                    if score > rel_thresh:
-                        occurred_rels.append(rel_ind)
+                pred, score = rel_labels[oi][oj]
 
-                        obj1 = pred.pred_boxes[i].tensor[0]
-                        obj2 = pred.pred_boxes[j].tensor[0]
-                        v_pred.draw_line(
-                            [float(obj1[0]+10), float(obj2[0]+10)],
-                            [float(obj1[1]+10), float(obj2[1]+10)],
-                            color=rel_colors[rel_ind],
-                            linewidth=((score*2)**4)
-                        )
+                if score > rel_thresh:
+                    occurred_rels.append(pred)
 
-            pred_img = v_pred.output
+                    box1 = scene[oi]["pred_boxes"]
+                    box2 = scene[oj]["pred_boxes"]
 
-            # Relation legend
-            pred_img.ax.legend(
-                handles=[
-                    Patch(color=rel_colors[r], label=predicates['rel'][r])
-                    for r in set(occurred_rels)
-                ]
-            )
+                    v_pred.draw_line(
+                        [float(box1[0]+10), float(box2[0]+10)],
+                        [float(box1[1]+10), float(box2[1]+10)],
+                        color=rel_colors[pred],
+                        linewidth=((score*1.5)**3)
+                    )
 
-            ax.imshow(pred_img.get_image())
+        pred_img = v_pred.output
 
-            fig.canvas.draw_idle()
-        
-        def objs_render(val):
-            thresholds["obj"] = val
-            render(thresholds["obj"], thresholds["rel"])
-        def rels_render(val):
-            thresholds["rel"] = val
-            render(thresholds["obj"], thresholds["rel"])
-        
+        # Relation legend
+        pred_img.ax.legend(
+            handles=[
+                Patch(color=rel_colors[r], label=r) for r in set(occurred_rels)
+            ]
+        )
+
+        ax.imshow(pred_img.get_image())
+
+        fig.canvas.draw_idle()
+    
+    def objs_render(val):
+        thresholds["obj"] = val
         render(thresholds["obj"], thresholds["rel"])
+    def rels_render(val):
+        thresholds["rel"] = val
+        render(thresholds["obj"], thresholds["rel"])
+    
+    render(thresholds["obj"], thresholds["rel"])
 
-        obj_slider = Slider(
-            plt.axes([0.25, 0.05, 0.6, 0.03]),
-            "Obj. score", 0.0, 1.0, valinit=thresholds["obj"]
-        )
-        obj_slider.on_changed(objs_render)
-        rel_slider = Slider(
-            plt.axes([0.25, 0.02, 0.6, 0.03]),
-            "Rel. score", 0.0, 1.0, valinit=thresholds["rel"]
-        )
-        rel_slider.on_changed(rels_render)
+    obj_slider = Slider(
+        plt.axes([0.25, 0.05, 0.6, 0.03]),
+        "Obj. score", 0.0, 1.0, valinit=thresholds["obj"]
+    )
+    obj_slider.on_changed(objs_render)
+    rel_slider = Slider(
+        plt.axes([0.25, 0.02, 0.6, 0.03]),
+        "Rel. score", 0.0, 1.0, valinit=thresholds["rel"]
+    )
+    rel_slider.on_changed(rels_render)
 
-        plt.show()
+    plt.show()
 
-        return fig
+    return fig

@@ -59,8 +59,7 @@ class SceneGraphGenerator(LightningModule):
 
         # Few-shot-learned meta learder
         self.meta = MetaLearner(
-            code_size=self.base_model.roi_heads.box_predictor.CODE_SIZE,
-            loss_type=cfg.MODEL.META.FEW_SHOT_LOSS_TYPE
+            code_size=self.base_model.roi_heads.box_predictor.CODE_SIZE
         )
         self.meta.to(self.base_model.device)
 
@@ -443,6 +442,8 @@ class SceneGraphGenerator(LightningModule):
                 wandb.finish()
     
     def predict_step(self, batch, batch_idx):
+        raise NotImplementedError("Deprecated, need fix to conform with updated visualize_sg_predictions()")
+
         assert hasattr(self, "predicates"), "Need predicate name info for predict_step()"
 
         if not isinstance(batch, list):

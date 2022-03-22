@@ -8,3 +8,17 @@ class PracticalReasonerModule:
     def __init__(self):
         self.agenda = []
 
+    def act(self):
+        """
+        Just eagerly try to resolve each item in the agenda stack from the top as much
+        as possible. I wonder if we'll ever need a more sophisticated mechanism than this
+        simple, greedy method for a good while?
+        """
+        for todo in reversed(self.agenda):
+            self._resolve(todo)
+    
+    def _resolve(self, todo):
+        """
+        Clear a to-do item off the agenda by choosing and executing an action accordingly
+        """
+        ...

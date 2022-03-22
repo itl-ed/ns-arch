@@ -18,21 +18,21 @@ from collections import defaultdict
 
 import numpy as np
 
-from .utils import sample_from_top, marginalize
+from .utils import sample_models, marginalize
 
 
 SCALE_PREC = 3e2   # For preserving some float weight precision
 LARGE = 2e1        # Sufficiently large logit to use in place of, say, float('inf')
 EPS = 1e-10        # Value used for numerical stabilization
 
-K_M = 100          # Number of models to sample, from the most optimal
+K_M = 100          # Number of models to sample
 
 U_WEIGHT = 8       # How much the agent values information provided by the user
 
 SR_THRES = -math.log(0.5)     # Surprisal threshold
 
 
-def sensemake_vis(vis_scene, objectness_thresh=0.5, category_thresh=0.1):
+def sensemake_vis(vis_scene, objectness_thresh=0.7, category_thresh=0.7):
     """
     Combine raw visual perception outputs from the vision module (predictions with confidence)
     with existing knowledge to make final verdicts on the state of affairs, 'all things considered'.
@@ -145,14 +145,14 @@ def sensemake_vis(vis_scene, objectness_thresh=0.5, category_thresh=0.1):
 
     # Solve with clingo to find the best K_M models of the program
     prog += pprog
-    models_v = sample_from_top(prog, K_M)
+    models_v = sample_models(prog, K_M)
 
     # Rescale weights, and don't forget to flip signs of the penalties
     models_v = [(m[0], -m[1]/SCALE_PREC) for m in models_v]
 
-    # Subtract minimum weight sum for numerical stability
-    min_ws = min([m[1] for m in models_v])
-    models_v = [(m[0], m[1]-min_ws) for m in models_v]
+    # Subtract maximum weight sum for numerical stability
+    max_ws = max([m[1] for m in models_v])
+    models_v = [(m[0], m[1]-max_ws) for m in models_v]
 
     # Compute marginals
     marginals_v = marginalize(models_v)
@@ -271,7 +271,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         # By querying for the optimal assignment, essentially we are giving the user a 'benefit
         # of doubt', such that any statements made by the user are considered as True, and the
         # agent will try to find the 'best' assignment to make it so.
-        models_a = sample_from_top(aprog, 1)
+        models_a = sample_models(aprog, 1)
 
         best_assignment = [atom.arguments for atom in models_a[0][0] if atom.name == "assign"]
         best_assignment = {str(args[0]): str(args[1]) for args in best_assignment}
@@ -300,7 +300,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     
     # Finally, reasoning with all visual+language info
     prog += dprog
-    models_vl = sample_from_top(prog, K_M)
+    models_vl = sample_models(prog, K_M)
     models_vl = [(m[0], -m[1]/SCALE_PREC) for m in models_vl]
 
     min_ws = min([m[1] for m in models_vl])

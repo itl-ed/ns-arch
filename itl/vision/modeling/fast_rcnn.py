@@ -492,7 +492,10 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
             result.pred_relations = rel_scores_per_image
             if boxes_provided:
                 result.pred_boxes = proposals_per_image.proposal_boxes
-                result.pred_objectness = torch.ones_like(objectness_scores_per_image)
+                if proposals_per_image.has("pred_objectness"):
+                    result.pred_objectness = proposals_per_image.pred_objectness
+                else:
+                    result.pred_objectness = torch.ones_like(objectness_scores_per_image)
             else:
                 result.pred_boxes = Boxes(boxes_per_image)
                 result.pred_objectness = objectness_scores_per_image

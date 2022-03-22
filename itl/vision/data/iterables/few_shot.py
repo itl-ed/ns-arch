@@ -19,9 +19,6 @@ class FewShotDataset(IterableDataset):
     In this dataset, each 'instance' is actually a few-shot detection episode. At each
     next() call, sample N predicates (for each type of category -- class, attribute,
     relation) and then I (|S|+|Q|) examples (image+bbox) per predicate.
-
-    (K is not necessary in neighborhood component analysis (NCA) loss computation, making
-    it an unused hyperparameter)
     """
     def __init__(self, dataset_name, ep_params, is_train=True, eval_seed=0):
         # N: Number of 'ways' in each batch

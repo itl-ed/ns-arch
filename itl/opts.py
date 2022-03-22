@@ -53,10 +53,6 @@ def parse_arguments():
         default=200,
         help="Target mean of the weight distributions; scaling factors are computed such that the mean of the (smoothed) "
             "distribution is adjusted to the provided value (Default: 200)")
-    parser.add_argument("-fl", "--few_shot_loss_type",
-        type=str,
-        choices=["nca", "sq"],
-        help="Few-shot loss type for meta-learner: NCA vs. support-and-query")
 
     # Arguments that are fed to training scripts
     parser.add_argument("-en", "--exp_name",
