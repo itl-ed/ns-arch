@@ -160,15 +160,16 @@ class ITLAgent:
                 self.vision.vis_scene, dialogue_state, self.lang.lexicon
             )
 
-            _, marginals_v, _, _ = vis_out
+            _, marginals_v, _ = vis_out
 
             # Organize sensemaking results by object, with category sorted by confidences
             results_v = {
-                args[0]: { "obj": score, "cls": [], "att": [], "rel": [] }
-                for (pred, args), score in marginals_v.items() if pred == "object"
+                atom.args[0][0]: { "obj": score, "cls": [], "att": [], "rel": [] }
+                for atom, score in marginals_v.items() if atom.name == "object"
             }
             for atom in marginals_v:
-                pred, args = atom
+                pred = atom.name
+                args = atom.args
 
                 if pred == "object":
                     continue    # Already processed
@@ -177,12 +178,12 @@ class ITLAgent:
                     confidence = marginals_v[atom]
 
                     if cat_type != "rel":
-                        results_v[args[0]][cat_type].append((
+                        results_v[args[0][0]][cat_type].append((
                             self.lang.lexicon.d2s[(int(cat_ind), cat_type)], confidence
                         ))
                     else:
-                        results_v[args[0]][cat_type].append((
-                            self.lang.lexicon.d2s[(int(cat_ind), cat_type)], args[1], confidence
+                        results_v[args[0][0]][cat_type].append((
+                            self.lang.lexicon.d2s[(int(cat_ind), cat_type)], args[1][0], confidence
                         ))
             results_v = OrderedDict(sorted(results_v.items(), key=lambda v: int(v[0].strip("o"))))
             

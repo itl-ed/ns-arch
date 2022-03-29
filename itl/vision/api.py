@@ -159,7 +159,7 @@ class VisionModule:
                 predictor.num_relations != len(md.relations):
 
                 logger.warning(
-                    "Loaded model has different number(s) of categories in its predictor, "
+                    "[Vision] Loaded model has different number(s) of categories in its predictor, "
                     "compared to the information in metadata. The box predictor will be replaced "
                     "with a newly initialized classified heads with matching output dims."
                 )
@@ -174,9 +174,9 @@ class VisionModule:
                 for c1, c2 in cat_pairs:
                     if c1 != c2:
                         logger.warning(
-                            "Loaded model has a different index mapping of categories than that provided "
-                            "in metadata. The box predictor will be replaced with a newly initialized "
-                            "classified heads with matching output dims."
+                            "[Vision] Loaded model has a different index mapping of categories than "
+                            "the mapping provided in metadata. The box predictor will be replaced with "
+                            "a newly initialized classified heads with matching output dims."
                         )
                         reset_predictor = True
                         break
@@ -228,8 +228,8 @@ class VisionModule:
                 resume_ckpt_path = self.current_local_ckpt_path
             else:
                 logger.warning(
-                    "Tried to resume training but model is not loaded from a pytorch lightning "
-                    "checkpoint; training from epoch 0, iteration 0"
+                    "[Vision] Tried to resume training but model is not loaded from a pytorch "
+                    "lightning checkpoint; training from epoch 0, iteration 0"
                 )
             
             if self.current_wandb_id:
@@ -392,7 +392,7 @@ class VisionModule:
         self.current_local_ckpt_path = None
         self.current_wandb_id = None
 
-        logger.info("[Checkpointer] Loading from {} ...".format(ckpt_path))
+        logger.info("[Vision] Loading from {} ...".format(ckpt_path))
         if not os.path.isfile(ckpt_path):
             local_ckpt_path = self.path_manager.get_local_path(ckpt_path)
             assert os.path.isfile(local_ckpt_path), \

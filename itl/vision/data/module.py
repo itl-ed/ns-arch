@@ -121,8 +121,8 @@ class VGDataModule(LightningDataModule):
             os.path.exists(f"{self.data_dir}/annotations_test.json") and \
             os.path.exists(f"{self.data_dir}/metadata.json"):
 
-            logger.warning(f"Required data files seem already present in {self.data_dir}...")
-            logger.warning("If you want to download and process VG data files again, " \
+            logger.warning(f"[Vision] Required data files seem already present in {self.data_dir}...")
+            logger.warning("[Vision] If you want to download and process VG data files again, " \
                 "empty the directory and re-run the script")
 
             with open(f"{self.data_dir}/metadata.json") as meta_f:
@@ -130,7 +130,7 @@ class VGDataModule(LightningDataModule):
                 total_cnt = metadata["train_cnt"] + metadata["val_cnt"] + metadata["test_cnt"]
 
                 if total_cnt != self.img_count:
-                    logger.warning(f"Mismatch between existing data count in metadata ({total_cnt})" \
+                    logger.warning(f"[Vision] Mismatch between existing data count in metadata ({total_cnt})" \
                         f" vs. provided img_count arg ({self.img_count})")
 
         else:
@@ -140,7 +140,7 @@ class VGDataModule(LightningDataModule):
                 jsonzip_filename = f"{json_filename}.zip"
 
                 if os.path.exists(f"{self.data_dir}/{json_filename}"):
-                    logger.info(f"{json_filename} already exists, skip download")
+                    logger.info(f"[Vision] {json_filename} already exists, skip download")
                 else:
                     url_path = f"{self.repo_url}/{jsonzip_filename}"
                     download_and_unzip(url_path, self.data_dir, jsonzip_filename)
