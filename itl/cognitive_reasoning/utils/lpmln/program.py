@@ -17,12 +17,19 @@ from ..topk_subset import topk_subset_gen
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.2      # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.5     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
     def __init__(self, rules=None):
         self.rules = [] if rules is None else rules
+
+        self._rules_by_atom = defaultdict(set)      
+        for i, (rule, _) in enumerate(self.rules):
+            for hl in rule.head:
+                self._rules_by_atom[hl.as_atom()].add(i)
+            for bl in rule.body:
+                self._rules_by_atom[bl.as_atom()].add(i)
 
     def __len__(self):
         return len(self.rules)
@@ -59,10 +66,7 @@ class Program:
     def __add__(self, other):
         assert isinstance(other, Program), "Added value must be a Program"
 
-        new = Program()
-        new.rules = self.rules + other.rules
-
-        return new
+        return Program(self.rules + other.rules)
     
     def __iadd__(self, other):
         return self + other
@@ -85,6 +89,11 @@ class Program:
             assert 0 <= p <= 1, "Must provide valid probability value to compute rule weight"
 
         self.rules.append((rule, w_pr))
+
+        for hl in rule.head:
+            self._rules_by_atom[hl.as_atom()].add(len(self.rules)-1)
+        for bl in rule.body:
+            self._rules_by_atom[bl.as_atom()].add(len(self.rules)-1)
     
     def add_hard_rule(self, rule):
         self.add_rule(rule, 1.0)
@@ -111,11 +120,13 @@ class Program:
         atoms_inv_map = {v: k for k, v in atoms_map.items()}
         aux_i = len(atoms_map)
 
-        # Construct dependency graph from grounded rules
+        # Iterate over the grounded rules for the following processes:
+        #   1) Construct dependency graph from grounded rules
+        #   2) Track which rule in the original program could have instantiated each
+        #        grounded rule (wish clingo python API supported such feature...)
         dep_graph = nx.DiGraph()
-        for rule in rules_obs.rules:
-            head, body, _ = rule
-
+        grounded_rules = []
+        for head, body, choice in rules_obs.rules:
             if len(head) > 0:
                 for h_lit in head:
                     dep_graph.add_node(abs(h_lit))
@@ -129,6 +140,29 @@ class Program:
                     dep_graph.add_node(abs(b_lit))
                     dep_graph.add_node(aux_i)
                     dep_graph.add_edge(abs(b_lit), aux_i)
+            
+            # Find the original rule in the program that this grounded rule unifies with
+            head = [
+                atoms_inv_map[hl] if hl > 0 else atoms_inv_map[abs(hl)].flip()
+                for hl in head
+            ]
+            body = [
+                atoms_inv_map[bl] if bl > 0 else atoms_inv_map[abs(bl)].flip()
+                for bl in body
+            ]
+            gr_rule = Rule(head=head, body=body)
+
+            can_instantiate = set()
+            for i, (rule, w_pr) in enumerate(self.rules):
+                orig_soft = not ((1.0 in w_pr) or (0.0 in w_pr))
+                if orig_soft != choice:
+                    # Soft-hard weight mismatch; continue
+                    continue
+
+                if gr_rule.is_instance(rule):
+                    can_instantiate.add(i)
+
+            grounded_rules.append((gr_rule, can_instantiate))
 
         # Convert to undirected, and then partition into independent components
         dep_graph_und = dep_graph.to_undirected()
@@ -143,8 +177,8 @@ class Program:
         for ci, comp in enumerate(comps):
             print(f"A> Let me see... ({ci+1}/{len(comps)})", end="\r")
 
-            # Try splitting the program
-            bottom, top = self._split(comp, atoms_map, rules_obs.rules)
+            # Try splitting the program component
+            bottom, top = self._split(comp, atoms_map, grounded_rules)
             is_trivial_split = top is None
 
             # Check whether the split bottom only consists of body-less grounded rules
@@ -158,11 +192,13 @@ class Program:
                     # If the bottom (== comp) consists only of grounded choices without rule
                     # body, may directly return the factored representation of individual
                     # probabilistic choices -- no pruning needed
-                    rules_by_atom = self._rules_by_atom()
-                    facts = [rules_by_atom[atoms_inv_map[v]] for v in comp.nodes]
+                    facts = [
+                        self._rules_by_atom[atoms_inv_map[v]] for v in comp.nodes
+                        if atoms_inv_map[v] in self._rules_by_atom
+                    ]
 
                     # (Assuming only one fact is present with the atom as head)
-                    facts = [self.rules[fs[0]] for fs in facts]
+                    facts = [self.rules[fs.pop()] for fs in facts]
                     facts = [(f.head[0], float(w_pr[0])) for f, w_pr in facts]
 
                     tree = Models(factors=facts)
@@ -255,12 +291,29 @@ class Program:
                     # associated probabilities)
                     raise NotImplementedError
                 
-                # Solve reduced program top for each discovered model
+                # Solve reduced program top for each discovered model; first compute program
+                # reduction by the common atoms
+                atom_sets = [
+                    set([(pl, True) for pl in bm[0]] + [(nl, False) for nl in bm[1]])
+                    for bm in bottom_models.outcomes
+                ]
+                atom_commons = set.intersection(*atom_sets)
+                reduced_common = top._reduce(
+                    [atm for atm, pos in atom_commons if pos],
+                    [atm for atm, pos in atom_commons if not pos]
+                )
+
+                # Now for each bottom model reduce the common reduction with the remainder of
+                # the atoms, and solve the fully reduced
                 outcomes = []
-                for bm in bottom_models.outcomes:
-                    pos_atoms, neg_atoms, pr = bm
-                    reduced_top = top._reduce(pos_atoms, neg_atoms)
+                atom_diffs = [a-atom_commons for a in atom_sets]
+                for (pos_atoms, _, pr), atoms in zip(bottom_models.outcomes, atom_diffs):
+                    pos_atoms_diff = [atm for atm, pos in atoms if pos]
+                    neg_atoms_diff = [atm for atm, pos in atoms if not pos]
+
+                    reduced_top = reduced_common._reduce(pos_atoms_diff, neg_atoms_diff)
                     top_models = reduced_top.solve()
+
                     outcomes.append(((pos_atoms, pr), top_models))
                 tree = Models(outcomes=outcomes)
 
@@ -317,167 +370,166 @@ class Program:
 
     def _split(self, comp, atoms_map, grounded_rules):
         """
-        Search for a minimal splitting set and return the corresponding split programs.
+        Search for a minimal splitting set for comp and return the corresponding split
+        programs.
 
         (Implements paper [[How to Split a Logic Program]] (Ben-Eliyahu-Zohary, 2021).)
         """
-        # Construct super-dependency graph for the provided component
-        comp_sd = nx.DiGraph()
-
-        # Node for each strongly connected component (SCC)
-        sccs_map = {}; sccs_inv_map = {}
-        for i, c in enumerate(nx.strongly_connected_components(comp)):
-            sccs_map[i] = c
-            for v in c: sccs_inv_map[v] = i
-            comp_sd.add_node(i)
-
-        # Edge for each edge connecting nodes in the original component
-        for u, v in comp.edges:
-            u_scc = {i for i, scc in sccs_map.items() if u in scc}
-            v_scc = {i for i, scc in sccs_map.items() if v in scc}
-
-            assert len(u_scc) == len(v_scc) == 1
-            u_scc = u_scc.pop(); v_scc = v_scc.pop()
-
-            comp_sd.add_edge(u_scc, v_scc)
+        if len(comp.nodes) == 1:
+            # Don't even bother to split
+            found_split = frozenset(comp)
         
-        # For each node v in comp prepare values of tree(v) (the set of all nodes that
-        # belongs to any SCC v_sd such that there is a path in comp_sd from v_sd to scc(v);
-        # see original paper for more details)
-        reachable_sccs = {
-            v: nx.shortest_path(comp_sd, sccs_inv_map[v]).keys() for v in comp.nodes
-        }
-        nodes_in_reachable_sccs = {
-            v: set.union(*[sccs_map[scc] for scc in sccs])
-            for v, sccs in reachable_sccs.items()
-        }
-        trees = defaultdict(set)
-        for v, nodes in nodes_in_reachable_sccs.items():
-            for u in nodes:
-                trees[u].add(v)
-        
-        # Find source nodes in the super-dependency graph, and find union of corresponding
-        # nodes in the original comp; to be used as the initial state in search of minimal
-        # splitting set
-        sources = set.union(*[
-            sccs_map[v_sd] for v_sd in comp_sd.nodes if comp_sd.in_degree[v_sd] == 0
-        ])
-        sources = frozenset(sources)
+        else:
+            # Construct super-dependency graph for the provided component
+            comp_sd = nx.DiGraph()
 
-        atoms_inv_map = {v: k for k, v in atoms_map.items()}
+            # Node for each strongly connected component (SCC)
+            sccs_map = {}; sccs_inv_map = {}
+            for i, c in enumerate(nx.strongly_connected_components(comp)):
+                sccs_map[i] = c
+                for v in c: sccs_inv_map[v] = i
+                comp_sd.add_node(i)
 
-        # Perform uniform cost search until a minimal splitting set is found
-        visited = set(); found_goal = None
-        pqueue = [(0, sources)]; heapq.heapify(pqueue)
-        while len(pqueue) > 0:
-            # Pop state with the lowest path cost
-            current_path_cost, current_state = heapq.heappop(pqueue)
+            # Edge for each edge connecting nodes in the original component
+            for u, v in comp.edges:
+                u_scc = {i for i, scc in sccs_map.items() if u in scc}
+                v_scc = {i for i, scc in sccs_map.items() if v in scc}
 
-            # If no rules to add to bottom found, is in goal_state
-            is_goal = True
+                assert len(u_scc) == len(v_scc) == 1
+                u_scc = u_scc.pop(); v_scc = v_scc.pop()
 
-            # Add to set of explored states
-            visited.add(current_state)
-
-            # Find the lowest (in index) rule that needs to be included in splitting
-            # bottom; i.e. rule with a head in current state, and any of the other atoms
-            # not in current state
-            for r, _ in self.rules:
-                # Auxiliary heads of integrity constraints are never sources, and don't 
-                # need to be included minimal splitting sets.
-                if len(r.head) == 0:
-                    continue
-
-                head_overlaps = atoms_map[r.head[0].as_atom()] in current_state
-                body_is_subset = {atoms_map[l.as_atom()] for l in r.body} <= current_state
-
-                if head_overlaps and not body_is_subset:
-                    # Not a goal state
-                    is_goal = False
-
-                    # Splitting bottom should be expanded; unite state with tree(r)
-                    expanded_state = frozenset.union(
-                        current_state,
-                        *[trees[atoms_map[l.as_atom()]] for l in r.literals()]
-                    )
-                    expansion_cost = len(expanded_state) - len(current_state)
-                    expanded_path_cost = current_path_cost + expansion_cost
-
-                    if expanded_state in visited:
-                        # Update path cost in pqueue if better
-                        i = [s for _, s in pqueue].index(expanded_state)
-                        pqueue[i][0] = expanded_path_cost   # Update cost (becomes non-heap)
-                        heapq.heapify(pqueue)               # To valid heap again
-                    else:
-                        # Push to pqueue
-                        heapq.heappush(pqueue, (expanded_path_cost, expanded_state))
-
-                    # Finding one rule suffices
-                    break
+                comp_sd.add_edge(u_scc, v_scc)
             
-            if is_goal:
-                # Minimal splitting set found; break
-                found_goal = current_state
-        
-        assert found_goal is not None, "Must have found the trivial splitting set at least!"
+            # For each node v in comp prepare values of tree(v) (the set of all nodes that
+            # belongs to any SCC v_sd such that there is a path in comp_sd from v_sd to scc(v);
+            # see original paper for more details)
+            reachable_sccs = {
+                v: nx.shortest_path(comp_sd, sccs_inv_map[v]).keys() for v in comp.nodes
+            }
+            nodes_in_reachable_sccs = {
+                v: set.union(*[sccs_map[scc] for scc in sccs])
+                for v, sccs in reachable_sccs.items()
+            }
+            trees = defaultdict(set)
+            for v, nodes in nodes_in_reachable_sccs.items():
+                for u in nodes:
+                    trees[u].add(v)
+            
+            # Find source nodes in the super-dependency graph, and find union of corresponding
+            # nodes in the original comp; to be used as the initial state in search of minimal
+            # splitting set
+            sources = set.union(*[
+                sccs_map[v_sd] for v_sd in comp_sd.nodes if comp_sd.in_degree[v_sd] == 0
+            ])
+            sources = frozenset(sources)
+
+            # Perform uniform cost search until a minimal splitting set is found
+            visited = set(); found_split = None
+            pqueue = [(0, sources)]; heapq.heapify(pqueue)
+            while len(pqueue) > 0:
+                # Pop state with the lowest path cost
+                current_path_cost, current_state = heapq.heappop(pqueue)
+
+                # If no rules to add to bottom found, is in goal_state
+                is_goal = True
+
+                # Add to set of explored states
+                visited.add(current_state)
+
+                # Find the lowest (in index) rule that needs to be included in splitting
+                # bottom; i.e. rule with a head in current state, and any of the other atoms
+                # not in current state
+                for r, _ in self.rules:
+                    # Auxiliary heads of integrity constraints are never sources, and don't 
+                    # need to be included minimal splitting sets.
+                    if len(r.head) == 0:
+                        continue
+
+                    head_overlaps = atoms_map[r.head[0].as_atom()] in current_state
+                    body_is_subset = {atoms_map[l.as_atom()] for l in r.body} <= current_state
+
+                    if head_overlaps and not body_is_subset:
+                        # Not a goal state
+                        is_goal = False
+
+                        # Splitting bottom should be expanded; unite state with tree(r)
+                        expanded_state = frozenset.union(
+                            current_state,
+                            *[trees[atoms_map[l.as_atom()]] for l in r.literals()]
+                        )
+                        expansion_cost = len(expanded_state) - len(current_state)
+                        expanded_path_cost = current_path_cost + expansion_cost
+
+                        if expanded_state in visited:
+                            # Update path cost in pqueue if better
+                            i = [s for _, s in pqueue].index(expanded_state)
+                            pqueue[i][0] = expanded_path_cost   # Update cost (becomes non-heap)
+                            heapq.heapify(pqueue)               # To valid heap again
+                        else:
+                            # Push to pqueue
+                            heapq.heappush(pqueue, (expanded_path_cost, expanded_state))
+
+                        # Finding one rule suffices
+                        break
+                
+                if is_goal:
+                    # Minimal splitting set found; break
+                    found_split = current_state
+            
+            assert found_split is not None, "Must have found the trivial splitting set at least!"
 
         # Check whether the split is the trivial one with empty top
-        is_trivial_split = len(found_goal) == len(comp.nodes)
+        is_trivial_split = len(found_split) == len(comp.nodes)
 
-        if is_trivial_split:
-            # Simply return self as-is as the bottom, and None for the top to signal
-            # the split is trivial
-            return self, None
-        else:
-            # Obtain program bottom & top based on the found splitting set
-            bottom_rules = []; top_rules = []
+        # Find possibly relevant rules for the component, ignoring grounded rules that do not
+        # overlap at all
+        grounded_rules_atoms = [
+            [atoms_map[l.as_atom()] for l in gr_rule.literals()]
+            for gr_rule, _ in grounded_rules
+        ]
+        grounded_rules_relevant = [
+            r for i, r in enumerate(grounded_rules)
+            if any([a in comp.nodes() for a in grounded_rules_atoms[i]])
+        ]
 
-            # Track the original rule(s) in self.rules from which each ground rule is
-            # instantiated, to retrieve rule weight (probability)
-            # (The original rule may or may not be variable-free)
-            for head, body, choice in grounded_rules:
-                head = [
-                    atoms_inv_map[hl] if hl > 0 else atoms_inv_map[abs(hl)].flip()
-                    for hl in head
-                ]
-                body = [
-                    atoms_inv_map[bl] if bl > 0 else atoms_inv_map[abs(bl)].flip()
-                    for bl in body
-                ]
-                gr_rule = Rule(head=head, body=body)
+        # Obtain program bottom & top based on the found splitting set
+        bottom_rules = []; top_rules = []
 
-                # Check if this grounded rule should enter bottom or top
-                add_to_top = False
+        # Track the original rule(s) in self.rules from which each ground rule is instantiated,
+        # to retrieve rule weight (probability)
+        # (The original rule may or may not be variable-free)
+        for gr_rule, instantiable_rules in grounded_rules_relevant:
+
+            # Check if this grounded rule should enter bottom or top
+            add_to_top = False
+            if not is_trivial_split:
                 for l in gr_rule.literals():
-                    if atoms_map[l.as_atom()] not in found_goal:
+                    if atoms_map[l.as_atom()] not in found_split:
                         add_to_top = True
                         break
 
-                # Add a copy for each rule in self that unifies with the grounded rule,
-                # with retrieved weight
-                for rule, w_pr in self.rules:
-                    orig_soft = not ((1.0 in w_pr) or (0.0 in w_pr))
-                    if orig_soft != choice:
-                        # Soft-hard weight mismatch; continue
-                        continue
+            # Add a copy for each rule in self that unifies with the grounded rule, with
+            # retrieved weight
+            for ri in instantiable_rules:
+                _, w_pr = self.rules[ri]
+                if add_to_top:
+                    top_rules.append((gr_rule, w_pr))
+                else:
+                    bottom_rules.append((gr_rule, w_pr))
 
-                    if gr_rule.is_instance(rule):
-                        if add_to_top:
-                            top_rules.append((gr_rule, w_pr))
-                        else:
-                            bottom_rules.append((gr_rule, w_pr))
+        # Return None as top for trivial splits
+        bottom_program = Program(bottom_rules)
+        top_program = Program(top_rules) if len(top_rules) > 0 else None
 
-            return Program(bottom_rules), Program(top_rules)
+        return bottom_program, top_program
         
     def _reduce(self, pos_atoms, neg_atoms):
         """ Return the program obtained by reducing self with given values of atoms """
-        rules_by_atom = self._rules_by_atom()
-
         reduced_rules = copy.deepcopy(self.rules)
         rules_to_del = set()
 
         for pa in pos_atoms:
-            for ri in rules_by_atom[pa.as_atom()]:
+            for ri in self._rules_by_atom[pa.as_atom()]:
                 rule = reduced_rules[ri][0]
                 if rule.body_contains(pa.flip()):
                     # Exclude this rule
@@ -488,7 +540,7 @@ class Program:
                 rule.body.remove(pa)
 
         for na in neg_atoms:
-            for ri in rules_by_atom[na.as_atom()]:
+            for ri in self._rules_by_atom[na.as_atom()]:
                 rule = reduced_rules[ri][0]
                 if rule.body_contains(na):
                     # Exclude this rule
@@ -504,25 +556,11 @@ class Program:
 
         # Filter possible empty rules, generated by reducing headless integrity
         # constraints
-        for r in reduced_rules:
-            if len(r[0].head)==0 and len(r[0].body)==0:
-                print(0)
         reduced_rules = [
             r for r in reduced_rules if len(r[0].head) > 0 or len(r[0].body) > 0
         ]
 
         return Program(reduced_rules)
-    
-    def _rules_by_atom(self):
-        """ Return set of rules indexed by occurring atoms """
-        rules_by_atom = defaultdict(list)      
-        for i, (rule, _) in enumerate(self.rules):
-            for hl in rule.head:
-                rules_by_atom[hl.as_atom()].append(i)
-            for bl in rule.body:
-                rules_by_atom[bl.as_atom()].append(i)
-        
-        return rules_by_atom
 
     def _pure_ASP_str(self, unsats=False):
         """
