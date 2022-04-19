@@ -1,5 +1,5 @@
 """
-Utility classes for organized, programmatic handling of probabilistic ASP rules
+Utility class for organized, programmatic handling of probabilistic ASP rules
 and programs (LP^LMN; Lee and Wang, 2016). Probabilistic inference with LP^MLN
 is basically weighted model counting for ASP.
 """

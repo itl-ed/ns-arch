@@ -1,24 +1,20 @@
 """
 Practical reasoning module API that exposes only the high-level functionalities
-required by the ITL agent: maintain agenda as a stack of to-do items, select
-actions to carry out to clear executable tasks of the agenda (whenever possible)
+required by the ITL agent: manage agenda as a set of states that potentially 
+violate ITL agent's 'maintenance goals', generating plans to execute for resolving
+states violating the maintenance goals (whenever possible)
 """
+from .plans.library import library
+
+
 class PracticalReasonerModule:
     
     def __init__(self):
         self.agenda = []
 
-    def act(self):
+    def obtain_plan(self, todo):
         """
-        Just eagerly try to resolve each item in the agenda stack from the top as much
-        as possible. I wonder if we'll ever need a more sophisticated mechanism than this
-        simple, greedy method for a good while?
+        Obtain appropriate plan from plan library (maybe this could be extended later
+        with automated planning...)
         """
-        for todo in reversed(self.agenda):
-            self._resolve(todo)
-    
-    def _resolve(self, todo):
-        """
-        Clear a to-do item off the agenda by choosing and executing an action accordingly
-        """
-        ...
+        return library.get(todo)

@@ -24,7 +24,7 @@ class ITLAgent:
         self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
         self.lang = LanguageModule(opts, lex=self.lt_mem.lexicon)
-        self.cognitive = CognitiveReasonerModule(kb=self.lt_mem.knowledge_base)
+        self.cognitive = CognitiveReasonerModule(kb=self.lt_mem.kb)
         self.practical = PracticalReasonerModule()
 
         # Initialize empty lexicon with concepts in visual module
@@ -55,8 +55,7 @@ class ITLAgent:
 
             print(f"Sys> Choose an image to process")
             print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
-            print("U> ", end="")
-            usr_in = input()
+            usr_in = input("U> ")
             print("")
 
             try:
@@ -91,8 +90,10 @@ class ITLAgent:
     
     def _lang_inp(self):
         """Language input prompt (from user)"""
-        # Inform the language module of the visual context
-        self.lang.situate(self.vision.vis_raw, self.vision.vis_scene)
+        if self.vision.updated:
+            # Inform the language module of the visual context
+            self.lang.situate(self.vision.vis_raw, self.vision.vis_scene)
+            self.cognitive.refresh()
 
         print("")
         print("Sys> Awaiting user input...")
@@ -100,8 +101,7 @@ class ITLAgent:
 
         valid_input = False
         while not valid_input:
-            print("U> ", end="")
-            usr_in = input()
+            usr_in = input("U> ")
             print("")
 
             # Understand the user input in the context of the dialogue
@@ -116,7 +116,7 @@ class ITLAgent:
                     self.lang.understand(usr_in, self.practical.agenda)
 
             except IndexError as e:
-                print("Sys> Ungrammatical input, try again")
+                print(f"Sys> Ungrammatical input or IndexError: {e.args}")
                 continue
             except ValueError as e:
                 print(f"Sys> {e.args[0]}")
@@ -128,39 +128,38 @@ class ITLAgent:
             else:
                 valid_input = True
                 break
-        
-        # If a new entity is registered as a result of understanding the latest
-        # input, re-run vision module to update with new predictions for it
-        if len(self.lang.dialogue.referents["env"]) > len(self.vision.vis_scene):
-            bboxes = [
-                {
-                    "bbox": ent["bbox"],
-                    "bbox_mode": BoxMode.XYXY_ABS,
-                    "objectness_scores": self.vision.vis_scene[name]["pred_objectness"]
-                        if name in self.vision.vis_scene else None
-                }
-                for name, ent in self.lang.dialogue.referents["env"].items()
-            ]
 
-            # Predict on latest raw data stored
-            vis_raw_bgr = self.vision.vis_raw[:, :, [2,1,0]]
-            self.vision.predict(vis_raw_bgr, bboxes=bboxes, visualize=True)
+        if self.vision.vis_scene is not None:
+            # If a new entity is registered as a result of understanding the latest
+            # input, re-run vision module to update with new predictions for it
+            if len(self.lang.dialogue.referents["env"]) > len(self.vision.vis_scene):
+                bboxes = [
+                    {
+                        "bbox": ent["bbox"],
+                        "bbox_mode": BoxMode.XYXY_ABS,
+                        "objectness_scores": self.vision.vis_scene[name]["pred_objectness"]
+                            if name in self.vision.vis_scene else None
+                    }
+                    for name, ent in self.lang.dialogue.referents["env"].items()
+                ]
+
+                # Predict on latest raw data stored
+                vis_raw_bgr = self.vision.vis_raw[:, :, [2,1,0]]
+                self.vision.predict(vis_raw_bgr, bboxes=bboxes, visualize=True)
     
     def _update_belief(self):
         """Form beliefs based on visual and/or language input"""
-        dialogue_state = self.lang.dialogue.export_state()
 
-        if self.vision.vis_raw is None and len(dialogue_state["record"]) == 0:
+        if self.vision.vis_raw is None and len(self.lang.dialogue["record"]) == 0:
             # No information whatsoever to form any sort of beliefs
             print("A> (Idling the moment away...)")
             return
 
         if self.vision.vis_scene is not None:
-            vis_out, vis_lang_out = self.cognitive.sensemake(
-                self.vision.vis_scene, dialogue_state, self.lang.lexicon
-            )
+            # Make final conclusions via sensemaking
+            self.cognitive.sensemake(self.vision, self.lang, self.practical)
 
-            _, marginals_v, _ = vis_out
+            _, marginals_v, _ = self.cognitive.concl_vis
 
             # Organize sensemaking results by object, with category sorted by confidences
             results_v = {
@@ -204,32 +203,60 @@ class ITLAgent:
 
                 print("A>")
             
-            if vis_lang_out is not None:
-                _, _, _, mismatches = vis_lang_out
-
-                ## TODO: Print surprisal reports to resolve_mismatch action ##
-                if len(mismatches) > 0:
-                    print("A> However, I was quite surprised to hear that:")
-            
-                    for m in mismatches:
-                        is_positive = m[0]     # 'True' stands for positive statement
-
-                        if is_positive:
-                            # Positive statement (fact)
-                            message = f"{m[2][2][0]} is (a/an) {m[1][0]}"
-                        else:
-                            # Negative statement (constraint)
-                            negated = [
-                                f"{m2[2][0]} is (a/an) {m1[0]}" for m1, m2 in zip(m[1], m[2])
-                            ]
-                            message = f"Not {{{' & '.join(negated)}}}"
-
-                        print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
-                    
-                        self.practical.agenda.append(("resolve_mismatch", m))
-            
             self.vision.reshow_pred()
 
     def _act(self):
-        """Choose & execute actions to process agenda items"""
-        self.practical.act()
+        """
+        Just eagerly try to resolve each item in agenda as much as possible, generating
+        and performing actions until no more agenda items can be resolved for now. I
+        wonder if we'll ever need a more sophisticated mechanism than this simple, greedy
+        method for a good while?
+        """
+        while True:
+            resolved_items = []
+            for i, todo in enumerate(self.practical.agenda):
+                todo_state, todo_args = todo
+
+                # Check if this item can be resolved at this stage and if so, obtain
+                # appropriate plan (sequence of actions) for resolving the item
+                plan = self.practical.obtain_plan(todo_state)
+
+                if plan is not None:
+                    act_seq, prereqs = plan
+
+                    # Test prerequisites
+                    prereqs_pass = True
+                    for pr in prereqs:
+                        pr_method = pr["prereq_method"].extract(self)
+                        pr_args = pr["prereq_args_getter"](todo_args)
+                        if type(pr_args) == tuple:
+                            pr_args = tuple(a.extract(self) for a in pr_args)
+                        else:
+                            pr_args = (pr_args.extract(self),)
+
+                        if pr_method(*pr_args) != pr["prereq_value"]:
+                            prereqs_pass = False
+                            break
+                    if not prereqs_pass: continue
+
+                    # Perform plan actions
+                    for action in act_seq:
+                        act_method = action["action_method"].extract(self)
+                        act_args = action["action_args_getter"](todo_args)
+                        if type(act_args) == tuple:
+                            act_args = tuple(a.extract(self) for a in act_args)
+                        else:
+                            act_args = (act_args.extract(self),)
+
+                        act_method(*act_args)
+                    
+                    resolved_items.append(i)
+
+            if len(resolved_items) == 0:
+                # No resolvable agenda item any more; break
+                break
+            else:
+                # Check off resolved agenda item
+                resolved_items.reverse()
+                for i in resolved_items:
+                    del self.practical.agenda[i]

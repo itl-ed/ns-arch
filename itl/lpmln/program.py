@@ -12,12 +12,12 @@ import networkx as nx
 from .literal import Literal
 from .rule import Rule
 from .models import Models
-from ..topk_subset import topk_subset_gen
+from .topk_subset import topk_subset_gen
 
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.5     # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.3     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
@@ -341,7 +341,8 @@ class Program:
                 "Can only 'maximize' or 'minimize'"
 
             formulas_asp_str = [
-                f"{weight}@{p},{','.join(terms)} : {','.join([str(l) for l in lits])}"
+                f"{weight}@{p}{','+','.join(terms) if len(terms)>0 else ''} : "
+                    f"{','.join([str(l) for l in lits]) if len(lits)>0 else ''}"
                 for lits, weight, terms in formulas
             ]
 

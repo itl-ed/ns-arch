@@ -18,13 +18,14 @@ from collections import defaultdict
 
 import numpy as np
 
-from .utils.lpmln import Program, Rule, Literal
+from ..lpmln import Program, Rule, Literal
+from ..lpmln.utils import wrap_args
 
 
 EPS = 1e-10          # Value used for numerical stabilization
-U_W_PR = 0.999        # How much the agent values information provided by the user
+U_W_PR = 1.0         # How much the agent values information provided by the user
 SR_THRES = -math.log(0.5)     # Surprisal threshold
-
+TAB = "\t"           # For use in format strings
 
 def sensemake_vis(vis_scene, objectness_thresh=0.75, category_thresh=0.75):
     """
@@ -142,7 +143,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         List of possible worlds (models) with associated likelihood estimates,
         List of marginal probabilities for each grounded first-order literal,
         Composed ASP program (as string) used for generating these outputs,
-        Any mismatches between vis-only vs. vis-and-lang marginals
+        + Any mismatches between vis-only vs. vis-and-lang marginals
     """
     models_v, marginals_v, prog = vis_result
 
@@ -151,17 +152,23 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     dprog = Program()      # For incorporating additional info from user
 
     # Collect grounded facts and constraints provided by user
-    facts = []; constraints = []
-    for speaker, utt_type, content in dialogue_state["record"]:
-        if speaker == "U" and utt_type == "|":
-            for head, body, choice in content:
-                # Grounded facts
-                if body == None and not choice:
-                    facts.append(head)
-                
-                # Grounded constraints
-                if head == None:
-                    constraints.append(body)
+    facts = []; constraints = []; query_literals = []
+    for speaker, _, (rules, queries), _ in dialogue_state["record"]:
+        if speaker == "U":
+            if rules is not None:
+                for head, body, choice in rules:
+                    # Grounded facts
+                    if body == None and not choice:
+                        facts.append(head)
+                    
+                    # Grounded constraints
+                    if head == None:
+                        constraints.append(body)
+
+            if queries is not None:
+                for _, q_lits in queries:
+                    # Grounded queries
+                    query_literals += q_lits
     
     # Find the best estimate of assignment
 
@@ -182,54 +189,55 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
                     Rule(head=Literal("env", args+[(pred, False), (int(100*float(conf)), False)]))
                 )
 
-        # Discourse referents
-        for speaker, utt_type, content in dialogue_state["record"]:
+        # Discourse referents: Consider grounded statements from the user
+        for f in facts:
+            vis_concept = lexicon.s2d[(f[0], f[1])]
+            args = [(a, False) for a in f[2]]
+            args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (100, False)]
+            aprog.add_hard_rule(Rule(head=Literal("dis", args)))
 
-            # Consider grounded statements from the user
-            for f in facts:
-                vis_concept = lexicon.s2d[(f[0], f[1])]
-                args = [(a, False) for a in f[2]]
-                args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (100, False)]
+        for c in constraints:
+            if len(c) == 1:
+                # Not a lot of hassle here, one line of fact will do
+                vis_concept = lexicon.s2d[(c[0][0], c[0][1])]
+                args = [(a, False) for a in c[0][2]]
+                args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (-50, False)]
                 aprog.add_hard_rule(Rule(head=Literal("dis", args)))
+            else:
+                # Compose auxiliary predicates and rules for this specific conjunction.
+                # This may be wee too much for current purpose, but should be flexible.
+                vis_concepts = [
+                    lexicon.s2d[(bl[0], bl[1])] for bl in c
+                ]
 
-            for c in constraints:
-                if len(c) == 1:
-                    # Not a lot of hassle here, one line of fact will do
-                    vis_concept = lexicon.s2d[(c[0][0], c[0][1])]
-                    args = [(a, False) for a in c[0][2]]
-                    args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (-50, False)]
-                    aprog.add_hard_rule(Rule(head=Literal("dis", args)))
-                else:
-                    # Compose auxiliary predicates and rules for this specific conjunction.
-                    # I know this is too much. Blame my OCD...
-                    vis_concepts = [
-                        lexicon.s2d[(bl[0], bl[1])] for bl in c
-                    ]
+                var_inds = defaultdict(lambda: f"E{len(var_inds)}")
 
-                    var_inds = defaultdict(lambda: f"E{len(var_inds)}")
+                aux_pred = "&".join([f"{vc[1]}_{vc[0]}" for vc in vis_concepts])
 
-                    aux_pred = "&".join([f"{vc[1]}_{vc[0]}" for vc in vis_concepts])
-
-                    aux_rule_body = [
-                        Literal(
-                            "env",
-                            var_ls(*[var_inds[a] for a in bl[2]]) + \
-                                [(f"{vc[1]}_{vc[0]}", False), (f"W{i}", True)]
-                        )
-                        for i, (bl, vc) in enumerate(zip(c, vis_concepts))
-                    ]
-                    aux_rule_head = Literal(
+                aux_rule_body = [
+                    Literal(
                         "env",
-                        var_ls(*[vi for vi in var_inds.values()]) + \
-                            [(aux_pred, False)] + \
-                            [([op for i in range(len(c)) for op in (f"W{str(i)}", "*")][:-1], True)]
+                        wrap_args(*[var_inds[a] for a in bl[2]]) + \
+                            [(f"{vc[1]}_{vc[0]}", False), (f"W{i}", True)]
                     )
+                    for i, (bl, vc) in enumerate(zip(c, vis_concepts))
+                ]
+                aux_rule_head = Literal(
+                    "env",
+                    wrap_args(*[vi for vi in var_inds.values()]) + \
+                        [(aux_pred, False)] + \
+                        [([op for i in range(len(c)) for op in (f"W{str(i)}", "*")][:-1], True)]
+                )
 
-                    aprog.add_hard_rule(Rule(head=aux_rule_head, body=aux_rule_body))
+                aprog.add_hard_rule(Rule(head=aux_rule_head, body=aux_rule_body))
 
-                    args = [(a, False) for a in var_inds.keys()]
-                    args = args + [(aux_pred, False), (-1.0, False)]
-                    aprog.add_hard_rule(Rule(head=Literal("dis", args)))
+                args = [(a, False) for a in var_inds.keys()]
+                args = args + [(aux_pred, False), (-1.0, False)]
+                aprog.add_hard_rule(Rule(head=Literal("dis", args)))
+        
+        for ql in query_literals:
+            for a in ql[2]:
+                aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(a))))
 
         # Hard assignments by pointing, etc.
         for ref, env in dialogue_state["assignment_hard"].items():
@@ -241,74 +249,77 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         # :- env(E,P,W), not env(E).
         aprog.add_hard_rule(Rule(
             body=[
-                Literal("env", var_ls("E", "P", "W")),
-                Literal("env", var_ls("E"), naf=True),
+                Literal("env", wrap_args("E", "P", "W")),
+                Literal("env", wrap_args("E"), naf=True),
             ]))
         # :- env(E1,E2,P,W), not env(E1).
         aprog.add_hard_rule(Rule(
             body=[
-                Literal("env", var_ls("E1", "E2", "P", "W")),
-                Literal("env", var_ls("E1"), naf=True),
+                Literal("env", wrap_args("E1", "E2", "P", "W")),
+                Literal("env", wrap_args("E1"), naf=True),
             ]
         ))
         # :- env(E1,E2,P,W), not env(E2).
         aprog.add_hard_rule(Rule(
             body=[
-                Literal("env", var_ls("E1", "E2", "P", "W")),
-                Literal("env", var_ls("E2"), naf=True),
+                Literal("env", wrap_args("E1", "E2", "P", "W")),
+                Literal("env", wrap_args("E2"), naf=True),
             ]
         ))
 
         # dis(X) :- dis(X,P,S).
         aprog.add_hard_rule(Rule(
-            head=Literal("dis", var_ls("X")),
+            head=Literal("dis", wrap_args("X")),
             body=[
-                Literal("dis", var_ls("X", "P", "S"))
+                Literal("dis", wrap_args("X", "P", "S"))
             ]
         ))
         # dis(X1) :- dis(X1,X2,P,S).
         aprog.add_hard_rule(Rule(
-            head=Literal("dis", var_ls("X1")),
+            head=Literal("dis", wrap_args("X1")),
             body=[
-                Literal("dis", var_ls("X1", "X2", "P", "S"))
+                Literal("dis", wrap_args("X1", "X2", "P", "S"))
             ]
         ))
         # dis(X2) :- dis(X1,X2,P,S).
         aprog.add_hard_rule(Rule(
-            head=Literal("dis", var_ls("X2")),
+            head=Literal("dis", wrap_args("X2")),
             body=[
-                Literal("dis", var_ls("X1", "X2", "P", "S"))
+                Literal("dis", wrap_args("X1", "X2", "P", "S"))
             ]
         ))
 
         # { assign(X,E) : env(E) } 1 :- dis(X).
         aprog.add_rule(Rule(
             head=Literal(
-                "assign", var_ls("X", "E"), conds=[Literal("env", var_ls("E"))]
+                "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
             ),
-            body=[Literal("dis", var_ls("X"))],
+            body=[Literal("dis", wrap_args("X"))],
             ub=1
         ))
 
         # cons(X,E,P,W*S) :- dis(X,P,S), env(E,P,W), assign(X,E).
         aprog.add_hard_rule(Rule(
-            head=Literal("cons", var_ls("X", "E", "P", ["W", "*", "S"])),
+            head=Literal("cons", wrap_args("X", "E", "P", ["W", "*", "S"])),
             body=[
-                Literal("dis", var_ls("X", "P", "S")),
-                Literal("env", var_ls("E", "P", "W")),
-                Literal("assign", var_ls("X", "E")),
+                Literal("dis", wrap_args("X", "P", "S")),
+                Literal("env", wrap_args("E", "P", "W")),
+                Literal("assign", wrap_args("X", "E")),
             ]
         ))
         # cons(X1,X2,E1,E2,P,W*S) :- dis(X1,X2,P,S), env(E1,E2,P,W), assign(X1,E1), assign(X2,E2).
         aprog.add_hard_rule(Rule(
-            head=Literal("cons", var_ls("X1", "X2", "E1", "E2", "P", ["W", "*", "S"])),
+            head=Literal("cons", wrap_args("X1", "X2", "E1", "E2", "P", ["W", "*", "S"])),
             body=[
-                Literal("dis", var_ls("X1", "X2," "P", "S")),
-                Literal("env", var_ls("E1", "E2," "P", "W")),
-                Literal("assign", var_ls("X1", "E1")),
-                Literal("assign", var_ls("X2", "E2")),
+                Literal("dis", wrap_args("X1", "X2," "P", "S")),
+                Literal("env", wrap_args("E1", "E2," "P", "W")),
+                Literal("assign", wrap_args("X1", "E1")),
+                Literal("assign", wrap_args("X2", "E2")),
             ]
         ))
+
+        # 'Base cost' for cases where no assignments are any better than others
+        aprog.add_hard_rule(Rule(head=Literal("zero_p", [])))
 
         # By querying for the optimal assignment, essentially we are giving the user a 'benefit
         # of doubt', such that any statements made by the user are considered as True, and the
@@ -317,15 +328,25 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         # arguments are better understood as properties of the env. entities & disc. referents.)
         opt_models = aprog.optimize([
             ("maximize", [
-                ([Literal("cons", var_ls("X", "E", "P", "W"))], "W", ["X", "E", "P"]),
-                ([Literal("cons", var_ls("X1", "X2", "E1", "E2", "P", "W"))], "W", ["X1", "X2", "E1", "E2", "P"])
+                ([Literal("zero_p", [])], "0", []),
+                ([Literal("cons", wrap_args("X", "E", "P", "W"))], "W", ["X", "E", "P"]),
+                ([Literal("cons", wrap_args("X1", "X2", "E1", "E2", "P", "W"))], "W", ["X1", "X2", "E1", "E2", "P"])
             ])
         ])
 
         best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
         best_assignment = {str(args[0][0]): str(args[1][0]) for args in best_assignment}
+    
+    # For discourse referents that shouldn't be assigned an entity in physical world, assign to
+    # some 'void' (hypothetical?) entity
+    void_assignment = defaultdict(lambda: f"v{len(void_assignment)}")
 
-    a_map = lambda args: [best_assignment[a] for a in args]
+    a_map = lambda args: [
+        best_assignment[a]
+            if a in best_assignment and not dialogue_state["referents"]["dis"][a]
+            else void_assignment[a]
+        for a in args
+    ]
 
     # Now incorporate additional information provided by the user in language for updated
     # sensemaking
@@ -355,10 +376,14 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
 
     # Test grounded facts
     for f in facts:
+        # Ignore any 'facts' having indefinite entities as arguments
+        if any([dialogue_state["referents"]["dis"][a] for a in f[2]]):
+            continue
+
         vis_concept = lexicon.s2d[(f[0], f[1])]
         f_vis = (vis_concept[0], vis_concept[1], a_map(f[2]))
 
-        ev_prob = models_v.query(
+        ev_prob = models_v.query_yn(
             Literal(f"{f_vis[1]}_{f_vis[0]}", [(a, False) for a in f_vis[2]])
         )
 
@@ -368,23 +393,26 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
 
     # Test grounded constraints
     for c in constraints:
+        # Ignore any 'constraints' having indefinite entities as arguments
+        if any([any([dialogue_state["referents"]["dis"][a] for a in ents]) for _, _, ents in c_vis]):
+            continue
+
         vis_concepts = [lexicon.s2d[(bl[0], bl[1])] for bl in c]
         c_vis = [
             (vc[0], vc[1], a_map(bl[2])) for bl, vc in zip(c, vis_concepts)
         ]
+
         c_atoms = [
             Literal(f"{vc1}_{vc0}", [(a, False) for a in ents])
             for vc0, vc1, ents in c_vis
         ]
 
-        ev_prob = models_v.query(c_atoms, neg=True)
+        ev_prob = models_v.query_yn(c_atoms, neg=True)
 
         surprisal = -math.log(ev_prob + EPS)
         if surprisal > SR_THRES:
             mismatches.append((False, c, c_vis, surprisal))
+    
+    assignment = {**best_assignment, **dict(void_assignment)}
 
-    return models_vl, marginals_vl, prog, mismatches
-
-
-def var_ls(*vs):
-    return [(v, True) for v in vs]
+    return (models_vl, marginals_vl, prog), assignment, mismatches

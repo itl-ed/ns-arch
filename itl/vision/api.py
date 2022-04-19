@@ -113,6 +113,9 @@ class VisionModule:
         # Visualized prediction summary (pyplot figure)
         self.vis_summ = None
 
+        # Flag: new prediction was made
+        self.updated = False
+
     def train(self, exp_name=None, resume=False, few_shot=None):
         """
         Train the vision model with specified dataset: either in 1) traditional
@@ -345,6 +348,8 @@ class VisionModule:
         # Store results as state in this vision module
         self.vis_raw = img
         self.vis_scene = scene
+
+        self.updated = True
     
     def reshow_pred(self):
         assert self.vis_summ is not None, "No predictions have been made yet"

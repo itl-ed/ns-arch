@@ -1,7 +1,5 @@
 """
 Implements LP^MLN model set class
-
-(Note to self: recursion methods here could use some dynamic programming)
 """
 from collections import defaultdict
 
@@ -13,7 +11,7 @@ from .literal import Literal
 class Models:
     """
     Representation of sets of models, either as:
-        1) Complete factorization of joint distribution by independent atoms, each
+        1) Complete factorization by joint distributions of independent atoms, each
             with its marginal probability, or
         2) Flattened list of individual model specifications (outcomes) by set of
             true atoms (i.e. Herbrand interpretation), each with its joint probability
@@ -27,18 +25,30 @@ class Models:
 
         if self.factors is not None:
             # Can flatten factors that are factored Models themselves
-            fm_factors = [f for f in self.factors if hasattr(f, "factors")]
+            fm_factors = [
+                f for f in self.factors
+                if isinstance(f, Models) and f.factors is not None
+            ]
 
             if len(fm_factors) > 1:
                 flattened = sum([f.factors for f in fm_factors], [])
-                non_fm_factors = [f for f in self.factors if not hasattr(f, "factors")]
+                non_fm_factors = [
+                    f for f in self.factors
+                    if not (isinstance(f, Models) and f.factors is not None)
+                ]
 
                 self.factors = flattened + non_fm_factors
             
             if len(self.factors) > 1:
-                # Aggregate literals;  probabilities are logsumexp-ed (then exp-ed back)
-                lit_factors = [f for f in self.factors if isinstance(f[0], Literal)]
-                non_lit_factors = [f for f in self.factors if not isinstance(f[0], Literal)]
+                # Aggregate literals; probabilities are logsumexp-ed (then exp-ed back)
+                lit_factors = [
+                    f for f in self.factors
+                    if type(f) == tuple and isinstance(f[0], Literal)
+                ]
+                non_lit_factors = [
+                    f for f in self.factors
+                    if not (type(f) == tuple and isinstance(f[0], Literal))
+                ]
 
                 lits_agg = defaultdict(lambda: float("-inf"))
                 for lit, w_pr in lit_factors:
@@ -109,7 +119,7 @@ class Models:
 
         raise ValueError("Invalid Models instance")
     
-    def query(self, event, neg=False):
+    def query_yn(self, event, neg=False):
         """
         Query the tree structure to estimate the likelihood of specified event
         (represented as a conjunction of literals, or its negation)
@@ -123,6 +133,14 @@ class Models:
                 event = set([event])
 
         if self.factors is not None:
+            # If event cannot be fully covered by self.atoms(), no possibility of
+            # finding models satisfying event; terminate early
+            if event & self.atoms() != event:
+                if neg:
+                    return 1.0
+                else:
+                    return 0.0
+
             event_pr = 1.0             # Multiply for each match from 1.0
             for f in self.factors:
                 if isinstance(f, Models):
@@ -132,11 +150,11 @@ class Models:
 
                     # Query the factor for the maximal subset of event covered
                     subevent = event & f_atoms
-                    event_pr *= f.query(subevent)
+                    event_pr *= f.query_yn(subevent)
                 else:
                     # Base case; independent atoms with probability
                     assert len(f) == 2 and isinstance(f[0], Literal)
-                    if event <= set([f[0]]):
+                    if f[0] in event:
                         event_pr *= f[1]
             
             if neg:
@@ -168,7 +186,7 @@ class Models:
                         event_pr += bottom_pr
                     else:
                         # Multiply probabilities
-                        top_pr = top_models.query(top_subevent)
+                        top_pr = top_models.query_yn(top_subevent)
                         event_pr += bottom_pr * top_pr
             
             # Need to normalize values with sum of bottom model probabilities

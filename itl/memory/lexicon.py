@@ -2,9 +2,17 @@ class Lexicon:
     """
     Lexicon of open-classed words <-> their denoted concepts in physical world
     """
+    # Special reserved symbols
+    RESERVED = {
+        ("=", "*"): ("=", "*")      # 'Object identity' predicate
+    }
+
     def __init__(self):
         self.s2d = {}  # Symbol-to-denotation
         self.d2s = {}  # Denotation-to-symbol
+
+        # Add reserved symbols & denotations
+        for s, d in Lexicon.RESERVED.items(): self.add(s, d)
     
     def __contains__(self, symbol):
         return symbol in self.s2d
@@ -17,7 +25,8 @@ class Lexicon:
         """
         Populate empty lexicon with provided dicts of visual concept predicates
         """
-        assert len(self.s2d) == 0, "This method initializes empty lexicons only"
+        assert len(self.s2d) == len(Lexicon.RESERVED), \
+            "This method initializes empty lexicons only"
 
         for i, c in enumerate(predicates["cls"]):
             self.add((c.split(".")[0], "n"), (i, "cls"))

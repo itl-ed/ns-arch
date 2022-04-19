@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
+
 class DialogueManager:
     """Maintain dialogue state and handle NLU, NLG in context"""
 
@@ -12,21 +13,25 @@ class DialogueManager:
 
         self.referents = {
             "env": {},  # Sensed via physical perception
-            "dis": set()   # Introduced by dialogue
+            "dis": {}   # Introduced by dialogue
         }
+        self.assignment_soft = {}  # Store best assignments (tentative) obtained by reasoning
         self.assignment_hard = {}  # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}   # Store mapping from symbolic name to entity
 
+        # Each record is a 4-tuple of:
+        #   1) speaker: user ("U") or agent ("A"),
+        #   2) utterance type: proposition ("|"), question ("?") or command ("!")
+        #   3) logical form of utterance content
+        #   4) original user input string
         self.record = []
-        self.unanswered_Q = []
-    
+
+        # Buffer of utterances to generate
+        self.to_generate = []
+
     def refresh(self):
         """Clear the current dialogue state to start fresh in a new situation"""
         self.__init__()
-    
-    def export_state(self):
-        """Export the current dialogue information state as a dict"""
-        return vars(self)
     
     def _dem_point(self, vis_raw):
         """
@@ -215,27 +220,31 @@ class DialogueManager:
         Parse language input into MRS, process into ASP-compatible form, and then
         update dialogue state. Also add new agenda items to the provided list.
         """
-
         ui = len(self.record)  # Utterance index
 
         # Processing natural language into appropriate logical form
         parse = parser.nl_parse(usr_in)
-        asp_content, var_map = parser.asp_translate(parse)
+        asp_content, ref_map = parser.asp_translate(parse)
 
         # Fetch arg1 of index (i.e. sentence 'subject' referent)
         index = parse["relations"]["by_id"][parse["index"]]
         if not len(index["args"]) > 1:
             raise ValueError("Input is not a sentence")
-        index_arg1 = index["args"][1]
 
-        # Whether arg1 is bare NP (signalling generic statement)        
-        bare_arg1 = False
-        for rel in parse["relations"]["by_args"][(index_arg1,)]:
-            if rel["pos"] == "q" and rel["predicate"] == "udef":
-                bare_arg1 = True
+        # Whether arg1 (& arg2 if present) are bare NP (signalling generic statement;
+        # refer to semantics.py for more details about generics)
+        bare_arg1 = any([
+            rel["pos"] == "q" and rel["predicate"] == "udef"
+            for rel in parse["relations"]["by_args"][(index["args"][1],)]
+        ])
+        bare_arg2 = any([
+            rel["pos"] == "q" and rel["predicate"] == "udef"
+            for rel in parse["relations"]["by_args"][(index["args"][2],)]
+        ]) if len(index["args"]) > 2 else True
+        is_generic = bare_arg1 and bare_arg2
 
         # ASP-compatible translation
-        topic_lits, focus_lits = asp_content
+        topic_msgs, focus_msgs = asp_content
 
         # Referents ever mentioned in grounded facts are (ASP) constants, others are
         # (ASP) variables
@@ -249,8 +258,8 @@ class DialogueManager:
                 if "sense" in rel and rel["sense"] == "dem":
                     print(f"Sys> '{rel['predicate']}' needs pointing")
 
-                    referent = var_map[rel["args"][0]]
-                    const_ents.add(referent)
+                    referent = ref_map[rel["args"][0]]
+                    const_ents.add(rel["args"][0])
 
                     self.assignment_hard[f"x{referent}u{ui}"] = self._dem_point(vis_raw)
             
@@ -262,47 +271,47 @@ class DialogueManager:
 
                     self.referent_names[rel["carg"]] = self._dem_point(vis_raw)
 
-                referent = var_map[rel["args"][0]]
-                const_ents.add(referent)
+                referent = ref_map[rel["args"][0]]
+                const_ents.add(rel["args"][0])
 
                 self.assignment_hard[f"x{referent}u{ui}"] = self.referent_names[rel["carg"]]
 
         if parse["utt_type"] == "prop":
             # Indicatives
 
-            if bare_arg1:
+            if is_generic:
                 # Consider the intensional meaning of the generic statement as message
                 rules = []
 
-                # Collapse conditions in topic_lits
-                topic_lits_coll = []
-                for l in topic_lits:
-                    topic_lits_coll.append(l[0])
-                    topic_lits_coll += l[1]
+                # Collapse conditions in topic_msgs
+                topic_msgs_coll = []
+                for m in topic_msgs:
+                    # Right now can handle only non-negated topic literals; may extend later
+                    # to handle them by introducing auxiliary predicates? Not for a good
+                    # while...
+                    topic_msgs_coll.append(m[0])
+                    topic_msgs_coll += m[1]
 
                 # Compose rules, appropriately processing consequent literals
-                for l in focus_lits:
-
-                    if len(l) == 3:
+                for m in focus_msgs:
+                    if len(m) == 3:
                         # Rule with non-negated head
-                        rule_head = l[0]
+                        rule_head = m[0]
+                        additional_conds = m[1]
+                        choice = m[2]
 
-                        additional_conds = l[1]
-
-                        rule_body = topic_lits_coll + additional_conds
-
-                        choice = l[2]
+                        rule_body = topic_msgs_coll + additional_conds
 
                     else:
-                        # len(l) == 2; rule with negated head
-                        neg_lits = l[0]
+                        # len(m) == 2; rule with negated head
+                        neg_msgs = m[0]
 
                         rule_head = None  # No rule head ~ Integretiy constraint
 
-                        additional_conds = sum([nl[1] for nl in neg_lits], [])
-                        additional_mains = [nl[0] for nl in neg_lits]
+                        additional_conds = sum([nm[1] for nm in neg_msgs], [])
+                        additional_mains = [nm[0] for nm in neg_msgs]
 
-                        rule_body = topic_lits_coll + additional_conds + additional_mains
+                        rule_body = topic_msgs_coll + additional_conds + additional_mains
 
                         choice = False
                     
@@ -312,92 +321,139 @@ class DialogueManager:
                     rule = (rule_head, rule_body, choice)
                     rules.append(rule)
                 
-                rules = _varnames_format(rules, set(), f"u{ui}")
+                rules = _map_and_format(rules, ref_map, set(), f"u{ui}")
 
-                self.record.append(("U", "|", rules))
+                self.record.append(("U", "|", (rules, None), usr_in))
 
-                agenda.append(("kb_add", ui))  # Add new knowledge to KB
+                agenda.append(("unintegrated_knowledge", ui))  # Integrate new knowledge to KB
 
             else:
                 # Otherwise, regard propositions as grounded facts about individuals
                 constraints = []; facts = []
 
-                # Collapse all entries in topic_lits into a bag of facts (body-less rules)
-                for l in topic_lits:
-                    facts.append(l[0])
-                    facts += l[1]
-                    
-                    for t in l[0][2]:
-                        const_ents.add(t)
-                    for cl in l[1]:
-                        for t in cl[2]:
-                            const_ents.add(t)
-
-                # Non-negated entries in focus_lits also become facts, while negated entries
-                # become (partially) grounded integrity constraints
-                for l in focus_lits:
-
-                    if len(l) == 3:
-                        # Non-negated facts
-                        facts.append(l[0])
-                        facts += l[1]
-
-                        for t in l[0][2]:
-                            const_ents.add(t)
-                        for cl in l[1]:
-                            for t in cl[2]:
-                                const_ents.add(t)
+                # Collapse entries in topic_msgs+focus_msgs into a bag of facts/constraints
+                for m in topic_msgs+focus_msgs:
+                    if len(m) == 3:
+                        lits = [m[0]] + m[1]
+                        for l in lits:
+                            facts.append((l[:3], None, False))
+                            for arg in l[2]:
+                                const_ents.add(arg)
 
                     else:
-                        # len(l) == 2; negated facts
-                        neg_lits = l[0]
+                        # len(m) == 2; negated facts
+                        # Negated entries become (partially) grounded integrity constraints
+                        neg_msgs = m[0]
+                        negated_rel = m[1]
 
-                        additional_conds = sum([nl[1] for nl in neg_lits], [])
-                        additional_mains = [nl[0] for nl in neg_lits]
+                        main_lits = [nm[0] for nm in neg_msgs]
+                        cond_lits = sum([nm[1] for nm in neg_msgs], [])
 
-                        constr_body = additional_conds + additional_mains
-                        constr_body = [(bl[0], bl[1], tuple(bl[2])) for bl in constr_body]
-                        constr_body = list(set(constr_body))  # Remove duplicate literals
+                        for l in main_lits+cond_lits:
+                            if l[3] == negated_rel:
+                                constraints.append((None, [l[:3]], False))
+                            else:
+                                facts.append((l[:3], None, False))
 
-                        constr = (None, constr_body, False)
-                        constraints.append(constr)
-                
-                facts = [(l[0], l[1], tuple(l[2])) for l in facts]
-                facts = list(set(facts))
-
-                # Facts with no body literals (keep formats consistent for rules and facts)
-                facts = [(l, None, False) for l in facts]
+                            for arg in l[2]:
+                                const_ents.add(arg)
 
                 rules = facts + constraints
 
-                rules = _varnames_format(rules, const_ents, f"u{ui}")
+                # Removing duplicates
+                rules = [
+                    (
+                        (h[0], h[1], tuple(h[2]))
+                            if h is not None else None,
+                        tuple((bl[0], bl[1], tuple(bl[2])) for bl in b)
+                            if b is not None else None,
+                        c
+                    )
+                    for h, b, c in rules
+                ]
+                rules = list(set(rules))
 
-                self.record.append(("U", "|", rules))
+                rules = _map_and_format(rules, ref_map, const_ents, f"u{ui}")
+
+                self.record.append(("U", "|", (rules, None), usr_in))
 
         elif parse["utt_type"] == "ques":
             # Interrogatives
 
-            ## TODO: Move these to 'generate (answer)' part? ##
-            # Determine type of question
-            q_type = None
+            # Determine type of question: Y/N or wh-
+            # (For now we don't consider multiple-wh questions)
+            q_type = "wh" if any([
+                rel["predicate"] == "which"
+                for rel in parse["relations"]["by_id"].values()
+            ]) else "yn"
 
-            for rel in parse["relations"]["by_id"].values():
-                if rel["predicate"] == "which":
-                    bound = parse["relations"]["by_id"][rel["args"][0]]
-                    
-                    if bound["predicate"] == "thing":
-                        q_type = "What"
-                    elif bound["predicate"] == "reason":
-                        q_type = "Why"
-                    else:
-                        q_type = "Which"
+            if is_generic:
+                # Generic questions
+                raise NotImplementedError
             
-            if q_type is None: q_type = "Y/N"
+            else:
+                # Grounded questions
+                constraints = []; facts = []; queries = []
 
-            self.record.append(("U", "?", None))
-            self.unanswered_Q.append(ui)
+                # Collapse entries in topic_msgs+focus_msgs into a bag of facts/constraints
+                for m in topic_msgs+focus_msgs:
+                    if len(m) == 3:
+                        lits = [m[0]] + m[1]
+                        for l in lits:
+                            if q_type == "yn" and l[3] == index["id"]:
+                                queries.append((None, [l[:3]]))
+                            else:
+                                facts.append((l[:3], None, False))
+                            for arg in l[2]:
+                                const_ents.add(arg)
 
-            agenda.append(("answer", ui))
+                    else:
+                        # len(m) == 2; negated facts
+                        # Negated entries become (partially) grounded integrity constraints
+                        neg_msgs = m[0]
+                        negated_rel = m[1]
+
+                        main_lits = [nm[0] for nm in neg_msgs]
+                        cond_lits = sum([nm[1] for nm in neg_msgs], [])
+
+                        for l in main_lits+cond_lits:
+                            if q_type == "yn" and l[3] == index["id"]:
+                                queries.append((None, [l[:3]]))
+                            elif l[3] == negated_rel:
+                                constraints.append((None, [l[:3]], False))
+                            else:
+                                facts.append((l[:3], None, False))
+
+                            for arg in l[2]:
+                                const_ents.add(arg)
+
+                rules = facts + constraints
+
+                # Removing duplicates
+                rules = [
+                    (
+                        (h[0], h[1], tuple(h[2]))
+                            if h is not None else None,
+                        tuple((bl[0], bl[1], tuple(bl[2])) for bl in b)
+                            if b is not None else None,
+                        c
+                    )
+                    for h, b, c in rules
+                ]
+                rules = list(set(rules))
+
+                queries = [
+                    (q_ref, tuple((ql[0], ql[1], tuple(ql[2])) for ql in q_lits))
+                    for q_ref, q_lits in queries
+                ]
+                queries = list(set(queries))
+
+                rules = _map_and_format(rules, ref_map, const_ents, f"u{ui}")
+                queries = _map_and_format(queries, ref_map, const_ents, f"u{ui}")
+
+                self.record.append(("U", "?", (rules, queries), usr_in))
+
+            agenda.append(("unanswered_Q", ui))
 
         elif parse["utt_type"] == "comm":
             # Imperatives
@@ -407,45 +463,66 @@ class DialogueManager:
             # Ambiguous SF
             raise NotImplementedError
         
-        # Add to the list of discourse referents
+        # Add to the list of discourse referents, with (in)definiteness info
         for ref in const_ents:
-            self.referents["dis"].add(f"x{ref}u{ui}")
+            ref_is_def = any([
+                rel["pos"] == "q" and (rel["predicate"] == "udef" or rel["predicate"] == "a")
+                for rel in parse["relations"]["by_args"][(ref,)]
+            ]) if (ref,) in parse["relations"]["by_args"] else None
+
+            self.referents["dis"][f"x{ref_map[ref]}u{ui}"] = ref_is_def
         
         # Handle neologisms
-        # for rel in parse["relations"]["by_id"].values():
-        #     if not rel["lexical"]: continue
+        for rel in parse["relations"]["by_id"].values():
+            if not rel["lexical"]: continue
 
-        #     term = (rel["pos"], rel["predicate"])
+            term = (rel["predicate"], rel["pos"])
 
-        #     # Some reserved terms
-        #     if term[0] == "q" or \
-        #         term == ("v", "be") or \
-        #         term == ("v", "have"): continue
+            # Some reserved terms
+            if term[1] == "q" or \
+                term == ("be", "v") or \
+                term == ("have", "v"): continue
 
-        #     if term not in lex.s2d:
-        #         agenda.append(("resolve_neologism", term))
+            if term not in lex.s2d:
+                agenda.append(("unresolved_neologism", term))
 
 
-def _varnames_format(rules, const_ents, tail):
-
+def _map_and_format(data, ref_map, const_ents, tail):
+    # Map MRS referents to ASP terms and format
     formatted = []
-    fmt = lambda ri: f"{'x' if ri in const_ents else 'X'}{ri}{tail}"
+    fmt = lambda ri: f"{'x' if ri in const_ents else 'X'}{ref_map[ri]}{tail}"
 
-    for r in rules:
-        h, b, c = r
+    for data in data:
+        if len(data) == 3:
+            # ASP-like rules
+            h, b, c = data
 
-        if h is None:
-            new_h = None
+            if h is None:
+                new_h = None
+            else:
+                new_h = (h[0], h[1], tuple(fmt(ri) for ri in h[2]))
+
+            if b is None:
+                new_b = None
+            else:
+                new_b = [
+                    (l[0], l[1], tuple(fmt(ri) for ri in l[2]))
+                for l in b]
+            
+            formatted.append((new_h, new_b, c))
+
+        elif len(data) == 2:
+            # ASP-like queries
+            q_ent, q_lits = data
+
+            new_q_ent = fmt(q_ent) if q_ent is not None else None
+            new_q_lits = tuple(
+                (ql[0], ql[1], tuple(fmt(ri) for ri in ql[2])) for ql in q_lits
+            )
+
+            formatted.append((new_q_ent, new_q_lits))
+
         else:
-            new_h = (h[0], h[1], tuple(fmt(ri) for ri in h[2]))
-
-        if b is None:
-            new_b = None
-        else:
-            new_b = [
-                (l[0], l[1], tuple(fmt(ri) for ri in l[2]))
-            for l in b]
-
-        formatted.append((new_h, new_b, c))
+            raise ValueError("Can't map_and_format this")
 
     return formatted

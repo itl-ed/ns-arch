@@ -6,7 +6,7 @@ import logging
 import clingo
 
 
-logger = logging.getLogger("cognitive.lpmln")
+logger = logging.getLogger("lpmln")
 logger.setLevel(logging.INFO)
 
 class Literal:
@@ -91,7 +91,7 @@ class Literal:
         return Literal(self.name, self.args, not self.naf)
 
     def as_atom(self):
-        """ Return Literal instance as naf-free atom with same signature """
+        """ Return the naf-free atom version with same signature as new Literal instance """
         if self.naf:
             return Literal(self.name, self.args, False)
         else:
@@ -110,6 +110,13 @@ class Literal:
                 return False
             if self.naf != other.naf: return False
             return True
+    
+    def substitute(self, arg_x, arg_y):
+        """
+        Return new Literal instance where all occurrences of arg_x are replaced with arg_y
+        """
+        new_args = [(arg_y, a[1]) if a[0] == arg_x else a for a in self.args]
+        return Literal(self.name, new_args, self.naf)
 
     @staticmethod
     def from_clingo_symbol(symbol):

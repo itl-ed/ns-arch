@@ -114,9 +114,9 @@ class SemanticParser:
                     del chains[x]; break
 
         # Equivalence classes mapping referents to rule variables
-        assign_fn = lambda: max(max(var_map.values())+1, 0)
-        var_map = defaultdict(assign_fn)
-        var_map[parse["index"]] = -float("inf")
+        assign_fn = lambda: max(max(ref_map.values())+1, 0)
+        ref_map = defaultdict(assign_fn)
+        ref_map[parse["index"]] = -float("inf")
 
         # Negated relations by handle
         negs = [rel["neg"] for rel in parse["relations"]["by_id"].values()
@@ -124,12 +124,17 @@ class SemanticParser:
 
         # Traverse the semantic dependency tree represented by parse to collect appropriately
         # structured set of ASP literals
-        asp_content = _traverse_dt(parse, parse["index"], var_map, set(), negs)
-        
-        return asp_content, dict(var_map)
+        translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
+
+        # Reorganizing ref_map: not entirely necessary, just my OCD
+        ref_map_map = defaultdict(lambda: len(ref_map_map))
+        for ref in ref_map:
+            ref_map[ref] = ref_map_map[ref_map[ref]]
+
+        return translation, dict(ref_map)
 
 
-def _traverse_dt(parse, rel_id, var_map, covered, negs):
+def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     """
     Recursive pre-order traversal of semantic dependency tree of referents (obtained from MRS)
     """
@@ -139,37 +144,28 @@ def _traverse_dt(parse, rel_id, var_map, covered, negs):
 
     rel_rels_to_cover = []
 
-    # This node is connected to nodes with ids not registered in var_map yet
+    # This node is connected to nodes with ids not registered in ref_map yet
     daughters = set()
-    id_rels = []  # Track identity relations like "_be_v_id", which need special treatment
 
     for args, rels in rel_rels.items():
         for a in args:
-            if a not in var_map and a != rel_id: daughters.add(a)
+            if a not in ref_map and a != rel_id: daughters.add(a)
 
         for rel in rels:
             if rel["id"] not in covered:
                 rel_rels_to_cover.append(rel)
                 covered.add(rel["id"])
-
-            if rel["predicate"] == "be":
-                id_rels.append(rel["args"])
-    
-    # First handle identity relations by assigning them the same variable index
-    for args in id_rels:
-        assert len(args) >= 3  # (event, ref1, ref2)
-        var_map[args[2]] = var_map[args[1]]
     
     # Then register the remaining referents unless already registered; disregard event
-    # referents for stative verb predicates! (TODO: implement stative thing)
+    # referents for stative verb predicates! (TODO?: implement stative thing)
     for id in daughters:
         if id.startswith("x"):
-            var_map[id]
+            ref_map[id]
         else:
-            var_map[id] = -float("inf")  # For referents not considered as variables
+            ref_map[id] = -float("inf")  # For referents not considered as variables
 
     # Recursive calls to traversal function for collecting predicates specifying each daughter
-    daughters = {id: _traverse_dt(parse, id, var_map, covered, negs) for id in daughters}
+    daughters = {id: _traverse_dt(parse, id, ref_map, covered, negs) for id in daughters}
 
     # Return values of this function are flattened when called recursively
     daughters = {id: tp+fc for id, (tp, fc) in daughters.items()}
@@ -178,74 +174,108 @@ def _traverse_dt(parse, rel_id, var_map, covered, negs):
     daughters = defaultdict(lambda: [], daughters)
 
     # Build return values; resp. topic & focus
-    topic_lits = []; focus_lits = []
+    topic_msgs = []; focus_msgs = []
 
     for rel in rel_rels_to_cover:
 
-        # Each list entry in topic_lits and focus_lits is a tuple of the following form:
+        # Each list entry in topic_msgs and focus_msgs is a tuple of the following form:
         #   ('main' literal, list of condition literals, whether choice rule or not)
         # or a set of such tuples, for representing a negated scope over them. Basically
         # equivalent to conjunction normal form with haphazard formalism... I will have to
         # incorporate some static typing later, if I want to clean up this messy code
         #
         # Each literal is a tuple of the following form:
-        #   (predicate, pos, list of arg variables)
+        #   (predicate, pos, list of arg variables, source rel id)
 
         negated = rel["handle"] in negs
 
         # Handle predicates accordingly
         if rel["predicate"] == "be":
-            # Predicates describing arg2 of 'be' contribute as rule head literals,
-            # while others contribute as rule body literals
-            topic_lits += daughters[rel["args"][1]]
+            # "be" has different semantics depending on whether the sentence is a generic
+            # one or not.
 
-            if negated:
-                focus_lits.append(
-                    (daughters[rel["args"][2]], "neg")
-                )
+            # Here we test by checking if arg1/arg2 is bare NP; that is, quantified by udef_q.
+            # This is of course a very crude test, and may be elaborated later to account for
+            # other generic sentence signals: e.g. universal quantifiers.
+            bare_arg1 = any([
+                rel["pos"] == "q" and rel["predicate"] == "udef"
+                for rel in parse["relations"]["by_args"][(rel["args"][1],)]
+            ])
+            bare_arg2 = any([
+                rel["pos"] == "q" and rel["predicate"] == "udef"
+                for rel in parse["relations"]["by_args"][(rel["args"][2],)]
+            ])
+            is_generic = bare_arg1 and bare_arg2
+
+            if is_generic:
+                # Predicates describing arg2 of 'be' contribute as rule head literals,
+                # while others contribute as rule body literals
+
+                topic_msgs += daughters[rel["args"][1]]
+
+                if negated:
+                    focus_msgs.append(
+                        (daughters[rel["args"][2]], rel["id"])
+                    )
+                else:
+                    focus_msgs += daughters[rel["args"][2]]
+
+                # Ensure referent identity within the rule at this point
+                ref_map[rel["args"][2]] = ref_map[rel["args"][1]]
+
             else:
-                focus_lits += daughters[rel["args"][2]]
+                # For non-generic sentences, "be" has semantics of referent identity. Here
+                # we add a special reserved predicate named "=", which will be valuated later
+                # along with other predicates.
+                topic_msgs += daughters[rel["args"][1]]
+                focus_msgs += daughters[rel["args"][2]]
+
+                a1a2_vars = [rel["args"][1], rel["args"][2]]
+                rel_lit = (("=", "*", a1a2_vars, rel["id"]), [], False)
+
+                if negated:
+                    focus_msgs.append(([rel_lit], rel["id"]))
+                else:
+                    focus_msgs.append(rel_lit)
 
         elif rel["pos"] == "a":
             # Adjective predicates with args ('event', referent)
-            topic_lits += daughters[rel["args"][1]]
+            topic_msgs += daughters[rel["args"][1]]
+
+            rel_lit = ((rel["predicate"], "a", [rel["args"][1]], rel["id"]), [], False)
 
             if negated:
-                focus_lits.append(
-                    ([((rel["predicate"], "a", [var_map[rel["args"][1]]]), [], False)], "neg")
-                )
+                focus_msgs.append(([rel_lit], rel["id"]))
             else:
-                focus_lits += [((rel["predicate"], "a", [var_map[rel["args"][1]]]), [], False)]
+                focus_msgs.append(rel_lit)
 
         elif rel["pos"] == "n":
             # Noun predicates with args (referent[, more optional referents])
+            rel_lit = ((rel["predicate"], "n", [rel_id], rel["id"]), [], False)
+
             if negated:
-                focus_lits.append(
-                    ([((rel["predicate"], "n", [var_map[rel_id]]), [], False)], "neg")
-                )
+                focus_msgs.append(([rel_lit], rel["id"]))
             else:
-                focus_lits += [((rel["predicate"], "n", [var_map[rel_id]]), [], False)]
+                focus_msgs.append(rel_lit)
 
         elif rel["predicate"] == "have" or rel["predicate"] == "with":
             # Here we assume the meaning of rel["predicate"] has to do with holonymy/meronymy
-            topic_lits += daughters[rel["args"][1]]
+            topic_msgs += daughters[rel["args"][1]]
 
             arg2_head = parse["relations"]["by_id"][rel["args"][2]]
 
             if len(daughters[rel["args"][2]]) == 1:
                 # Just the 'have(e,x1,x2)' is the only and main message here
                 a2_lit = daughters[rel["args"][2]][0]
-                a2a1_vars = [var_map[rel["args"][2]], var_map[rel["args"][1]]]
+                a1a2_vars = [rel["args"][1], rel["args"][2]]
+                cond_lits = [("have", "v", a1a2_vars, rel["id"])]
 
-                main_lit = (a2_lit[0][0]+"_of", a2_lit[0][1], a2a1_vars)
-                cond_lits = [("part_of", "", a2a1_vars)]
+                rel_lit = (a2_lit[0], cond_lits, True)
 
                 if negated:
-                    focus_lits.append(
-                        ((main_lit, cond_lits, True), "neg")
-                    )
+                    focus_msgs.append(([rel_lit], rel["id"]))
                 else:
-                    focus_lits.append((main_lit, cond_lits, True))
+                    focus_msgs.append(rel_lit)
             
             else:
                 # 'have(e,x1,x2)' itself is presupposed, and modifications of x2 are
@@ -254,36 +284,34 @@ def _traverse_dt(parse, rel_id, var_map, covered, negs):
 
                 for a2_lit in daughters[rel["args"][2]]:
 
+                    a1a2_vars = [rel["args"][1], rel["args"][2]]
+
                     if a2_lit[0][0] == arg2_head["predicate"] and a2_lit[0][1] == arg2_head["pos"]:
                         # Presupposition of the said object having the part
-
-                        # Presuppositions are not about the entities described by the sentence...
-                        # Instead, consider hypothetical part entity
-                        a2a1_vars = [var_map["hp"], var_map[rel["args"][1]]]
-
-                        main_lit = (a2_lit[0][0]+"_of", a2_lit[0][1], a2a1_vars)
-                        cond_lits = [("part_of", "", a2a1_vars)]
-                        presup.append((main_lit, cond_lits, True))
+                        cond_lits = [("have", "v", a1a2_vars, rel["id"])]
+                        presup.append((a2_lit[0], cond_lits, True))
 
                     else:
                         # Everything else
-                        a2a1_vars = [var_map[rel["args"][2]], var_map[rel["args"][1]]]
+                        cond_lits = [
+                            (arg2_head["predicate"], arg2_head["pos"], [rel["args"][2]], arg2_head["id"]),
+                            ("have", "v", a1a2_vars, rel["id"])
+                        ]
+                        assertions.append((a2_lit[0], cond_lits, False))
 
-                        main_lit = (a2_lit[0][0], a2_lit[0][1], [var_map[rel["args"][2]]])
-                        cond_lits = [(arg2_head["predicate"]+"_of", arg2_head["pos"], a2a1_vars)]
-                        assertions.append((main_lit, cond_lits, False))
-                
-                focus_lits += presup  # Note that the presupposition is not negated
-
+                # Presuppositions may or may not be part of the info conveyed... Perhaps to
+                # a weaker extent? E.g. Does "France does not have a bald king" imply France
+                # has a king? How about "Does France have a bald king?"? It may serve as a
+                # reason to infer so, but not strongly... Let's think about this more later...
                 if negated:
-                    focus_lits.append(
-                        (assertions, "neg")
-                    )
+                    focus_msgs.append((assertions, rel["id"]))
                 else:
-                    focus_lits += assertions
+                    if parse["utt_type"] != "ques":
+                        focus_msgs += presup
+                    focus_msgs += assertions
 
         else:
             # Other general cases
             continue
 
-    return (topic_lits, focus_lits)
+    return (topic_msgs, focus_msgs)
