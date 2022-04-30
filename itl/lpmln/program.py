@@ -8,6 +8,7 @@ from collections import defaultdict
 import clingo
 import numpy as np
 import networkx as nx
+from multiset import Multiset, FrozenMultiset
 
 from .literal import Literal
 from .rule import Rule
@@ -17,7 +18,7 @@ from .topk_subset import topk_subset_gen
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.3     # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.75     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
@@ -83,6 +84,7 @@ class Program:
                 w_pr = [w_pr] * len(rule.head)
         else:
             w_pr = [w_pr]
+        w_pr = tuple(w_pr)
 
         assert isinstance(rule, Rule), "Added value must be a Rule"
         for p in w_pr:
@@ -98,14 +100,49 @@ class Program:
     def add_hard_rule(self, rule):
         self.add_rule(rule, 1.0)
 
-    def solve(self, topk_ratio=TOPK_RATIO):
+    def solve(self, topk_ratio=TOPK_RATIO, provided_mem=None):
         """
         Recursively find program solve results, and return as a set of independent decision
         trees. Each child of a node in a tree represents a possible answer set for the program,
         along with the probability value for the model. The forest can be used to answer queries
         on marginal probabilities of atoms. Some low-probability models may be pruned, resulting
         in the total joint probabilities not summing to one.
+
+        Can exploit models obtained from previously solved idential (sub)programs, if provided as
+        the argument `provided_mem`. Basically top-down dynamic programming.
         """
+        provided_mem = {} if provided_mem is None else provided_mem
+
+        # Try exploiting memoized solutions
+        if len(provided_mem) > 0:
+            frozen_rules = FrozenMultiset(self.rules)
+            if frozen_rules in provided_mem:
+                # Memoized solution exists for the whole
+                models = provided_mem[frozen_rules]
+                return models, provided_mem
+            
+            # Test if frozen_rules can be assembled from memoized rule sets
+            remaining = frozen_rules
+            rule_sets = []
+            while len(remaining) > 0:
+                for rs in provided_mem:
+                    if rs <= remaining:
+                        remaining = remaining - rs
+                        rule_sets.append(rs)
+                else:
+                    # Cannot reduce with any memoized rule set any more
+                    break
+            
+            if len(remaining) == 0:
+                # Successfully recovered frozen_rules; return Models instance with these
+                # as factors
+                models = Models([provided_mem[rs] for rs in rule_sets])
+                memoized_models = {
+                    sum(rule_sets, FrozenMultiset()): models,
+                    **provided_mem
+                }
+                return models, memoized_models
+
         # Feed compiled program string to clingo.Control object and ground program
         rules_obs = _Observer()
         ctl = clingo.Control()
@@ -124,8 +161,9 @@ class Program:
         #   1) Construct dependency graph from grounded rules
         #   2) Track which rule in the original program could have instantiated each
         #        grounded rule (wish clingo python API supported such feature...)
+        # (Major bottleneck, due to checking instantiability in 2))
         dep_graph = nx.DiGraph()
-        grounded_rules = []
+        grounded_rules = Multiset()
         for head, body, choice in rules_obs.rules:
             if len(head) > 0:
                 for h_lit in head:
@@ -152,19 +190,48 @@ class Program:
             ]
             gr_rule = Rule(head=head, body=body)
 
-            can_instantiate = set()
-            for i, (rule, w_pr) in enumerate(self.rules):
+            for rule, w_pr in self.rules:
                 orig_soft = not ((1.0 in w_pr) or (0.0 in w_pr))
                 if orig_soft != choice:
                     # Soft-hard weight mismatch; continue
                     continue
 
                 if gr_rule.is_instance(rule):
-                    can_instantiate.add(i)
+                    grounded_rules.add((gr_rule, w_pr))
+        
+        grounded_rules = FrozenMultiset(grounded_rules)
 
-            grounded_rules.append((gr_rule, can_instantiate))
+        # Try exploiting memoized solutions (again, with grounded program)
+        if len(provided_mem) > 0:
+            if grounded_rules in provided_mem:
+                # Memoized solution exists for the whole
+                models = provided_mem[grounded_rules]
+                return models, provided_mem
+            
+            # Test if grounded_rules can be assembled from memoized rule sets
+            remaining = grounded_rules
+            rule_sets = []
+            while len(remaining) > 0:
+                for rs in provided_mem:
+                    if rs <= remaining:
+                        remaining = remaining - rs
+                        rule_sets.append(rs)
+                else:
+                    # Cannot reduce with any memoized rule set any more
+                    break
+            
+            if len(remaining) == 0:
+                # Successfully recovered grounded_rules; return Models instance with these
+                # as factors
+                models = Models([provided_mem[rs] for rs in rule_sets])
+                memoized_models = {
+                    sum(rule_sets, FrozenMultiset()): models,
+                    **provided_mem
+                }
+                return models, memoized_models
 
-        # Convert to undirected, and then partition into independent components
+        # Convert the dependency graph to undirected, and then partition into independent
+        # components
         dep_graph_und = dep_graph.to_undirected()
         comps = list(nx.connected_components(dep_graph_und))
         if len(comps) == 1:
@@ -173,12 +240,34 @@ class Program:
         else:
             comps = [dep_graph.subgraph(nodes) for nodes in comps]
         
-        indep_trees = []
+        # Atoms in each grounded rule
+        grounded_rules_atoms = {
+            gr_rule: [atoms_map[l.as_atom()] for l in gr_rule.literals()]
+            for gr_rule, _ in grounded_rules
+        }
+
+        indep_trees = []; memoized_models = {}
         for ci, comp in enumerate(comps):
             print(f"A> Let me see... ({ci+1}/{len(comps)})", end="\r")
 
+            # Find possibly relevant rules for each component, ignoring grounded rules that
+            # do not overlap at all
+            grounded_rules_relevant = [
+                (gr_rule, w_pr) for gr_rule, w_pr in grounded_rules
+                if any([a in comp.nodes() for a in grounded_rules_atoms[gr_rule]])
+            ]
+
+            if len(provided_mem) > 0:
+                # Check if memoized solution exists for the component
+                gr_rules_fms = FrozenMultiset(grounded_rules_relevant)
+                if gr_rules_fms in provided_mem:
+                    # Model found
+                    indep_trees.append(provided_mem[gr_rules_fms])
+                    memoized_models[gr_rules_fms] = provided_mem[gr_rules_fms]
+                    continue
+
             # Try splitting the program component
-            bottom, top = self._split(comp, atoms_map, grounded_rules)
+            bottom, top = self._split(comp, atoms_map, grounded_rules_relevant)
             is_trivial_split = top is None
 
             # Check whether the split bottom only consists of body-less grounded rules
@@ -208,6 +297,9 @@ class Program:
                     # associated probabilities)
                     raise NotImplementedError
                     tree = Models(outcomes=[])
+                
+                # Memoize bottom
+                memoized_models[FrozenMultiset(bottom.rules)] = tree
 
             else:
                 # Solve the bottom for possible models with probabilities, obtain & solve the
@@ -284,18 +376,16 @@ class Program:
                         for pos_atoms, neg_atoms, lp in bottom_models
                     ]
 
-                    bottom_models = Models(outcomes=bottom_models)
-
                 else:
                     # Solve the bottom (== comp) with clingo and return answer sets (with
                     # associated probabilities)
                     raise NotImplementedError
-                
+
                 # Solve reduced program top for each discovered model; first compute program
                 # reduction by the common atoms
                 atom_sets = [
                     set([(pl, True) for pl in bm[0]] + [(nl, False) for nl in bm[1]])
-                    for bm in bottom_models.outcomes
+                    for bm in bottom_models
                 ]
                 atom_commons = set.intersection(*atom_sets)
                 reduced_common = top._reduce(
@@ -307,20 +397,33 @@ class Program:
                 # the atoms, and solve the fully reduced
                 outcomes = []
                 atom_diffs = [a-atom_commons for a in atom_sets]
-                for (pos_atoms, _, pr), atoms in zip(bottom_models.outcomes, atom_diffs):
+                for bi, ((pos_atoms, _, pr), atoms) in enumerate(zip(bottom_models, atom_diffs)):
+                    print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
+
                     pos_atoms_diff = [atm for atm, pos in atoms if pos]
                     neg_atoms_diff = [atm for atm, pos in atoms if not pos]
 
                     reduced_top = reduced_common._reduce(pos_atoms_diff, neg_atoms_diff)
-                    top_models = reduced_top.solve()
+                    top_models, top_memoized = reduced_top.solve(provided_mem={
+                        **memoized_models, **provided_mem
+                    })
+
+                    # Memoize reduced top & merge returned memoized models
+                    memoized_models.update(top_memoized)
+                    memoized_models[FrozenMultiset(reduced_top.rules)] = top_models
 
                     outcomes.append(((pos_atoms, pr), top_models))
                 tree = Models(outcomes=outcomes)
 
             indep_trees.append(tree)
             print("A>" + (" "*50), end="\r")
+        
+        models = Models(factors=indep_trees)
 
-        return Models(factors=indep_trees)
+        # Memoize whole
+        memoized_models[grounded_rules] = models
+
+        return models, memoized_models
     
     def optimize(self, statements):
         """
@@ -369,7 +472,7 @@ class Program:
 
         return models
 
-    def _split(self, comp, atoms_map, grounded_rules):
+    def _split(self, comp, atoms_map, grounded_rules_rel):
         """
         Search for a minimal splitting set for comp and return the corresponding split
         programs.
@@ -482,24 +585,11 @@ class Program:
         # Check whether the split is the trivial one with empty top
         is_trivial_split = len(found_split) == len(comp.nodes)
 
-        # Find possibly relevant rules for the component, ignoring grounded rules that do not
-        # overlap at all
-        grounded_rules_atoms = [
-            [atoms_map[l.as_atom()] for l in gr_rule.literals()]
-            for gr_rule, _ in grounded_rules
-        ]
-        grounded_rules_relevant = [
-            r for i, r in enumerate(grounded_rules)
-            if any([a in comp.nodes() for a in grounded_rules_atoms[i]])
-        ]
-
         # Obtain program bottom & top based on the found splitting set
         bottom_rules = []; top_rules = []
 
-        # Track the original rule(s) in self.rules from which each ground rule is instantiated,
-        # to retrieve rule weight (probability)
-        # (The original rule may or may not be variable-free)
-        for gr_rule, instantiable_rules in grounded_rules_relevant:
+        # Add each grounded rule to either top or bottom
+        for gr_rule, w_pr in grounded_rules_rel:
 
             # Check if this grounded rule should enter bottom or top
             add_to_top = False
@@ -511,12 +601,10 @@ class Program:
 
             # Add a copy for each rule in self that unifies with the grounded rule, with
             # retrieved weight
-            for ri in instantiable_rules:
-                _, w_pr = self.rules[ri]
-                if add_to_top:
-                    top_rules.append((gr_rule, w_pr))
-                else:
-                    bottom_rules.append((gr_rule, w_pr))
+            if add_to_top:
+                top_rules.append((gr_rule, w_pr))
+            else:
+                bottom_rules.append((gr_rule, w_pr))
 
         # Return None as top for trivial splits
         bottom_program = Program(bottom_rules)
@@ -624,9 +712,11 @@ class Program:
                                 )
                                 as_str += str(aux_rule)
             else:
-                # Choice rules with multiple head literals; not implemented yet
-                raise NotImplementedError
+                # Choice rules with multiple head literals
                 as_str += rule.str_as_choice() + "\n"
+
+                if unsats:
+                    raise NotImplementedError
 
         return as_str
 

@@ -150,7 +150,7 @@ class ITLAgent:
     def _update_belief(self):
         """Form beliefs based on visual and/or language input"""
 
-        if self.vision.vis_raw is None and len(self.lang.dialogue["record"]) == 0:
+        if self.vision.vis_raw is None and len(self.lang.dialogue.record) == 0:
             # No information whatsoever to form any sort of beliefs
             print("A> (Idling the moment away...)")
             return
@@ -159,7 +159,8 @@ class ITLAgent:
             # Make final conclusions via sensemaking
             self.cognitive.sensemake(self.vision, self.lang, self.practical)
 
-            _, marginals_v, _ = self.cognitive.concl_vis
+            models_v, _, _ = self.cognitive.concl_vis
+            marginals_v = models_v.marginals()
 
             # Organize sensemaking results by object, with category sorted by confidences
             results_v = {

@@ -122,7 +122,7 @@ class Models:
     def query_yn(self, event, neg=False):
         """
         Query the tree structure to estimate the likelihood of specified event
-        (represented as a conjunction of literals, or its negation)
+        (represented in conjunctive normal form)
         """
         if type(event) != set:
             try:
@@ -222,7 +222,7 @@ class Models:
                 # program top
                 (bottom_model, _), top_models = o
                 atoms |= set(bottom_model)
-                atoms |= top_models.atoms()
+                atoms |= top_models.atoms() if top_models is not None else set()
             
             return atoms
 

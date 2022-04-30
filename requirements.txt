@@ -3,3 +3,4 @@
 -r itl/lang/requirements.txt
 -r itl/cognitive_reasoning/requirements.txt
 -r itl/practical_reasoning/requirements.txt
+-r itl/lpmln/requirements.txt

@@ -113,10 +113,10 @@ class SemanticParser:
                     del parse["relations"]["by_handle"][p1["handle"]]
                     del chains[x]; break
 
-        # Equivalence classes mapping referents to rule variables
-        assign_fn = lambda: max(max(ref_map.values())+1, 0)
-        ref_map = defaultdict(assign_fn)
-        ref_map[parse["index"]] = -float("inf")
+        # Equivalence classes mapping referents to rule variables, while tracking whether
+        # they come from referential expressions or not
+        ref_map = {}
+        ref_map[parse["index"]] = None
 
         # Negated relations by handle
         negs = [rel["neg"] for rel in parse["relations"]["by_id"].values()
@@ -126,10 +126,26 @@ class SemanticParser:
         # structured set of ASP literals
         translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
 
+        # We assume bare NPs (underspecified quant.) have universal reading when arg1 of index
+        # (and existential reading otherwise)
+        is_bare = lambda rf: any([
+            r["pos"] == "q" and r["predicate"] == "udef"
+            for r in parse["relations"]["by_args"][(rf,)]
+        ])
+        index_arg1 = parse["relations"]["by_id"][parse["index"]]["args"][1]
+        if is_bare(index_arg1):
+            ref_map[index_arg1]["is_univ_quantified"] = True
+
         # Reorganizing ref_map: not entirely necessary, just my OCD
         ref_map_map = defaultdict(lambda: len(ref_map_map))
         for ref in ref_map:
-            ref_map[ref] = ref_map_map[ref_map[ref]]
+            if ref_map[ref] is not None:
+                ref_map[ref] = {
+                    "map_id": ref_map_map[ref_map[ref]["map_id"]],
+                    "is_referential": ref_map[ref]["is_referential"],
+                    "is_univ_quantified": ref_map[ref]["is_univ_quantified"],
+                    "is_wh_quantified": ref_map[ref]["is_wh_quantified"]
+                }
 
         return translation, dict(ref_map)
 
@@ -138,6 +154,24 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     """
     Recursive pre-order traversal of semantic dependency tree of referents (obtained from MRS)
     """
+    # Helper method that checks whether a discourse referent is introduced by a referential
+    # expression | universally quantified | wh-quantified
+    is_referential = lambda rf: any([
+        (r["pos"] == "q" and r["predicate"] == "the") \
+            or (r["pos"] == "q" and r["predicate"] == "pronoun") \
+            or (r["pos"] is None and r["predicate"] == "named") \
+            or (r["pos"] == "q" and "sense" in r and r["sense"] == "dem")
+        for r in parse["relations"]["by_args"][(rf,)]
+    ])
+    is_univ_quantified = lambda rf: any([
+        r["pos"] == "q" and r["predicate"] in {"all", "every"}
+        for r in parse["relations"]["by_args"][(rf,)]
+    ])
+    is_wh_quantified = lambda rf: any([
+        r["pos"] == "q" and r["predicate"] == "which"
+        for r in parse["relations"]["by_args"][(rf,)]
+    ])
+
     # Collect 'relevant' relations that have rel_id as arg
     rel_rels = {args: rels for args, rels in parse["relations"]["by_args"].items()
         if rel_id in args}
@@ -160,9 +194,20 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     # referents for stative verb predicates! (TODO?: implement stative thing)
     for id in daughters:
         if id.startswith("x"):
-            ref_map[id]
+            ref_map[id] = {
+                "map_id": max(
+                    max(
+                        [v["map_id"] for v in ref_map.values() if v is not None],
+                        default=-1
+                    )+1, 0
+                ),
+                "is_referential": is_referential(id),
+                "is_univ_quantified": is_univ_quantified(id),
+                "is_wh_quantified": is_wh_quantified(id)
+            }
         else:
-            ref_map[id] = -float("inf")  # For referents not considered as variables
+            # For referents we are not interested about
+            ref_map[id] = None
 
     # Recursive calls to traversal function for collecting predicates specifying each daughter
     daughters = {id: _traverse_dt(parse, id, ref_map, covered, negs) for id in daughters}
@@ -178,137 +223,145 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
 
     for rel in rel_rels_to_cover:
 
-        # Each list entry in topic_msgs and focus_msgs is a tuple of the following form:
-        #   ('main' literal, list of condition literals, whether choice rule or not)
-        # or a set of such tuples, for representing a negated scope over them. Basically
+        # Each list entry in topic_msgs and focus_msgs is a literal, which is a tuple:
+        #   1) predicate
+        #   2) part-of-speech
+        #   3) list of arg variables (args may be function terms if skolemized)
+        # or a list of such literals, for representing a negated scope over them. Basically
         # equivalent to conjunction normal form with haphazard formalism... I will have to
-        # incorporate some static typing later, if I want to clean up this messy code
-        #
-        # Each literal is a tuple of the following form:
-        #   (predicate, pos, list of arg variables, source rel id)
+        # incorporate some static typing later, if I want to clean up this messy code        
+
+        # Setting up arg1 (& arg2) variables
+        if len(rel["args"]) > 1:
+            if len(rel["args"]) > 2:
+                if rel["predicate"] == "be" and is_wh_quantified(rel["args"][2]):
+                    # MRS flips the arg order when subject is quantified with 'which',
+                    # presumably seeing it as wh-movement?
+                    arg1 = rel["args"][2]
+                    arg2 = rel["args"][1]
+                else:
+                    # Default case
+                    arg1 = rel["args"][1]
+                    arg2 = rel["args"][2]
+
+                referential_arg1 = ref_map[arg1]["is_referential"]
+                referential_arg2 = ref_map[arg2]["is_referential"]
+
+            else:
+                # (These won't & shouldn't be referred)
+                arg1 = rel["args"][1]
+                arg2 = None
+                referential_arg1 = ref_map[arg1]["is_referential"]
+                referential_arg2 = None
+
+            # We assume predicates describing arg1 are topic of the covered constituents
+            # (This will do for most cases... May later need to refine depending on voice,
+            # discourse context, etc.?)
+            topic_msgs += daughters[arg1]
+        else:
+            # (These won't & shouldn't be referred)
+            arg1 = None
+            arg2 = None
+            referential_arg1 = None
+            referential_arg2 = None
 
         negated = rel["handle"] in negs
 
         # Handle predicates accordingly
-        if rel["predicate"] == "be":
-            # "be" has different semantics depending on whether the sentence is a generic
-            # one or not.
-
-            # Here we test by checking if arg1/arg2 is bare NP; that is, quantified by udef_q.
-            # This is of course a very crude test, and may be elaborated later to account for
-            # other generic sentence signals: e.g. universal quantifiers.
-            bare_arg1 = any([
-                rel["pos"] == "q" and rel["predicate"] == "udef"
-                for rel in parse["relations"]["by_args"][(rel["args"][1],)]
-            ])
-            bare_arg2 = any([
-                rel["pos"] == "q" and rel["predicate"] == "udef"
-                for rel in parse["relations"]["by_args"][(rel["args"][2],)]
-            ])
-            is_generic = bare_arg1 and bare_arg2
-
-            if is_generic:
-                # Predicates describing arg2 of 'be' contribute as rule head literals,
-                # while others contribute as rule body literals
-
-                topic_msgs += daughters[rel["args"][1]]
-
-                if negated:
-                    focus_msgs.append(
-                        (daughters[rel["args"][2]], rel["id"])
-                    )
-                else:
-                    focus_msgs += daughters[rel["args"][2]]
-
-                # Ensure referent identity within the rule at this point
-                ref_map[rel["args"][2]] = ref_map[rel["args"][1]]
-
-            else:
-                # For non-generic sentences, "be" has semantics of referent identity. Here
-                # we add a special reserved predicate named "=", which will be valuated later
-                # along with other predicates.
-                topic_msgs += daughters[rel["args"][1]]
-                focus_msgs += daughters[rel["args"][2]]
-
-                a1a2_vars = [rel["args"][1], rel["args"][2]]
-                rel_lit = (("=", "*", a1a2_vars, rel["id"]), [], False)
-
-                if negated:
-                    focus_msgs.append(([rel_lit], rel["id"]))
-                else:
-                    focus_msgs.append(rel_lit)
-
-        elif rel["pos"] == "a":
+        if rel["pos"] == "a":
             # Adjective predicates with args ('event', referent)
-            topic_msgs += daughters[rel["args"][1]]
-
-            rel_lit = ((rel["predicate"], "a", [rel["args"][1]], rel["id"]), [], False)
+            rel_lit = (rel["predicate"], "a", [arg1])
 
             if negated:
-                focus_msgs.append(([rel_lit], rel["id"]))
+                focus_msgs.append([rel_lit])
             else:
                 focus_msgs.append(rel_lit)
 
         elif rel["pos"] == "n":
             # Noun predicates with args (referent[, more optional referents])
-            rel_lit = ((rel["predicate"], "n", [rel_id], rel["id"]), [], False)
+            rel_lit = (rel["predicate"], "n", [rel_id])
 
             if negated:
-                focus_msgs.append(([rel_lit], rel["id"]))
+                focus_msgs.append([rel_lit])
             else:
                 focus_msgs.append(rel_lit)
+        
+        elif rel["predicate"] == "be":
+            # "be" has different semantics depending on the construction of the clause:
+            #   1) Predicational: Non-referential complement
+            #   2) Equative: Referential subject, referential complement
+            #   3) Specificational: Non-referential subject, referential complement
+            # where referential NP is of type <e>, and non-referential NP is of type <e,t>.
+            #
+            # (* Technically speaking, the dominant taxonomy in the field for copula semantics
+            # seems that predicational clauses need referential subjects, and quantificational
+            # expressions are allowed as subject as well. But testing these conditions is a bit
+            # hairy, and for now we will go with a simplified condition of having non-referential
+            # complement only.)
 
-        elif rel["predicate"] == "have" or rel["predicate"] == "with":
-            # Here we assume the meaning of rel["predicate"] has to do with holonymy/meronymy
-            topic_msgs += daughters[rel["args"][1]]
+            if not referential_arg2:
+                # Predicational; provide predicates as additional info about subject
+                if negated:
+                    focus_msgs.append(daughters[arg2])
+                else:
+                    focus_msgs += daughters[arg2]
 
-            arg2_head = parse["relations"]["by_id"][rel["args"][2]]
+                # arg1 and arg2 are the same entity
+                ref_map[arg2] = ref_map[arg1]
 
-            if len(daughters[rel["args"][2]]) == 1:
-                # Just the 'have(e,x1,x2)' is the only and main message here
-                a2_lit = daughters[rel["args"][2]][0]
-                a1a2_vars = [rel["args"][1], rel["args"][2]]
-                cond_lits = [("have", "v", a1a2_vars, rel["id"])]
+            else:
+                if referential_arg1:
+                    # Equative; claim referent identity btw. subject and complement
+                    topic_msgs += daughters[arg2]
 
-                rel_lit = (a2_lit[0], cond_lits, True)
+                    a1a2_vars = [arg1, arg2]
+                    rel_lit = ("=", "*", a1a2_vars)
+
+                    if negated:
+                        focus_msgs.append([rel_lit])
+                    else:
+                        focus_msgs.append(rel_lit)
+
+                else:
+                    # We are not really interested in 3) (or others?), at least for now
+                    raise ValueError("Weird sentence with copula")
+
+        elif rel["predicate"] == "have":
+            # (Here we assume the meaning of rel["predicate"] has to do with holonymy/meronymy)
+            # Two-place predicates have different semantics depending on referentiality of arg2
+
+            if referential_arg2:
+                # Simpler case; use constant for arg2, and provided predicates concerning arg2
+                # are considered topic message
+                topic_msgs += daughters[arg2]
+
+                rel_lit = ("have", "v", [arg1, arg2])
 
                 if negated:
-                    focus_msgs.append(([rel_lit], rel["id"]))
+                    focus_msgs.append([rel_lit])
                 else:
                     focus_msgs.append(rel_lit)
-            
+
             else:
-                # 'have(e,x1,x2)' itself is presupposed, and modifications of x2 are
-                # main messages here
-                presup = []; assertions = []
+                # arg2 is existentially quantified; skolemize the referent (ensuring ASP program
+                # safety) and yield conjunction of literals. Note that we are assuming any quantifier
+                # scope ambiguity is resolved such that existentials are placed inside: i.e. surface
+                # scope reading.
+                arg2_sk = (f"f_{arg2}", (arg1,))
+                ref_map[arg2_sk] = ref_map[arg2]
+                del ref_map[arg2]
 
-                for a2_lit in daughters[rel["args"][2]]:
-
-                    a1a2_vars = [rel["args"][1], rel["args"][2]]
-
-                    if a2_lit[0][0] == arg2_head["predicate"] and a2_lit[0][1] == arg2_head["pos"]:
-                        # Presupposition of the said object having the part
-                        cond_lits = [("have", "v", a1a2_vars, rel["id"])]
-                        presup.append((a2_lit[0], cond_lits, True))
-
-                    else:
-                        # Everything else
-                        cond_lits = [
-                            (arg2_head["predicate"], arg2_head["pos"], [rel["args"][2]], arg2_head["id"]),
-                            ("have", "v", a1a2_vars, rel["id"])
-                        ]
-                        assertions.append((a2_lit[0], cond_lits, False))
-
-                # Presuppositions may or may not be part of the info conveyed... Perhaps to
-                # a weaker extent? E.g. Does "France does not have a bald king" imply France
-                # has a king? How about "Does France have a bald king?"? It may serve as a
-                # reason to infer so, but not strongly... Let's think about this more later...
+                lits = [("have", "v", [arg1, arg2_sk])]
+                for a2_lit in daughters[arg2]:
+                    # Replace occurrences of arg2 with the skolem term
+                    args_sk = [arg2_sk if arg2==a else a for a in a2_lit[2]]
+                    a2_lit_sk = a2_lit[:2] + (args_sk,)
+                    lits.append(a2_lit_sk)
+                
                 if negated:
-                    focus_msgs.append((assertions, rel["id"]))
+                    focus_msgs.append(lits)
                 else:
-                    if parse["utt_type"] != "ques":
-                        focus_msgs += presup
-                    focus_msgs += assertions
+                    focus_msgs += lits
 
         else:
             # Other general cases

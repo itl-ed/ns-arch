@@ -23,8 +23,8 @@ class Rule:
             assert self.lb <= self.ub, "Lower bound should not be greater than upper bound"
 
     def __str__(self):
-        if self.head is not None and len(self.head) > 1:
-            raise ValueError("Rule with more than one heads; call str_as_choice() instead")
+        if len(self.head) > 0 and (len(self.head) > 1 or len(self.head[0].conds) > 0):
+            return self.str_as_choice()
 
         head_str = (str(self.head[0]) + (" " if len(self.body) else "")) \
             if self.head else ""
@@ -36,6 +36,16 @@ class Rule:
     
     def __repr__(self):
         return f"Rule({str(self)})"
+    
+    def __eq__(self, other):
+        return \
+            (self.head == other.head) and \
+            (self.body == other.body) and \
+            (self.lb == other.lb) and \
+            (self.ub == other.ub)
+    
+    def __hash__(self):
+        return hash(str(self))
     
     def flip(self):
         """
@@ -55,7 +65,7 @@ class Rule:
         lb = "" if self.lb is None else f"{self.lb} "
         ub = "" if self.ub is None else f" {self.ub}"
 
-        head_str = f"{lb}{{ {';'.join([str(hl) for hl in self.head])} }}{ub}" + \
+        head_str = f"{lb}{{ {'; '.join([str(hl) for hl in self.head])} }}{ub}" + \
             (" " if len(self.body) else "")
         body_str = \
             (":- " if len(self.body) else "") + \

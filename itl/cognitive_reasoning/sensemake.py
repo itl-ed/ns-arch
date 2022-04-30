@@ -14,7 +14,6 @@ logic programs (written in the language of weighted ASP) and solve with a dedica
 """
 import math
 import copy
-from collections import defaultdict
 
 import numpy as np
 
@@ -118,10 +117,9 @@ def sensemake_vis(vis_scene, objectness_thresh=0.75, category_thresh=0.75):
 
     # Solve with clingo to find the best K_M models of the program
     prog += pprog
-    models_v = prog.solve()
-    marginals_v = models_v.marginals()
+    models_v, memoized_v = prog.solve()
 
-    return models_v, marginals_v, prog
+    return models_v, memoized_v, prog
 
 
 def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
@@ -145,274 +143,254 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         Composed ASP program (as string) used for generating these outputs,
         + Any mismatches between vis-only vs. vis-and-lang marginals
     """
-    models_v, marginals_v, prog = vis_result
+    models_v, memoized_v, prog = vis_result
 
     # Incorporate info from dialogue state
     aprog = Program()      # For finding referent-entity assignment
     dprog = Program()      # For incorporating additional info from user
-
-    # Collect grounded facts and constraints provided by user
-    facts = []; constraints = []; query_literals = []
-    for speaker, _, (rules, queries), _ in dialogue_state["record"]:
-        if speaker == "U":
-            if rules is not None:
-                for head, body, choice in rules:
-                    # Grounded facts
-                    if body == None and not choice:
-                        facts.append(head)
-                    
-                    # Grounded constraints
-                    if head == None:
-                        constraints.append(body)
-
-            if queries is not None:
-                for _, q_lits in queries:
-                    # Grounded queries
-                    query_literals += q_lits
     
     # Find the best estimate of assignment
 
-    if len(dialogue_state["referents"]["dis"]) == len(dialogue_state["assignment_hard"]):
-        # Can take shortcut if all referents are hard-assigned to some entity
-        best_assignment = dialogue_state["assignment_hard"]
+    # Environment entities
+    marginals_v = models_v.marginals()
+    for atom, conf in marginals_v.items():
+        pred = atom.name
+        args = atom.args
 
-    else:
-        # Environment entities
-        for atom, conf in marginals_v.items():
-            pred = atom.name
-            args = atom.args
+        if pred == "object":
+            # Occurring entities
+            aprog.add_hard_rule(Rule(head=Literal("env", args)))
 
-            if pred == "object":
-                aprog.add_hard_rule(Rule(head=Literal("env", args)))
-            else:
-                aprog.add_hard_rule(
-                    Rule(head=Literal("env", args+[(pred, False), (int(100*float(conf)), False)]))
-                )
-
-        # Discourse referents: Consider grounded statements from the user
-        for f in facts:
-            vis_concept = lexicon.s2d[(f[0], f[1])]
-            args = [(a, False) for a in f[2]]
-            args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (100, False)]
-            aprog.add_hard_rule(Rule(head=Literal("dis", args)))
-
-        for c in constraints:
-            if len(c) == 1:
-                # Not a lot of hassle here, one line of fact will do
-                vis_concept = lexicon.s2d[(c[0][0], c[0][1])]
-                args = [(a, False) for a in c[0][2]]
-                args = args + [(f"{vis_concept[1]}_{vis_concept[0]}", False), (-50, False)]
-                aprog.add_hard_rule(Rule(head=Literal("dis", args)))
-            else:
-                # Compose auxiliary predicates and rules for this specific conjunction.
-                # This may be wee too much for current purpose, but should be flexible.
-                vis_concepts = [
-                    lexicon.s2d[(bl[0], bl[1])] for bl in c
-                ]
-
-                var_inds = defaultdict(lambda: f"E{len(var_inds)}")
-
-                aux_pred = "&".join([f"{vc[1]}_{vc[0]}" for vc in vis_concepts])
-
-                aux_rule_body = [
-                    Literal(
-                        "env",
-                        wrap_args(*[var_inds[a] for a in bl[2]]) + \
-                            [(f"{vc[1]}_{vc[0]}", False), (f"W{i}", True)]
-                    )
-                    for i, (bl, vc) in enumerate(zip(c, vis_concepts))
-                ]
-                aux_rule_head = Literal(
-                    "env",
-                    wrap_args(*[vi for vi in var_inds.values()]) + \
-                        [(aux_pred, False)] + \
-                        [([op for i in range(len(c)) for op in (f"W{str(i)}", "*")][:-1], True)]
-                )
-
-                aprog.add_hard_rule(Rule(head=aux_rule_head, body=aux_rule_body))
-
-                args = [(a, False) for a in var_inds.keys()]
-                args = args + [(aux_pred, False), (-1.0, False)]
-                aprog.add_hard_rule(Rule(head=Literal("dis", args)))
-        
-        for ql in query_literals:
-            for a in ql[2]:
-                aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(a))))
-
-        # Hard assignments by pointing, etc.
-        for ref, env in dialogue_state["assignment_hard"].items():
+        else:
+            # Estimated marginals with probabilities
             aprog.add_hard_rule(
-                Rule(body=[Literal("assign", [(ref, False), (env, False)], naf=True)])
+                Rule(head=Literal("hold", args+wrap_args(pred, str(int(100*float(conf))))))
             )
 
-        ## Assignment program rules
-        # :- env(E,P,W), not env(E).
-        aprog.add_hard_rule(Rule(
-            body=[
-                Literal("env", wrap_args("E", "P", "W")),
-                Literal("env", wrap_args("E"), naf=True),
-            ]))
-        # :- env(E1,E2,P,W), not env(E1).
-        aprog.add_hard_rule(Rule(
-            body=[
-                Literal("env", wrap_args("E1", "E2", "P", "W")),
-                Literal("env", wrap_args("E1"), naf=True),
-            ]
-        ))
-        # :- env(E1,E2,P,W), not env(E2).
-        aprog.add_hard_rule(Rule(
-            body=[
-                Literal("env", wrap_args("E1", "E2", "P", "W")),
-                Literal("env", wrap_args("E2"), naf=True),
-            ]
-        ))
+    # Discourse referents: Consider information from dialogue state
 
-        # dis(X) :- dis(X,P,S).
-        aprog.add_hard_rule(Rule(
-            head=Literal("dis", wrap_args("X")),
-            body=[
-                Literal("dis", wrap_args("X", "P", "S"))
-            ]
-        ))
-        # dis(X1) :- dis(X1,X2,P,S).
-        aprog.add_hard_rule(Rule(
-            head=Literal("dis", wrap_args("X1")),
-            body=[
-                Literal("dis", wrap_args("X1", "X2", "P", "S"))
-            ]
-        ))
-        # dis(X2) :- dis(X1,X2,P,S).
-        aprog.add_hard_rule(Rule(
-            head=Literal("dis", wrap_args("X2")),
-            body=[
-                Literal("dis", wrap_args("X1", "X2", "P", "S"))
-            ]
-        ))
+    # Referent info
+    for rf, value in dialogue_state["referents"]["dis"].items():
+        aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(rf))))
+        if value["is_referential"]:
+            aprog.add_hard_rule(Rule(head=Literal("referential", wrap_args(rf))))
 
-        # { assign(X,E) : env(E) } 1 :- dis(X).
-        aprog.add_rule(Rule(
-            head=Literal(
-                "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
-            ),
-            body=[Literal("dis", wrap_args("X"))],
-            ub=1
-        ))
+    # Understood dialogue record contents
+    for _, _, (info, _), _ in dialogue_state["record"]:
+        for i, rule in enumerate(info):
+            head, body, _ = rule
 
-        # cons(X,E,P,W*S) :- dis(X,P,S), env(E,P,W), assign(X,E).
-        aprog.add_hard_rule(Rule(
-            head=Literal("cons", wrap_args("X", "E", "P", ["W", "*", "S"])),
-            body=[
-                Literal("dis", wrap_args("X", "P", "S")),
-                Literal("env", wrap_args("E", "P", "W")),
-                Literal("assign", wrap_args("X", "E")),
-            ]
-        ))
-        # cons(X1,X2,E1,E2,P,W*S) :- dis(X1,X2,P,S), env(E1,E2,P,W), assign(X1,E1), assign(X2,E2).
-        aprog.add_hard_rule(Rule(
-            head=Literal("cons", wrap_args("X1", "X2", "E1", "E2", "P", ["W", "*", "S"])),
-            body=[
-                Literal("dis", wrap_args("X1", "X2," "P", "S")),
-                Literal("env", wrap_args("E1", "E2," "P", "W")),
-                Literal("assign", wrap_args("X1", "E1")),
-                Literal("assign", wrap_args("X2", "E2")),
-            ]
-        ))
+            # The most general way of adding constraints from understood rule, though
+            # most rules will be either body-less facts or head-less constraints and thus
+            # won't require the full processing implemented below
 
-        # 'Base cost' for cases where no assignments are any better than others
-        aprog.add_hard_rule(Rule(head=Literal("zero_p", [])))
+            if body is not None:
+                body_pos = [bl for bl in body if not bl[3]]
+                body_neg = [bl for bl in body if bl[3]]
 
-        # By querying for the optimal assignment, essentially we are giving the user a 'benefit
-        # of doubt', such that any statements made by the user are considered as True, and the
-        # agent will try to find the 'best' assignment to make it so.
-        # (Note: this is not a probabilistic inference, and the confidence scores provided as 
-        # arguments are better understood as properties of the env. entities & disc. referents.)
-        opt_models = aprog.optimize([
-            ("maximize", [
-                ([Literal("zero_p", [])], "0", []),
-                ([Literal("cons", wrap_args("X", "E", "P", "W"))], "W", ["X", "E", "P"]),
-                ([Literal("cons", wrap_args("X1", "X2", "E1", "E2", "P", "W"))], "W", ["X1", "X2", "E1", "E2", "P"])
-            ])
+                if len(body_pos) > 0:
+                    # Penalize assignments satisfying the positive part of rule body (which could
+                    # be relieved later if the rule head exists and is satisfied)
+                    a_body = []
+                    for j, bl in enumerate(body_pos):
+                        b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
+                        a_body.append(Literal("hold", wrap_args(*b_args)))
+
+                        # Consult lexicon for word sense selection
+                        vis_concepts = lexicon.s2d[(bl[0], bl[1])]
+                        aprog.add_rule(Rule(
+                            head=[
+                                Literal("denote", wrap_args(f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}"))
+                                for vc in vis_concepts
+                            ],
+                            lb=1, ub=1
+                        ))
+
+                    W_summ = [op for j in range(len(body_pos)) for op in (f"Wb{str(j)}", "+")][:-1]
+                    aprog.add_hard_rule(Rule(
+                        head=Literal("pen", [(f"r{i}_bp", False), (W_summ, True)]),
+                        body=a_body
+                    ))
+
+                if len(body_neg) > 0:
+                    # Lessen penalties for assignments satisfying the negative part of rule body, so
+                    # that assignments fulfilling the whole body is penalized the most
+                    a_body = []
+                    for j, bl in enumerate(body_neg):
+                        b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
+                        a_body.append(Literal("hold", wrap_args(*b_args)))
+
+                        # Consult lexicon for word sense selection
+                        vis_concepts = lexicon.s2d[(bl[0], bl[1])]
+                        aprog.add_rule(Rule(
+                            head=[
+                                Literal("denote", wrap_args(f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}"))
+                                for vc in vis_concepts
+                            ],
+                            lb=1, ub=1
+                        ))
+
+                    W_summ = ["-"]+[op for j in range(len(body_neg)) for op in (f"Wb{str(j)}", "-")][:-1]
+                    aprog.add_hard_rule(Rule(
+                        head=Literal("pen", [(f"r{i}_bn", False), (W_summ, True)]),
+                        body=a_body
+                    ))
+
+            if head is not None:
+                # Reward assignments satisfying the rule head and body so that the potential penalties
+                # imposed above could be compensated
+                h_args = head[2] + (f"{head[1]}_{head[0]}", "Wh")
+                a_body = [Literal("hold", wrap_args(*h_args))]
+                W_summ = ["-", "Wh"]
+
+                if body is not None:
+                    for j, bl in enumerate(body):
+                        vis_concept = lexicon.s2d[(bl[0], bl[1])]
+                        b_args = bl[2] + (f"{vis_concept[1]}_{vis_concept[0]}", f"Wb{j}")
+                        a_body.append(Literal("hold", wrap_args(*b_args)))
+
+                        if not bl[3]:
+                            W_summ += ["-", f"Wb{j}"]
+
+                # Consult lexicon for word sense selection
+                vis_concepts = lexicon.s2d[(head[0], head[1])]
+                aprog.add_rule(Rule(
+                    head=[
+                        Literal("denote", wrap_args(f"{head[1]}_{head[0]}", f"{vc[1]}_{vc[0]}"))
+                        for vc in vis_concepts
+                    ],
+                    lb=1, ub=1
+                ))
+
+                hb_rule = Rule(
+                    head=Literal("pen", [(f"r{i}_hb", False), (W_summ, True)]),
+                    body=a_body
+                )
+                aprog.add_hard_rule(hb_rule)
+
+    # Hard assignments by pointing, etc.
+    for ref, env in dialogue_state["assignment_hard"].items():
+        aprog.add_hard_rule(
+            Rule(body=[Literal("assign", [(ref, False), (env, False)], naf=True)])
+        )
+
+    ## Assignment program rules
+
+    # hold(X,PL,W) :- hold(E,PV,W), assign(X,E), denote(PL, PV).
+    aprog.add_hard_rule(Rule(
+        head=Literal("hold", wrap_args("X", "PL", "W")),
+        body=[
+            Literal("hold", wrap_args("E", "PV", "W")),
+            Literal("assign", wrap_args("X", "E")),
+            Literal("denote", wrap_args("PL", "PV"))
+        ]
+    ))
+    # hold(X1,X2,PL,W) :- hold(E1,E2,PV,W), assign(X1,E1), assign(X2,E2), denote(PL, PV).
+    aprog.add_hard_rule(Rule(
+        head=Literal("hold", wrap_args("X1", "X2", "P", "W")),
+        body=[
+            Literal("hold", wrap_args("E1", "E2", "P", "W")),
+            Literal("assign", wrap_args("X1", "E1")),
+            Literal("assign", wrap_args("X2", "E2")),
+            Literal("denote", wrap_args("PL", "PV"))
+        ]
+    ))
+
+    # 1 { assign(X,E) : env(E) } 1 :- dis(X), referential(X).
+    aprog.add_rule(Rule(
+        head=Literal(
+            "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
+        ),
+        body=[
+            Literal("dis", wrap_args("X")),
+            Literal("referential", wrap_args("X"))
+        ],
+        lb=1, ub=1
+    ))
+
+    # { assign(X,E) : env(E) } 1 :- dis(X), not referential(X).
+    aprog.add_rule(Rule(
+        head=Literal(
+            "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
+        ),
+        body=[
+            Literal("dis", wrap_args("X")),
+            Literal("referential", wrap_args("X"), naf=True)
+        ],
+        ub=1
+    ))
+
+    # 'Base cost' for cases where no assignments are any better than others
+    aprog.add_hard_rule(Rule(head=Literal("zero_p", [])))
+
+    # By querying for the optimal assignment, essentially we are giving the user a 'benefit
+    # of doubt', such that any statements made by the user are considered as True, and the
+    # agent will try to find the 'best' assignment to make it so.
+    # (Note: this is not a probabilistic inference, and the confidence scores provided as 
+    # arguments are better understood as properties of the env. entities & disc. referents.)
+    opt_models = aprog.optimize([
+        ("minimize", [
+            ([Literal("zero_p", [])], "0", []),
+            ([Literal("pen", wrap_args("RI", "W"))], "W", ["RI"])
         ])
+    ])
 
-        best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
-        best_assignment = {str(args[0][0]): str(args[1][0]) for args in best_assignment}
-    
-    # For discourse referents that shouldn't be assigned an entity in physical world, assign to
-    # some 'void' (hypothetical?) entity
-    void_assignment = defaultdict(lambda: f"v{len(void_assignment)}")
+    best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
+    best_assignment = {args[0][0]: args[1][0] for args in best_assignment}
 
-    a_map = lambda args: [
-        best_assignment[a]
-            if a in best_assignment and not dialogue_state["referents"]["dis"][a]
-            else void_assignment[a]
-        for a in args
-    ]
+    word_senses = [atom.args for atom in opt_models[0] if atom.name == "denote"]
+    word_senses = {
+        tuple(symbol[0].split("_")): tuple(denotation[0].split("_"))
+        for symbol, denotation in word_senses
+    }
+    word_senses = {
+        (symbol[1], symbol[0]): (denotation[0], denotation[1])
+        for symbol, denotation in word_senses.items()
+    }
+
+    a_map = lambda args: [best_assignment[a] for a in args]
 
     # Now incorporate additional information provided by the user in language for updated
     # sensemaking
-    for f in facts:
-        vis_concept = lexicon.s2d[(f[0], f[1])]
-        pred = f"{vis_concept[1]}_{vis_concept[0]}"
-        args = [(a, False) for a in a_map(f[2])]
+    subs_rules = []
+    for _, _, (info, _), _ in dialogue_state["record"]:
+        for i, rule in enumerate(info):
+            head, body, _ = rule
 
-        dprog.add_rule(Rule(head=Literal(pred, args)), U_W_PR)
+            if head is not None:
+                pred = "_".join(word_senses[head[:2]])
+                args = [a for a in a_map(head[2])]
+                subs_head = Literal(pred, wrap_args(*args))
+            else:
+                subs_head = None
+            
+            if body is not None:
+                subs_body = []
+                for bl in body:
+                    pred = "_".join(word_senses[bl[:2]])
+                    args = [a for a in a_map(bl[2])]
+                    bl = Literal(pred, wrap_args(*args), naf=bl[3])
+                    subs_body.append(bl)
+            else:
+                subs_body = None
 
-    for c in constraints:
-        vis_concepts = [lexicon.s2d[(bl[0], bl[1])] for bl in c]
-        constr_body = [
-            Literal(f"{vc[1]}_{vc[0]}", [(a, False) for a in a_map(bl[2])])
-            for bl, vc in zip(c, vis_concepts)
-        ]
+            subs_rule = Rule(head=subs_head, body=subs_body)
+            subs_rules.append(subs_rule)
+            dprog.add_rule(subs_rule, U_W_PR)
 
-        dprog.add_rule(Rule(body=constr_body), U_W_PR)
-    
     # Finally, reasoning with all visual+language info
     prog += dprog
-    models_vl = prog.solve()
-    marginals_vl = models_vl.marginals()
+    models_vl, memoized_vl = prog.solve(provided_mem=memoized_v)
 
     # Identify any drastic mismatches between vis only vs. lang input
     mismatches = []
 
-    # Test grounded facts
-    for f in facts:
-        # Ignore any 'facts' having indefinite entities as arguments
-        if any([dialogue_state["referents"]["dis"][a] for a in f[2]]):
-            continue
-
-        vis_concept = lexicon.s2d[(f[0], f[1])]
-        f_vis = (vis_concept[0], vis_concept[1], a_map(f[2]))
-
-        ev_prob = models_v.query_yn(
-            Literal(f"{f_vis[1]}_{f_vis[0]}", [(a, False) for a in f_vis[2]])
-        )
+    # Test provided info contained in dialogue record against vision-only cognition
+    for rule in subs_rules:
+        ev_prob = models_v.query_yn(subs_rule)
 
         surprisal = -math.log(ev_prob + EPS)
         if surprisal > SR_THRES:
-            mismatches.append((True, f, f_vis, surprisal))
+            mismatches.append((True, subs_rule, surprisal))
 
-    # Test grounded constraints
-    for c in constraints:
-        # Ignore any 'constraints' having indefinite entities as arguments
-        if any([any([dialogue_state["referents"]["dis"][a] for a in ents]) for _, _, ents in c_vis]):
-            continue
-
-        vis_concepts = [lexicon.s2d[(bl[0], bl[1])] for bl in c]
-        c_vis = [
-            (vc[0], vc[1], a_map(bl[2])) for bl, vc in zip(c, vis_concepts)
-        ]
-
-        c_atoms = [
-            Literal(f"{vc1}_{vc0}", [(a, False) for a in ents])
-            for vc0, vc1, ents in c_vis
-        ]
-
-        ev_prob = models_v.query_yn(c_atoms, neg=True)
-
-        surprisal = -math.log(ev_prob + EPS)
-        if surprisal > SR_THRES:
-            mismatches.append((False, c, c_vis, surprisal))
-    
-    assignment = {**best_assignment, **dict(void_assignment)}
-
-    return (models_vl, marginals_vl, prog), assignment, mismatches
+    return (models_vl, memoized_vl, prog), best_assignment, mismatches

@@ -1,6 +1,7 @@
 class Lexicon:
     """
-    Lexicon of open-classed words <-> their denoted concepts in physical world
+    Lexicon of open-classed words <-> their denoted concepts in physical world. Should
+    allow many-to-many mappings between symbols and denotations.
     """
     # Special reserved symbols
     RESERVED = {
@@ -18,8 +19,17 @@ class Lexicon:
         return symbol in self.s2d
 
     def add(self, symbol, denotation):
-        self.s2d[symbol] = denotation
-        self.d2s[denotation] = symbol
+        # Symbol-to-denotation
+        if symbol in self.s2d:
+            self.s2d[symbol].append(denotation)
+        else:
+            self.s2d[symbol] = [denotation]
+        
+        # Denotation-to-symbol
+        if denotation in self.d2s:
+            self.d2s[denotation].append(symbol)
+        else:
+            self.d2s[denotation] = [symbol]
 
     def fill_from_vision(self, predicates):
         """
@@ -33,4 +43,4 @@ class Lexicon:
         for i, a in enumerate(predicates["att"]):
             self.add((a.split(".")[0], "a"), (i, "att"))
         for i, r in enumerate(predicates["rel"]):
-            self.add((r.split(".")[0], "p"), (i, "rel"))
+            self.add((r.split(".")[0], "v"), (i, "rel"))

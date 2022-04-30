@@ -31,7 +31,8 @@ class CognitiveReasonerModule:
         lexicon = lang.lexicon
         agenda = practical.agenda
 
-        self.concl_vis = sensemake_vis(vis_scene)
+        if vision.updated:
+            self.concl_vis = sensemake_vis(vis_scene)
 
         if len(dialogue_state["record"]) > 0:
             self.concl_vis_lang, assignment, mismatches = sensemake_vis_lang(

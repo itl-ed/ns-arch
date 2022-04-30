@@ -6,4 +6,4 @@ def wrap_args(*args):
     Wrap list of arguments, adding whether each arg is variable or not by looking at
     if the first letter is uppercased
     """
-    return [(a, a[0].isupper()) for a in args]
+    return [(a, type(a)==str and a[0].isupper()) for a in args]

@@ -1,13 +1,8 @@
 """
 Implements LP^MLN literal class
 """
-import logging
-
 import clingo
 
-
-logger = logging.getLogger("lpmln")
-logger.setLevel(logging.INFO)
 
 class Literal:
     """
@@ -34,24 +29,16 @@ class Literal:
                 # arithmetic formula
                 ...
 
+            elif type(arg) == tuple:
+                # Uninterpreted function term
+                if is_var != any([a[0].isupper() for a in arg[1]]):
+                    raise ValueError("Term letter case and variable claim mismatch")
+
             else:
                 assert type(arg) == str
 
-                if is_var and (not arg[0].isupper()):
-                    logger.warning(
-                        f"[LP^MLN] A literal argument term ({arg}) is claimed to be a variable "
-                        "but starts with a lowercase letter; converted the first character to "
-                        "uppercase."
-                    )
-                    self.args[i] = (arg[0].upper() + arg[1:], is_var)
-
-                if (not is_var) and arg[0].isupper():
-                    logger.warning(
-                        f"[LP^MLN] A literal argument term ({arg}) is claimed to be a constant "
-                        "but starts with an uppercase letter; converted the first character to "
-                        "lowercase."
-                    )
-                    self.args[i] = (arg[0].lower() + arg[1:], is_var)
+                if is_var != arg[0].isupper():
+                    raise ValueError("Term letter case and variable claim mismatch")
 
     def __str__(self):
         naf_head = "not " if self.naf else ""
@@ -61,14 +48,16 @@ class Literal:
                 args_str.append(f"{a[0]:.2f}")
             elif type(a[0]) == list:
                 args_str.append("".join(a[0]))
+            elif type(a[0]) == tuple:
+                args_str.append(f"{a[0][0]}({','.join(a[0][1])})")
             else:
                 args_str.append(str(a[0]))
-        args = ",".join(args_str)
+        args = "("+",".join(args_str)+")" if len(args_str)>0 else ""
 
         conds = f" : {','.join([str(c) for c in self.conds])}" \
             if len(self.conds) > 0 else ""
 
-        return f"{naf_head}{self.name}({args}){conds}"
+        return f"{naf_head}{self.name}{args}{conds}"
     
     def __repr__(self):
         return f"Literal({str(self)})"
@@ -96,20 +85,6 @@ class Literal:
             return Literal(self.name, self.args, False)
         else:
             return self
-
-    def is_instance(self, other):
-        """
-        Returns true if self can be instantiated from other by grounding variables (if any)
-        """
-        if self == other:
-            # Trivially true
-            return True
-        else:
-            if self.name != other.name: return False
-            for (arg_s, is_var_s), (arg_o, is_var_o) in zip(self.args, other.args):
-                return False
-            if self.naf != other.naf: return False
-            return True
     
     def substitute(self, arg_x, arg_y):
         """
@@ -125,7 +100,10 @@ class Literal:
         args = [
             (a.number, False)
                 if a.type == clingo.SymbolType.Number
-                else (a.name, a.name.isupper())
+                else ((a.name, a.name.isupper())                  # Constant
+                    if len(a.arguments)==0
+                    else ((a.name, tuple([t.name for t in a.arguments])), False)   # Function
+                )
             for a in symbol.arguments
         ]
         return Literal(name=name, args=args)
