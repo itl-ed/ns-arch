@@ -40,7 +40,7 @@ def sensemake_vis(vis_scene, objectness_thresh=0.75, category_thresh=0.75):
 
     Returns:
         List of possible worlds (models) with associated likelihood estimates,
-        List of marginal probabilities for each grounded first-order literal,
+        Memoized models indexed by (multi)set of grounded rules,
         Composed ASP program (as string) used for generating these outputs,
         Rule counts
     """
@@ -139,8 +139,9 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
 
     Returns:
         List of possible worlds (models) with associated likelihood estimates,
-        List of marginal probabilities for each grounded first-order literal,
+        Memoized models indexed by (multi)set of grounded rules,
         Composed ASP program (as string) used for generating these outputs,
+        + Computed best mapping from discourse referents to env entities,
         + Any mismatches between vis-only vs. vis-and-lang marginals
     """
     models_v, memoized_v, prog = vis_result
@@ -152,7 +153,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     # Find the best estimate of assignment
 
     # Environment entities
-    marginals_v = models_v.marginals()
+    marginals_v, _ = models_v.marginals()
     for atom, conf in marginals_v.items():
         pred = atom.name
         args = atom.args
@@ -180,6 +181,16 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         for i, rule in enumerate(info):
             head, body, _ = rule
 
+            # Skip any non-grounded content
+            head_has_var = head is not None and any([
+                type(x)==str and x[0].isupper() for x in head[2]
+            ])
+            body_has_var = body is not None and any([
+                any([type(x)==str and x[0].isupper() for x in bl[2]])
+                for bl in body
+            ])
+            if head_has_var or body_has_var: continue
+
             # The most general way of adding constraints from understood rule, though
             # most rules will be either body-less facts or head-less constraints and thus
             # won't require the full processing implemented below
@@ -200,7 +211,9 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
                         vis_concepts = lexicon.s2d[(bl[0], bl[1])]
                         aprog.add_rule(Rule(
                             head=[
-                                Literal("denote", wrap_args(f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}"))
+                                Literal("denote", wrap_args(
+                                    f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
+                                ))
                                 for vc in vis_concepts
                             ],
                             lb=1, ub=1
@@ -224,7 +237,9 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
                         vis_concepts = lexicon.s2d[(bl[0], bl[1])]
                         aprog.add_rule(Rule(
                             head=[
-                                Literal("denote", wrap_args(f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}"))
+                                Literal("denote", wrap_args(
+                                    f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
+                                ))
                                 for vc in vis_concepts
                             ],
                             lb=1, ub=1
@@ -256,7 +271,9 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
                 vis_concepts = lexicon.s2d[(head[0], head[1])]
                 aprog.add_rule(Rule(
                     head=[
-                        Literal("denote", wrap_args(f"{head[1]}_{head[0]}", f"{vc[1]}_{vc[0]}"))
+                        Literal("denote", wrap_args(
+                            f"{head[1]}_{head[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
+                        ))
                         for vc in vis_concepts
                     ],
                     lb=1, ub=1
@@ -276,23 +293,23 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
 
     ## Assignment program rules
 
-    # hold(X,PL,W) :- hold(E,PV,W), assign(X,E), denote(PL, PV).
+    # hold(X,PL,W) :- hold(E,PV,W), assign(X,E), denote(PL, PV, F).
     aprog.add_hard_rule(Rule(
         head=Literal("hold", wrap_args("X", "PL", "W")),
         body=[
             Literal("hold", wrap_args("E", "PV", "W")),
             Literal("assign", wrap_args("X", "E")),
-            Literal("denote", wrap_args("PL", "PV"))
+            Literal("denote", wrap_args("PL", "PV", "F"))
         ]
     ))
-    # hold(X1,X2,PL,W) :- hold(E1,E2,PV,W), assign(X1,E1), assign(X2,E2), denote(PL, PV).
+    # hold(X1,X2,PL,W) :- hold(E1,E2,PV,W), assign(X1,E1), assign(X2,E2), denote(PL, PV, F).
     aprog.add_hard_rule(Rule(
         head=Literal("hold", wrap_args("X1", "X2", "P", "W")),
         body=[
             Literal("hold", wrap_args("E1", "E2", "P", "W")),
             Literal("assign", wrap_args("X1", "E1")),
             Literal("assign", wrap_args("X2", "E2")),
-            Literal("denote", wrap_args("PL", "PV"))
+            Literal("denote", wrap_args("PL", "PV", "F"))
         ]
     ))
 
@@ -332,13 +349,16 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
         ("minimize", [
             ([Literal("zero_p", [])], "0", []),
             ([Literal("pen", wrap_args("RI", "W"))], "W", ["RI"])
+        ]),
+        ("maximize", [
+            ([Literal("denote", wrap_args("PL", "PV", "F"))], "F", ["PL"])
         ])
     ])
 
     best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
     best_assignment = {args[0][0]: args[1][0] for args in best_assignment}
 
-    word_senses = [atom.args for atom in opt_models[0] if atom.name == "denote"]
+    word_senses = [atom.args[:2] for atom in opt_models[0] if atom.name == "denote"]
     word_senses = {
         tuple(symbol[0].split("_")): tuple(denotation[0].split("_"))
         for symbol, denotation in word_senses
@@ -352,10 +372,19 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
 
     # Now incorporate additional information provided by the user in language for updated
     # sensemaking
-    subs_rules = []
     for _, _, (info, _), _ in dialogue_state["record"]:
         for i, rule in enumerate(info):
             head, body, _ = rule
+
+            # Skip any non-grounded content
+            head_has_var = head is not None and any([
+                type(x)==str and x[0].isupper() for x in head[2]
+            ])
+            body_has_var = body is not None and any([
+                any([type(x)==str and x[0].isupper() for x in bl[2]])
+                for bl in body
+            ])
+            if head_has_var or body_has_var: continue
 
             if head is not None:
                 pred = "_".join(word_senses[head[:2]])
@@ -374,9 +403,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
             else:
                 subs_body = None
 
-            subs_rule = Rule(head=subs_head, body=subs_body)
-            subs_rules.append(subs_rule)
-            dprog.add_rule(subs_rule, U_W_PR)
+            dprog.add_rule(Rule(head=subs_head, body=subs_body), U_W_PR)
 
     # Finally, reasoning with all visual+language info
     prog += dprog
@@ -385,12 +412,55 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     # Identify any drastic mismatches between vis only vs. lang input
     mismatches = []
 
-    # Test provided info contained in dialogue record against vision-only cognition
-    for rule in subs_rules:
-        ev_prob = models_v.query_yn(subs_rule)
+    # Test provided info contained in dialogue record against vision-only cognition,
+    # utterance-by-utterance
+    for _, _, (info, _), _ in dialogue_state["record"]:
+        for i, rule in enumerate(info):
+            head, body, _ = rule
 
-        surprisal = -math.log(ev_prob + EPS)
-        if surprisal > SR_THRES:
-            mismatches.append((True, subs_rule, surprisal))
+            # Skip any non-grounded content
+            head_has_var = head is not None and any([
+                type(x)==str and x[0].isupper() for x in head[2]
+            ])
+            body_has_var = body is not None and any([
+                any([type(x)==str and x[0].isupper() for x in bl[2]])
+                for bl in body
+            ])
+            if head_has_var or body_has_var: continue
+
+            if head is not None:
+                pred = "_".join(word_senses[head[:2]])
+                args = [a for a in a_map(head[2])]
+                subs_head = Literal(pred, wrap_args(*args))
+            else:
+                subs_head = None
+            
+            if body is not None:
+                subs_body = []
+                for bl in body:
+                    pred = "_".join(word_senses[bl[:2]])
+                    args = [a for a in a_map(bl[2])]
+                    bl = Literal(pred, wrap_args(*args), naf=bl[3])
+                    subs_body.append(bl)
+            else:
+                subs_body = None
+
+            # Compute event probability
+            ev_rule = Rule(head=subs_head, body=subs_body)
+            ev_prob = 0
+
+            # Event does not count as mismatch (i.e. violate the claim made) iff
+            # either both head and body are satisfied, or body is not satisfied
+            # - similar to FOL-like reading of implication
+            if len(ev_rule.head) > 0:
+                # Both head and body satisfied
+                ev_prob += models_v.query_yn(ev_rule.head+ev_rule.body)
+            if len(ev_rule.body) > 0:
+                # Body not satisfied
+                ev_prob += 1 - models_v.query_yn(ev_rule.body)
+
+            surprisal = -math.log(ev_prob + EPS)
+            if surprisal > SR_THRES:
+                mismatches.append((ev_rule, surprisal))
 
     return (models_vl, memoized_vl, prog), best_assignment, mismatches

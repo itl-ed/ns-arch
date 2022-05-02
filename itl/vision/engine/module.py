@@ -103,6 +103,11 @@ class SceneGraphGenerator(LightningModule):
             "att": md.attributes,
             "rel": md.relations
         }
+        ckpt["predicates_freq"] = {
+            "cls": md.classes_counts,
+            "att": md.attributes_counts,
+            "rel": md.relations_counts
+        }
 
     def on_load_checkpoint(self, ckpt):
         self.start_iter = ckpt["iteration"]

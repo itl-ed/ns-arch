@@ -28,7 +28,7 @@ class ITLAgent:
         self.practical = PracticalReasonerModule()
 
         # Initialize empty lexicon with concepts in visual module
-        self.lt_mem.lexicon.fill_from_vision(self.vision.predicates)
+        self.lt_mem.lexicon.fill_from_vision(self.vision)
 
         # Image file selection CUI
         self.dcompleter = DatasetImgsCompleter()
@@ -160,7 +160,7 @@ class ITLAgent:
             self.cognitive.sensemake(self.vision, self.lang, self.practical)
 
             models_v, _, _ = self.cognitive.concl_vis
-            marginals_v = models_v.marginals()
+            marginals_v, _ = models_v.marginals()
 
             # Organize sensemaking results by object, with category sorted by confidences
             results_v = {

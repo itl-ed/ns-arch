@@ -65,6 +65,7 @@ class VisionModule:
         # Lists of cls/att/rel category predicates, serving as mapping from category
         # idx to string name
         self.predicates = None
+        self.predicates_freq = None
 
         # pytorch_lightning model; not initialized until self.load_model() or self.train()
         self.model = None
@@ -435,9 +436,11 @@ class VisionModule:
                 # Needed if resuming training
                 self.current_wandb_id = ckpt_path.strip("wandb://").split("/")[2]
             
-            # If checkpoint has "predicates" field, store as property
+            # If checkpoint has "predicates" & "predicates_freq" field, store as property
             if "predicates" in ckpt:
                 self.predicates = ckpt["predicates"]
+            if "predicates_freq" in ckpt:
+                self.predicates_freq = ckpt["predicates_freq"]
 
         else:
             # Likely has loaded a pre-trained ResNet from torch hub or detectron2 repo;

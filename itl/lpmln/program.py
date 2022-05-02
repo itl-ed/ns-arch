@@ -4,6 +4,8 @@ Implements LP^MLN program class
 import copy
 import heapq
 from collections import defaultdict
+from itertools import product
+from functools import reduce
 
 import clingo
 import numpy as np
@@ -18,7 +20,7 @@ from .topk_subset import topk_subset_gen
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.75     # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.50     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
@@ -113,35 +115,17 @@ class Program:
         """
         provided_mem = {} if provided_mem is None else provided_mem
 
-        # Try exploiting memoized solutions
-        if len(provided_mem) > 0:
-            frozen_rules = FrozenMultiset(self.rules)
-            if frozen_rules in provided_mem:
-                # Memoized solution exists for the whole
-                models = provided_mem[frozen_rules]
-                return models, provided_mem
-            
-            # Test if frozen_rules can be assembled from memoized rule sets
-            remaining = frozen_rules
-            rule_sets = []
-            while len(remaining) > 0:
-                for rs in provided_mem:
-                    if rs <= remaining:
-                        remaining = remaining - rs
-                        rule_sets.append(rs)
-                else:
-                    # Cannot reduce with any memoized rule set any more
-                    break
-            
-            if len(remaining) == 0:
-                # Successfully recovered frozen_rules; return Models instance with these
-                # as factors
-                models = Models([provided_mem[rs] for rs in rule_sets])
-                memoized_models = {
-                    sum(rule_sets, FrozenMultiset()): models,
-                    **provided_mem
-                }
-                return models, memoized_models
+        # Can take shortcut if program consists only of grounded facts
+        grounded_facts_only = all([
+            r.is_fact() and r.is_grounded() for r, _ in self.rules
+        ])
+        if grounded_facts_only:
+            facts = [(r.head[0], float(w_pr[0]), None) for r, w_pr in self.rules]
+
+            models = Models(factors=facts)
+            memoized_models = { FrozenMultiset(self.rules): models }
+
+            return models, memoized_models
 
         # Feed compiled program string to clingo.Control object and ground program
         rules_obs = _Observer()
@@ -157,78 +141,100 @@ class Program:
         atoms_inv_map = {v: k for k, v in atoms_map.items()}
         aux_i = len(atoms_map)
 
+        # Index rules by grounded atoms. When tracking which original rules have yielded
+        # the grounded rules below, relevant rules may be directly retrieved without having
+        # to iterate over self.rules for every grounded rule.
+        rules_by_atom_inv = defaultdict(set)
+        for atm, ris in self._rules_by_atom.items():
+            for ri in ris:
+                rules_by_atom_inv[ri].add(atm)
+        rules_by_atom_set = defaultdict(set)
+        for ri, atms in rules_by_atom_inv.items():
+            rules_by_atom_set[FrozenMultiset(atms)].add(ri)
+        rules_by_atom_set = dict(rules_by_atom_set)
+
+        instantiable_atoms = {
+            ra: {
+                ma for ma in atoms_map
+                if ra.name == ma.name and len(ra.args) == len(ma.args) and all([
+                    rarg[1] == True or rarg[0] == marg[0]
+                    for rarg, marg in zip(ra.args, ma.args)
+                ])
+            }
+            for ra in self._rules_by_atom
+        }
+
+        # For any atom sets including non-grounded atoms, fully instantiate
+        for atms in rules_by_atom_set:
+            grounded_atms = [{a} for a in atms if a.is_grounded()]
+            non_grounded_atms = [
+                instantiable_atoms[a] for a in atms if not a.is_grounded()
+            ]
+
+            if len(non_grounded_atms) > 0:
+                for instance in product(*grounded_atms, *non_grounded_atms):
+                    instance = FrozenMultiset(instance)
+                    rules_by_atom_set[instance] = rules_by_atom_set[atms]
+
         # Iterate over the grounded rules for the following processes:
-        #   1) Construct dependency graph from grounded rules
-        #   2) Track which rule in the original program could have instantiated each
+        #   1) Track which rule in the original program could have instantiated each
         #        grounded rule (wish clingo python API supported such feature...)
-        # (Major bottleneck, due to checking instantiability in 2))
+        #   2) Construct dependency graph from grounded rules
         dep_graph = nx.DiGraph()
-        grounded_rules = Multiset()
+        grounded_rules = FrozenMultiset()
+        grounded_rules_by_head = defaultdict(FrozenMultiset)
         for head, body, choice in rules_obs.rules:
-            if len(head) > 0:
-                for h_lit in head:
-                    dep_graph.add_node(abs(h_lit))
-                    for b_lit in body:
-                        dep_graph.add_node(abs(b_lit))
-                        dep_graph.add_edge(abs(b_lit), abs(h_lit))
-            else:
-                # Integrity constraint; add rule-specific auxiliary atom
-                aux_i += 1
-                for b_lit in body:
-                    dep_graph.add_node(abs(b_lit))
-                    dep_graph.add_node(aux_i)
-                    dep_graph.add_edge(abs(b_lit), aux_i)
-            
             # Find the original rule in the program that this grounded rule unifies with
-            head = [
+            head_inv = [
                 atoms_inv_map[hl] if hl > 0 else atoms_inv_map[abs(hl)].flip()
                 for hl in head
             ]
-            body = [
+            body_inv = [
                 atoms_inv_map[bl] if bl > 0 else atoms_inv_map[abs(bl)].flip()
                 for bl in body
             ]
-            gr_rule = Rule(head=head, body=body)
+            gr_rule = Rule(head=head_inv, body=body_inv)
 
-            for rule, w_pr in self.rules:
+            rule_copies = Multiset()
+            occurring_atms = FrozenMultiset([l.as_atom() for l in gr_rule.literals()])
+            for ri in rules_by_atom_set[occurring_atms]:
+                rule, w_pr = self.rules[ri]
+
                 orig_soft = not ((1.0 in w_pr) or (0.0 in w_pr))
                 if orig_soft != choice:
                     # Soft-hard weight mismatch; continue
                     continue
 
-                if gr_rule.is_instance(rule):
-                    grounded_rules.add((gr_rule, w_pr))
-        
-        grounded_rules = FrozenMultiset(grounded_rules)
+                rule_copies.add((gr_rule, w_pr))
 
-        # Try exploiting memoized solutions (again, with grounded program)
+            grounded_rules = grounded_rules + rule_copies
+
+            if len(head) > 0:
+                grounded_rules_by_head[head[0]] = \
+                    grounded_rules_by_head[head[0]] + rule_copies
+
+                for h_lit in head:
+                    dep_graph.add_node(abs(h_lit))
+                    for b_lit in body:
+                        dep_graph.add_node(abs(b_lit))
+                        dep_graph.add_edge(abs(b_lit), abs(h_lit))
+                    
+            else:
+                # Integrity constraint; add rule-specific auxiliary atom
+                aux_i += 1
+                grounded_rules_by_head[aux_i] = \
+                    grounded_rules_by_head[aux_i] + rule_copies
+
+                for b_lit in body:
+                    dep_graph.add_node(abs(b_lit))
+                    dep_graph.add_node(aux_i)
+                    dep_graph.add_edge(abs(b_lit), aux_i)
+
+        # Try exploiting memoized solutions for the whole grounded rule set
         if len(provided_mem) > 0:
             if grounded_rules in provided_mem:
-                # Memoized solution exists for the whole
                 models = provided_mem[grounded_rules]
                 return models, provided_mem
-            
-            # Test if grounded_rules can be assembled from memoized rule sets
-            remaining = grounded_rules
-            rule_sets = []
-            while len(remaining) > 0:
-                for rs in provided_mem:
-                    if rs <= remaining:
-                        remaining = remaining - rs
-                        rule_sets.append(rs)
-                else:
-                    # Cannot reduce with any memoized rule set any more
-                    break
-            
-            if len(remaining) == 0:
-                # Successfully recovered grounded_rules; return Models instance with these
-                # as factors
-                models = Models([provided_mem[rs] for rs in rule_sets])
-                memoized_models = {
-                    sum(rule_sets, FrozenMultiset()): models,
-                    **provided_mem
-                }
-                return models, memoized_models
 
         # Convert the dependency graph to undirected, and then partition into independent
         # components
@@ -240,11 +246,27 @@ class Program:
         else:
             comps = [dep_graph.subgraph(nodes) for nodes in comps]
         
-        # Atoms in each grounded rule
-        grounded_rules_atoms = {
-            gr_rule: [atoms_map[l.as_atom()] for l in gr_rule.literals()]
-            for gr_rule, _ in grounded_rules
-        }
+        # Grounded rule sets for each component
+        grounded_rules_per_comp = [
+            sum([grounded_rules_by_head[a] for a in comp.nodes()], FrozenMultiset())
+            for comp in comps
+        ]
+
+        # Try exploiting memoized solutions by assembling from provided_mem
+        if len(provided_mem) > 0:
+            retrieved = []
+            for gr_c in grounded_rules_per_comp:
+                if gr_c not in provided_mem: break
+                retrieved.append(provided_mem[gr_c])
+            
+            if len(retrieved) == len(comps):
+                # Successfully recovered
+                models = Models(retrieved)
+                memoized_models = {
+                    sum(grounded_rules_per_comp, FrozenMultiset()): models,
+                    **provided_mem
+                }
+                return models, memoized_models
 
         indep_trees = []; memoized_models = {}
         for ci, comp in enumerate(comps):
@@ -252,10 +274,7 @@ class Program:
 
             # Find possibly relevant rules for each component, ignoring grounded rules that
             # do not overlap at all
-            grounded_rules_relevant = [
-                (gr_rule, w_pr) for gr_rule, w_pr in grounded_rules
-                if any([a in comp.nodes() for a in grounded_rules_atoms[gr_rule]])
-            ]
+            grounded_rules_relevant = grounded_rules_per_comp[ci]
 
             if len(provided_mem) > 0:
                 # Check if memoized solution exists for the component
@@ -288,15 +307,41 @@ class Program:
 
                     # (Assuming only one fact is present with the atom as head)
                     facts = [self.rules[fs.pop()] for fs in facts]
-                    facts = [(f.head[0], float(w_pr[0])) for f, w_pr in facts]
+                    facts = [(f.head[0], float(w_pr[0]), None) for f, w_pr in facts]
 
                     tree = Models(factors=facts)
 
                 else:
                     # Solve the bottom (== comp) with clingo and return answer sets (with
                     # associated probabilities)
-                    raise NotImplementedError
-                    tree = Models(outcomes=[])
+                    ctl = clingo.Control()
+                    ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
+                    ctl.ground([("base", [])])
+                    ctl.configuration.solve.models = 0
+
+                    models = []
+                    with ctl.solve(yield_=True) as solve_gen:
+                        for m in solve_gen:
+                            models.append(m.symbols(atoms=True))
+                            if solve_gen.get().unsatisfiable: break
+
+                    # Process models to extract true atoms along with model weights
+                    models = [
+                        ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
+                        for m in models
+                    ]
+                    models = [
+                        (
+                            [Literal.from_clingo_symbol(a) for a in atoms],
+                            sum([a.arguments[1].number / SCALE_PREC for a in unsats])
+                        )
+                        for atoms, unsats in models
+                    ]
+                    logZ = reduce(np.logaddexp, [weight for _, weight in models])
+                    models = [(atoms, np.exp(weight-logZ)) for atoms, weight in models]
+
+                    outcomes = [(weight, atoms, None) for atoms, weight in models]
+                    tree = Models(outcomes=outcomes)
                 
                 # Memoize bottom
                 memoized_models[FrozenMultiset(bottom.rules)] = tree
@@ -412,7 +457,7 @@ class Program:
                     memoized_models.update(top_memoized)
                     memoized_models[FrozenMultiset(reduced_top.rules)] = top_models
 
-                    outcomes.append(((pos_atoms, pr), top_models))
+                    outcomes.append((pr, pos_atoms, top_models))
                 tree = Models(outcomes=outcomes)
 
             indep_trees.append(tree)
@@ -686,7 +731,7 @@ class Program:
                                 head=Literal("unsat", unsat_args),
                                 body=[rule.head[0].flip()]
                             )
-                            as_str += str(unsat_rule)
+                            as_str += str(unsat_rule) + "\n"
                     else:
                         if unsats:
                             # Add a modified rule with the same body but unsat atom
@@ -698,7 +743,7 @@ class Program:
                                 head=Literal("unsat", unsat_args),
                                 body=rule.body
                             )
-                            as_str += str(unsat_rule)
+                            as_str += str(unsat_rule) + "\n"
                         else:
                             # Even when unsats=False, should add a modified rule with
                             # an auxiliary atom as head when body contains more than
@@ -710,7 +755,7 @@ class Program:
                                     head=Literal("unsat", aux_args),
                                     body=rule.body
                                 )
-                                as_str += str(aux_rule)
+                                as_str += str(aux_rule) + "\n"
             else:
                 # Choice rules with multiple head literals
                 as_str += rule.str_as_choice() + "\n"
@@ -730,10 +775,10 @@ class _Observer:
 
 
 def _logit(p):
-    """Compute logit of the probability value p, capped by LARGE value (+/-)"""
+    """ Compute logit of the probability value p, capped by LARGE value (+/-) """
     if p == 1:
         return LARGE
-    elif p == -1:
+    elif p == 0:
         return -LARGE
     else:
         return np.log(p/(1-p))

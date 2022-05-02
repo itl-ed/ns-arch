@@ -98,10 +98,7 @@ class Rule:
 
     def is_grounded(self):
         """ Returns True if the rule is variable-free """
-        for l in self.literals():
-            if any([is_var for _, is_var in l.args]):
-                return False
-        return True
+        return all([l.is_grounded() for l in self.literals()])
 
     def is_instance(self, other):
         """
