@@ -66,14 +66,20 @@ class LanguageModule:
         Update assignment from discourse referents to environment referents with provided mapping
         (Overwrite if key exists)
         """
-        for dis_ref, env_ref in assignment.items():
-            self.dialogue.assignment_soft[dis_ref] = env_ref
+        self.dialogue.assignment_soft.update(assignment)
+    
+    def update_word_senses(self, word_senses):
+        """
+        Update word sense denotation under current dialogue context. Currently symbol type based,
+        but sophisticated use cases will require token based sense resolution.
+        """
+        self.dialogue.word_senses.update(word_senses)
 
     def utt_contains_neologism(self, utt_id):
         """
         Check if logical content of dialogue record indexed by utt_id contains any neologism
         """
-        _, _, (rules, queries), _ = self.dialogue.record[utt_id]
+        _, _, (rules, query), _ = self.dialogue.record[utt_id]
 
         if rules is not None:
             for head, body, _ in rules:
@@ -83,10 +89,14 @@ class LanguageModule:
                     for b in body:
                         if b[:2] not in self.lexicon.s2d: return True
         
-        if queries is not None:
-            for _, q_lits in queries:
-                for ql in q_lits:
-                    if ql[:2] not in self.lexicon.s2d: return True
+        if query is not None:
+            _, q_fmls = query
+            for head, body, _ in q_fmls:
+                if head is not None:
+                    if head[:2] not in self.lexicon.s2d: return True
+                if body is not None:
+                    for b in body:
+                        if b[:2] not in self.lexicon.s2d: return True
 
         return False
 
@@ -96,7 +106,7 @@ class LanguageModule:
         indexed by utt_id to ASP (LP^MLN) rule(s) and return
         """
         utt = self.dialogue.record[utt_id]
-        _, _, (rules, queries), orig_utt = utt
+        _, _, (rules, query), orig_utt = utt
 
         assig = {**self.dialogue.assignment_soft, **self.dialogue.assignment_hard}
 
@@ -104,7 +114,7 @@ class LanguageModule:
             converted_rules = []
             for head, body, _ in rules:
                 if head is not None:
-                    cat_ind, cat_type = self.lexicon.s2d[head[:2]]
+                    cat_ind, cat_type = self.dialogue.word_senses[head[:2]]
                     wrapped_head = Literal(
                         f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in head[2]])
                     )
@@ -114,7 +124,7 @@ class LanguageModule:
                 wrapped_bls = []
                 if body is not None:
                     for bl in body:
-                        cat_ind, cat_type = self.lexicon.s2d[bl[:2]]
+                        cat_ind, cat_type = self.dialogue.word_senses[bl[:2]]
                         bl = Literal(
                             f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in bl[2]])
                         )
@@ -125,21 +135,22 @@ class LanguageModule:
         else:
             converted_rules = None
         
-        if queries is not None:
-            converted_queries = []
-            for q_ent, q_lits in queries:
-                wrapped_qls = []
-                for ql in q_lits:
-                    cat_ind, cat_type = self.lexicon.s2d[ql[:2]]
-                    ql = Literal(
-                        f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in ql[2]])
-                    )
-                    wrapped_qls.append(ql)
-                converted_queries.append((q_ent, wrapped_qls, orig_utt))
-        else:
-            converted_queries = None
+        if query is not None:
+            q_ent, q_fmls = query
 
-        return converted_rules, converted_queries
+            wrapped_qls = []
+            for head, body, _ in q_fmls:
+                cat_ind, cat_type = self.lexicon.s2d[ql[:2]]
+                ql = Literal(
+                    f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in ql[2]])
+                )
+                wrapped_qls.append(ql)
+
+            converted_query = (q_ent, wrapped_qls, orig_utt)
+        else:
+            converted_query = None
+
+        return converted_rules, converted_query
 
     def prepare_answer(self, utt_id, cognitive):
         """ Synthesize natural language answer to question """

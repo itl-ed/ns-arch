@@ -138,11 +138,16 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
             referents for variable assignment
 
     Returns:
-        List of possible worlds (models) with associated likelihood estimates,
-        Memoized models indexed by (multi)set of grounded rules,
-        Composed ASP program (as string) used for generating these outputs,
-        + Computed best mapping from discourse referents to env entities,
-        + Any mismatches between vis-only vs. vis-and-lang marginals
+        (
+            List of possible worlds (models) with associated likelihood estimates,
+            Memoized models indexed by (multi)set of grounded rules,
+            Composed ASP program (as string) used for generating these outputs,
+        ),
+        (
+            Computed best mapping from discourse referents to env entities,
+            Computed word sense disambiguation results
+        ),
+        Any mismatches between vis-only vs. vis-and-lang marginals
     """
     models_v, memoized_v, prog = vis_result
 
@@ -346,6 +351,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     # (Note: this is not a probabilistic inference, and the confidence scores provided as 
     # arguments are better understood as properties of the env. entities & disc. referents.)
     opt_models = aprog.optimize([
+        # Note: Earlier statements receive higher optimization priority
         ("minimize", [
             ([Literal("zero_p", [])], "0", []),
             ([Literal("pen", wrap_args("RI", "W"))], "W", ["RI"])
@@ -415,6 +421,7 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     # Test provided info contained in dialogue record against vision-only cognition,
     # utterance-by-utterance
     for _, _, (info, _), _ in dialogue_state["record"]:
+        content = set()
         for i, rule in enumerate(info):
             head, body, _ = rule
 
@@ -444,23 +451,13 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
                     subs_body.append(bl)
             else:
                 subs_body = None
+            
+            content.add(Rule(head=subs_head, body=subs_body))
 
-            # Compute event probability
-            ev_rule = Rule(head=subs_head, body=subs_body)
-            ev_prob = 0
+        ev_prob = models_v.query_yn(content)
 
-            # Event does not count as mismatch (i.e. violate the claim made) iff
-            # either both head and body are satisfied, or body is not satisfied
-            # - similar to FOL-like reading of implication
-            if len(ev_rule.head) > 0:
-                # Both head and body satisfied
-                ev_prob += models_v.query_yn(ev_rule.head+ev_rule.body)
-            if len(ev_rule.body) > 0:
-                # Body not satisfied
-                ev_prob += 1 - models_v.query_yn(ev_rule.body)
+        surprisal = -math.log(ev_prob + EPS)
+        if surprisal > SR_THRES:
+            mismatches.append((content, surprisal))
 
-            surprisal = -math.log(ev_prob + EPS)
-            if surprisal > SR_THRES:
-                mismatches.append((ev_rule, surprisal))
-
-    return (models_vl, memoized_vl, prog), best_assignment, mismatches
+    return (models_vl, memoized_vl, prog), (best_assignment, word_senses), mismatches

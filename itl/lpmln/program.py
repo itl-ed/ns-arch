@@ -20,7 +20,7 @@ from .topk_subset import topk_subset_gen
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.50     # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.75     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
@@ -405,8 +405,8 @@ class Program:
                     # atoms
                     bottom_models = [
                         (
-                            [sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in ss],
-                            [sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in ss],
+                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in ss},
+                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in ss},
                             lp
                         ) for ss, lp in subsets
                     ]
@@ -414,8 +414,8 @@ class Program:
                     # Combine the results with hard-weighted facts
                     bottom_models = [
                         (
-                            pos_atoms + [hr.head[0] for (hr, w_pr) in hard_facts if w_pr==1.0],
-                            neg_atoms + [hr.head[0] for (hr, w_pr) in hard_facts if w_pr==0.0],
+                            pos_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr==1.0},
+                            neg_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr==0.0},
                             lp
                         )
                         for pos_atoms, neg_atoms, lp in bottom_models
@@ -429,13 +429,13 @@ class Program:
                 # Solve reduced program top for each discovered model; first compute program
                 # reduction by the common atoms
                 atom_sets = [
-                    set([(pl, True) for pl in bm[0]] + [(nl, False) for nl in bm[1]])
+                    {(pl, True) for pl in bm[0]} | {(nl, False) for nl in bm[1]}
                     for bm in bottom_models
                 ]
                 atom_commons = set.intersection(*atom_sets)
                 reduced_common = top._reduce(
-                    [atm for atm, pos in atom_commons if pos],
-                    [atm for atm, pos in atom_commons if not pos]
+                    {atm for atm, pos in atom_commons if pos},
+                    {atm for atm, pos in atom_commons if not pos}
                 )
 
                 # Now for each bottom model reduce the common reduction with the remainder of
@@ -445,8 +445,8 @@ class Program:
                 for bi, ((pos_atoms, _, pr), atoms) in enumerate(zip(bottom_models, atom_diffs)):
                     print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
 
-                    pos_atoms_diff = [atm for atm, pos in atoms if pos]
-                    neg_atoms_diff = [atm for atm, pos in atoms if not pos]
+                    pos_atoms_diff = {atm for atm, pos in atoms if pos}
+                    neg_atoms_diff = {atm for atm, pos in atoms if not pos}
 
                     reduced_top = reduced_common._reduce(pos_atoms_diff, neg_atoms_diff)
                     top_models, top_memoized = reduced_top.solve(provided_mem={
@@ -481,7 +481,7 @@ class Program:
         Statements that come earlier in the list will have higher priority.
         """
         stm_asp_str = ""
-        for p, stm in enumerate(statements):
+        for p, stm in enumerate(statements[::-1]):
             # Each statement may consist of more than one weight formulas: that is, (literals,
             # weight, terms) tuples; weights will be summed in the priority level
             max_or_min, formulas = stm
@@ -503,11 +503,11 @@ class Program:
         ctl.configuration.solve.models = 0
         ctl.configuration.solve.opt_mode = "opt"
 
-        models = []; best_cost = float("inf")
+        models = []; best_cost = [float("inf")] * len(statements)
         with ctl.solve(yield_=True) as solve_gen:
             for m in solve_gen:
-                models.append((m.symbols(atoms=True), m.cost[0]))
-                if m.cost[0] < best_cost: best_cost = m.cost[0]
+                models.append((m.symbols(atoms=True), m.cost))
+                if m.cost[::-1] < best_cost[::-1]: best_cost = m.cost
                 if solve_gen.get().unsatisfiable: break
         
         models = [m[0] for m in models if m[1] == best_cost]

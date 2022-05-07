@@ -222,7 +222,6 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     topic_msgs = []; focus_msgs = []
 
     for rel in rel_rels_to_cover:
-
         # Each list entry in topic_msgs and focus_msgs is a literal, which is a tuple:
         #   1) predicate
         #   2) part-of-speech
@@ -232,24 +231,29 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
         # incorporate some static typing later, if I want to clean up this messy code        
 
         # Setting up arg1 (& arg2) variables
-        if len(rel["args"]) > 1:
-            if len(rel["args"]) > 2:
-                if rel["predicate"] == "be" and is_wh_quantified(rel["args"][2]):
+        rel_args = rel["args"]
+        if len(rel_args) > 1 and rel_args[1].startswith("i"):
+            # Let's deal with i-referents later... Just ignore it for now
+            rel_args = rel_args[:1]
+
+        if len(rel_args) > 1:
+            if len(rel_args) > 2:
+                if rel["predicate"] == "be" and is_wh_quantified(rel_args[2]):
                     # MRS flips the arg order when subject is quantified with 'which',
                     # presumably seeing it as wh-movement?
-                    arg1 = rel["args"][2]
-                    arg2 = rel["args"][1]
+                    arg1 = rel_args[2]
+                    arg2 = rel_args[1]
                 else:
                     # Default case
-                    arg1 = rel["args"][1]
-                    arg2 = rel["args"][2]
+                    arg1 = rel_args[1]
+                    arg2 = rel_args[2]
 
                 referential_arg1 = ref_map[arg1]["is_referential"]
                 referential_arg2 = ref_map[arg2]["is_referential"]
 
             else:
                 # (These won't & shouldn't be referred)
-                arg1 = rel["args"][1]
+                arg1 = rel_args[1]
                 arg2 = None
                 referential_arg1 = ref_map[arg1]["is_referential"]
                 referential_arg2 = None

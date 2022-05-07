@@ -35,11 +35,12 @@ class CognitiveReasonerModule:
             self.concl_vis = sensemake_vis(vis_scene)
 
         if len(dialogue_state["record"]) > 0:
-            self.concl_vis_lang, assignment, mismatches = sensemake_vis_lang(
+            self.concl_vis_lang, (assignment, word_senses), mismatches = sensemake_vis_lang(
                 self.concl_vis, dialogue_state, lexicon
             )
 
             lang.update_referent_assignment(assignment)
+            lang.update_word_senses(word_senses)
 
             ## TODO: Print surprisal reports to resolve_mismatch action ##
             if len(mismatches) > 0:

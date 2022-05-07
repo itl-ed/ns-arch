@@ -20,6 +20,7 @@ class DialogueManager:
         self.assignment_soft = {}  # Store best assignments (tentative) obtained by reasoning
         self.assignment_hard = {}  # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}   # Store mapping from symbolic name to entity
+        self.word_senses = {}      # Store current estimate of symbol denotations
 
         # Each record is a 4-tuple of:
         #   1) speaker: user ("U") or agent ("A"),
