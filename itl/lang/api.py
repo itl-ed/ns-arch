@@ -90,8 +90,8 @@ class LanguageModule:
                         if b[:2] not in self.lexicon.s2d: return True
         
         if query is not None:
-            _, q_fmls = query
-            for head, body, _ in q_fmls:
+            _, q_rules = query
+            for head, body, _ in q_rules:
                 if head is not None:
                     if head[:2] not in self.lexicon.s2d: return True
                 if body is not None:
@@ -134,19 +134,42 @@ class LanguageModule:
                 converted_rules.append((r, orig_utt))
         else:
             converted_rules = None
-        
+
         if query is not None:
-            q_ent, q_fmls = query
+            q_ents, q_rules = query
 
-            wrapped_qls = []
-            for head, body, _ in q_fmls:
-                cat_ind, cat_type = self.lexicon.s2d[ql[:2]]
-                ql = Literal(
-                    f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in ql[2]])
-                )
-                wrapped_qls.append(ql)
+            wrapped_qrs = []
+            for head, body, _ in q_rules:
+                if head is not None:
+                    # Here we are resolving any homonymy by always choosing denotation with
+                    # the highest frequency. In distant future we may implement exploiting
+                    # discourse/environment contexts for word sense disambiguation here...?
+                    cat_ind, cat_type = max(
+                        self.lexicon.s2d[head[:2]], key=lambda d: self.lexicon.d_freq[d]
+                    )
+                    wrapped_head = Literal(
+                        f"{cat_type}_{cat_ind}",
+                        wrap_args(*[assig.get(a, a) for a in head[2]])
+                    )
+                else:
+                    wrapped_head = None
 
-            converted_query = (q_ent, wrapped_qls, orig_utt)
+                wrapped_bls = []
+                if body is not None:
+                    for bl in body:
+                        cat_ind, cat_type = max(
+                            self.lexicon.s2d[head[:2]], key=lambda d: self.lexicon.d_freq[d]
+                        )
+                        bl = Literal(
+                            f"{cat_type}_{cat_ind}",
+                            wrap_args(*[assig.get(a, a) for a in bl[2]])
+                        )
+                        wrapped_bls.append(bl)
+
+                r = Rule(head=wrapped_head, body=wrapped_bls)
+                wrapped_qrs.append(r)
+
+            converted_query = (q_ents, wrapped_qrs, orig_utt)
         else:
             converted_query = None
 

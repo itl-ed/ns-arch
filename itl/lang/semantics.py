@@ -36,7 +36,8 @@ class SemanticParser:
                 "args": args,
                 "lexical": ep.predicate.startswith("_"),
                 "id": ep.id,
-                "handle": ep.label
+                "handle": ep.label,
+                "crange": (ep.cfrom, ep.cto)
             }
 
             if "ARG" in ep.args: rel["arg_udef"] = ep.args["ARG"]
@@ -269,14 +270,22 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             referential_arg1 = None
             referential_arg2 = None
 
-        negated = rel["handle"] in negs
+        negate_focus = rel["handle"] in negs
+
+        # For negative polar (yes-no) question we don't negate focus message
+        if negate_focus and rel_id==parse["index"] and parse["utt_type"]=="ques":
+            is_polar_q = not any(
+                v["is_wh_quantified"] for v in ref_map.values() if v is not None
+            )
+            if is_polar_q:
+                negate_focus = False
 
         # Handle predicates accordingly
         if rel["pos"] == "a":
             # Adjective predicates with args ('event', referent)
             rel_lit = (rel["predicate"], "a", [arg1])
 
-            if negated:
+            if negate_focus:
                 focus_msgs.append([rel_lit])
             else:
                 focus_msgs.append(rel_lit)
@@ -285,7 +294,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             # Noun predicates with args (referent[, more optional referents])
             rel_lit = (rel["predicate"], "n", [rel_id])
 
-            if negated:
+            if negate_focus:
                 focus_msgs.append([rel_lit])
             else:
                 focus_msgs.append(rel_lit)
@@ -305,7 +314,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
 
             if not referential_arg2:
                 # Predicational; provide predicates as additional info about subject
-                if negated:
+                if negate_focus:
                     focus_msgs.append(daughters[arg2])
                 else:
                     focus_msgs += daughters[arg2]
@@ -321,7 +330,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                     a1a2_vars = [arg1, arg2]
                     rel_lit = ("=", "*", a1a2_vars)
 
-                    if negated:
+                    if negate_focus:
                         focus_msgs.append([rel_lit])
                     else:
                         focus_msgs.append(rel_lit)
@@ -333,15 +342,16 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
         elif rel["predicate"] == "have":
             # (Here we assume the meaning of rel["predicate"] has to do with holonymy/meronymy)
             # Two-place predicates have different semantics depending on referentiality of arg2
+            # (or whether arg2 is wh-quantified)
 
-            if referential_arg2:
+            if referential_arg2 or ref_map[arg2]["is_wh_quantified"]:
                 # Simpler case; use constant for arg2, and provided predicates concerning arg2
                 # are considered topic message
                 topic_msgs += daughters[arg2]
 
                 rel_lit = ("have", "v", [arg1, arg2])
 
-                if negated:
+                if negate_focus:
                     focus_msgs.append([rel_lit])
                 else:
                     focus_msgs.append(rel_lit)
@@ -362,7 +372,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                     a2_lit_sk = a2_lit[:2] + (args_sk,)
                     lits.append(a2_lit_sk)
                 
-                if negated:
+                if negate_focus:
                     focus_msgs.append(lits)
                 else:
                     focus_msgs += lits

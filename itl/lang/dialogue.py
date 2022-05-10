@@ -379,7 +379,7 @@ class DialogueManager:
                 # queried formulas
 
                 # Process focus messages
-                q_fmls = []
+                q_rules = []
 
                 for m in focus_msgs:
                     rule_body = copy.deepcopy(body_lits)
@@ -395,13 +395,13 @@ class DialogueManager:
                     if len(rule_body) == 0:
                         rule_body = None
                     
-                    q_fmls.append((rule_head, rule_body, None))
+                    q_rules.append((rule_head, rule_body, None))
                 
-                query = (None, q_fmls)
+                query = (None, q_rules)
 
             else:
                 # wh- question with wh-quantified entities; first add built rules to
-                # info, then extract any rules containing wh-entities as queried formulas
+                # info, then extract any rules containing wh-entities as queried rules
 
                 # Process focus messages
                 for m in focus_msgs:
@@ -420,7 +420,7 @@ class DialogueManager:
                     
                     info.append((rule_head, rule_body, None))
                 
-                # Then pull out any formulas containing wh-quantified referents
+                # Then pull out any rules containing wh-quantified referents
                 rule_lits = [
                     ([r[0]] if r[0] is not None else []) + ([r[1]] if r[1] is not None else [])
                     for r in info
@@ -428,11 +428,11 @@ class DialogueManager:
                 rule_args = [
                     set(sum([l[2] for l in rls], ())) for rls in rule_lits
                 ]
-                q_fmls = [info[i] for i, args in enumerate(rule_args) if len(wh_ents & args) > 0]
+                q_rules = [info[i] for i, args in enumerate(rule_args) if len(wh_ents & args) > 0]
                 info = [info[i] for i, args in enumerate(rule_args) if len(wh_ents & args) == 0]
                 
                 q_ents = set.union(*rule_args) & wh_ents
-                query = (q_ents, q_fmls)
+                query = (q_ents, q_rules)
 
             info = _map_and_format(info, ref_map, f"u{ui}")
             query = _map_and_format(query, ref_map, f"u{ui}")
@@ -472,8 +472,9 @@ def _map_and_format(data, ref_map, tail):
             return (rf[0], tuple(_fmt(a) for a in rf[1]))
         else:
             assert type(rf) == str
-            return f"{'X' if ref_map[rf]['is_univ_quantified'] else 'x'}" \
-                f"{ref_map[rf]['map_id']}{tail}"
+            is_var = ref_map[rf]['is_univ_quantified'] or ref_map[rf]['is_wh_quantified']
+
+            return f"{'X' if is_var else 'x'}" f"{ref_map[rf]['map_id']}{tail}"
 
     def _process_rules(entries):
         formatted = []
@@ -502,11 +503,11 @@ def _map_and_format(data, ref_map, tail):
 
     elif type(data) == tuple:
         # Queries to make on computed ASP models
-        q_ent, q_fmls = data
+        q_ents, q_rules = data
 
-        new_q_ent = {_fmt(e) for e in q_ent} if q_ent is not None else None
+        new_q_ents = {_fmt(e) for e in q_ents} if q_ents is not None else None
 
-        return (new_q_ent, _process_rules(q_fmls))
+        return (new_q_ents, _process_rules(q_rules))
 
     else:
         raise ValueError("Can't _map_and_format this")

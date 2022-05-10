@@ -168,3 +168,12 @@ class Rule:
         assert len(sigs_s) == 0, "Unification failure?"
 
         return True
+
+    def substitute(self, arg, new_arg, new_arg_is_var):
+        """
+        Return new Rule instance where all occurrences of arg_x are replaced with arg_y
+        """
+        new_head = [hl.substitute(arg, new_arg, new_arg_is_var) for hl in self.head]
+        new_body = [bl.substitute(arg, new_arg, new_arg_is_var) for bl in self.body]
+
+        return Rule(head=new_head, body=new_body)

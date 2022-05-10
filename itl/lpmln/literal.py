@@ -90,11 +90,11 @@ class Literal:
         else:
             return self
     
-    def substitute(self, arg_x, arg_y):
+    def substitute(self, arg, new_arg, new_arg_is_var):
         """
-        Return new Literal instance where all occurrences of arg_x are replaced with arg_y
+        Return new Literal instance where all occurrences of arg are replaced with new_arg
         """
-        new_args = [(arg_y, a[1]) if a[0] == arg_x else a for a in self.args]
+        new_args = [(new_arg, new_arg_is_var) if a[0] == arg else a for a in self.args]
         return Literal(self.name, new_args, self.naf)
 
     @staticmethod

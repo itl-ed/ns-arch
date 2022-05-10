@@ -421,43 +421,46 @@ def sensemake_vis_lang(vis_result, dialogue_state, lexicon):
     # Test provided info contained in dialogue record against vision-only cognition,
     # utterance-by-utterance
     for _, _, (info, _), _ in dialogue_state["record"]:
-        content = set()
-        for i, rule in enumerate(info):
-            head, body, _ = rule
+        if len(info) > 0:
+            content = set()
+            for i, rule in enumerate(info):
+                head, body, _ = rule
 
-            # Skip any non-grounded content
-            head_has_var = head is not None and any([
-                type(x)==str and x[0].isupper() for x in head[2]
-            ])
-            body_has_var = body is not None and any([
-                any([type(x)==str and x[0].isupper() for x in bl[2]])
-                for bl in body
-            ])
-            if head_has_var or body_has_var: continue
+                # Skip any non-grounded content
+                head_has_var = head is not None and any([
+                    type(x)==str and x[0].isupper() for x in head[2]
+                ])
+                body_has_var = body is not None and any([
+                    any([type(x)==str and x[0].isupper() for x in bl[2]])
+                    for bl in body
+                ])
+                if head_has_var or body_has_var: continue
 
-            if head is not None:
-                pred = "_".join(word_senses[head[:2]])
-                args = [a for a in a_map(head[2])]
-                subs_head = Literal(pred, wrap_args(*args))
-            else:
-                subs_head = None
-            
-            if body is not None:
-                subs_body = []
-                for bl in body:
-                    pred = "_".join(word_senses[bl[:2]])
-                    args = [a for a in a_map(bl[2])]
-                    bl = Literal(pred, wrap_args(*args), naf=bl[3])
-                    subs_body.append(bl)
-            else:
-                subs_body = None
-            
-            content.add(Rule(head=subs_head, body=subs_body))
+                if head is not None:
+                    pred = "_".join(word_senses[head[:2]])
+                    args = [a for a in a_map(head[2])]
+                    subs_head = Literal(pred, wrap_args(*args))
+                else:
+                    subs_head = None
+                
+                if body is not None:
+                    subs_body = []
+                    for bl in body:
+                        pred = "_".join(word_senses[bl[:2]])
+                        args = [a for a in a_map(bl[2])]
+                        bl = Literal(pred, wrap_args(*args), naf=bl[3])
+                        subs_body.append(bl)
+                else:
+                    subs_body = None
+                
+                content.add(Rule(head=subs_head, body=subs_body))
 
-        ev_prob = models_v.query_yn(content)
+            # Make a yes-no query to obtain the likelihood of content
+            q_response, _ = models_v.query(None, content)
+            ev_prob = q_response[()][1]
 
-        surprisal = -math.log(ev_prob + EPS)
-        if surprisal > SR_THRES:
-            mismatches.append((content, surprisal))
+            surprisal = -math.log(ev_prob + EPS)
+            if surprisal > SR_THRES:
+                mismatches.append((content, surprisal))
 
     return (models_vl, memoized_vl, prog), (best_assignment, word_senses), mismatches

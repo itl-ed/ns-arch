@@ -1,7 +1,7 @@
 """
 Implements LP^MLN model set class
 """
-from itertools import product
+from itertools import product, chain, combinations
 from functools import reduce
 from collections import defaultdict
 
@@ -20,7 +20,7 @@ class Models:
             true atoms (i.e. Herbrand interpretation), each with its joint probability
     """
     def __init__(self, factors=None, outcomes=None):
-        assert (factors is None) ^ (outcomes is None), \
+        assert not ((factors is not None) and (outcomes is not None)), \
             "Do not provide both factors & outcomes as arg"
 
         self.factors = factors
@@ -192,6 +192,9 @@ class Models:
         """
         Unroll the Models instance to generate every single model covered, along with
         its joint probability.
+
+        (TODO?: Let's see later if we can come up with a more 'reactive' algorithm that
+        doesn't have to wait results from inner recursive calls)
         """
         factors_enums = []
         if self.factors is not None:
@@ -471,11 +474,17 @@ class Models:
 
         return Models(outcomes=filtered_outcomes)
     
-    def query_yn(self, event):
+    def query(self, q_vars, event, per_assignment=True, per_partition=False):
         """
-        Query the tree structure to estimate the likelihood of specified event.
-        Compute and return the aggregate probability mass of models which are
-        also models satisfying the provided event, coded as a set of rules.
+        Query the tree structure to estimate the likelihood of each possible answer
+        to the provided question, represented as tuple of entities (empty tuple for
+        y/n questions). For each entity tuple that have some possible models satisfying
+        the provided event specification, compute and return the aggregate probability
+        mass of such models. Return the Models instances obtained after appropriate
+        filtering as well.
+
+        If q_vars is None we have a yes/no (polar) question, where having a non-empty
+        set as q_vars indicates we have a wh-question.
         """
         if type(event) != set:
             try:
@@ -486,33 +495,165 @@ class Models:
                 assert isinstance(event, Rule)
                 event = set([event])
 
-        filtered = [self]
-        for ev_rule in event:
-            # Models satisfying rule head & body
-            filtered_hb = filtered
-            if len(ev_rule.head) > 0:
-                for lits in [ev_rule.head] + ev_rule.body:
-                    filtered_hb = [f.filter(lits) for f in filtered_hb]
-            else:
-                filtered_hb = []
+        # Set of atoms & entities that appear in models covered by this Models instance
+        atoms_covered = self.atoms()     # Effectively the union of all models covered
+        ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
 
-            # Models not satisfying body
-            filtered_nb = filtered
-            if len(ev_rule.body) > 0:
-                # Negation of conjunction of body literals == Disjunction of negated
-                # body literals
-                body_neg = [bl.flip() for bl in ev_rule.body]
-                filtered_nb = [f.filter(body_neg) for f in filtered_nb]
-            else:
-                filtered_nb = []
+        if q_vars is None:
+            # Empty tuple representing no wh-quantified variables to test. () in the
+            # returned dicts may as well be interpreted as the "Yes" answer.
+            q_vars = ()
 
-            filtered = filtered_hb + filtered_nb
+            # Event is already grounded
+            ev_instances = { (): list(event) }
+        else:
+            # Assign some arbitrary order among the variables
+            q_vars = tuple(q_vars)
 
-        # Ratio of total probability mass of models satisfying the event to that
-        # of all models covered by this Models instance
-        ev_prob = sum([fm.marginals()[1] for fm in filtered]) / self.marginals()[1]
+            # All possible grounded instances of event
+            ev_instances = {
+                prd: [
+                    reduce(
+                        lambda r, a: r.substitute(a[0], a[1], False),
+                        [ev_rule]+[(v, e) for v, e in zip(q_vars, prd)]
+                    )
+                    for ev_rule in event
+                ]
+                for prd in product(ents, repeat=len(q_vars))
+            }
 
-        return ev_prob
+            # Initial pruning of q_vars assignments that are not worth considering; we may
+            # disregard assignments yielding in any body-less rule (i.e. facts) whose head
+            # atom(s) does not appear in atoms_covered
+            ev_instances = {
+                assig: evt_ins for assig, evt_ins in ev_instances.items()
+                if not any(
+                    len(r.body)==0 and not any(h in atoms_covered for h in r.head)
+                    for r in evt_ins
+                )
+            }
+
+        self_pmass = self.marginals()[1]    # For normalizing covered probabilitiy masses
+
+        ## This method can provide answers to the question in two ways:
+        #   1) Filtered models per assignment: Filter models so that we have model sets
+        #       for each valid assignment to q_vars
+        #   2) Filtered models per answer: Filter models so that we have models sets for
+        #       each 'strongly exhaustive answer' to the question, i.e. sets of valid
+        #       assignments to q_vars (Groenendijk & Stokhof's question semantics).
+        
+        if per_assignment:
+            # 1) Per-assignment filtering
+            filtered_models = defaultdict(lambda: [self])
+
+            for ri in range(len(event)):
+                for assig, evt_ins in ev_instances.items():
+                    # Instantiated rule to use as model filter
+                    ev_rule = evt_ins[ri]
+
+                    filtered = filtered_models[assig]
+
+                    # Models satisfying rule head & body
+                    filtered_hb = filtered
+                    if len(ev_rule.head) > 0:
+                        for lits in [ev_rule.head] + ev_rule.body:
+                            filtered_hb = [f.filter(lits) for f in filtered_hb]
+                    else:
+                        filtered_hb = []
+
+                    # Models not satisfying body
+                    filtered_nb = filtered
+                    if len(ev_rule.body) > 0:
+                        # Negation of conjunction of body literals == Disjunction of
+                        # negated body literals
+                        body_neg = [bl.flip() for bl in ev_rule.body]
+                        filtered_nb = [f.filter(body_neg) for f in filtered_nb]
+                    else:
+                        filtered_nb = []
+
+                    filtered = filtered_hb + filtered_nb
+
+                    filtered_models[assig] = filtered
+
+            per_assig = dict(filtered_models)
+            per_assig = {
+                assig: (models, sum([m.marginals()[1] for m in models]) / self_pmass)
+                for assig, models in per_assig.items()
+            }
+        else:
+            per_assig = None
+
+        if per_partition:
+            # 2) Per-answer filtering
+            possible_answers = list(chain.from_iterable(
+                combinations(ev_instances, l) for l in range(1,len(ev_instances)+1)
+            ))
+
+            filtered_models = defaultdict(lambda: [self])
+
+            # Rule-by-rule basis filtering to actually obtain models satisfying the answer
+            # associated with each partition
+            for ri in range(len(event)):
+                for ans in possible_answers:
+                    # Grounded rules to satisfy and violate, which define this partition
+                    rules_sat = [
+                        evt_ins[ri] for assig, evt_ins in ev_instances.items()
+                        if assig in ans
+                    ]
+                    rules_viol = [
+                        evt_ins[ri] for assig, evt_ins in ev_instances.items()
+                        if assig not in ans
+                    ]
+
+                    filtered = filtered_models[ans]
+
+                    # For each rule to satisfy, either both head and body should hold, or
+                    # body should not hold
+                    for sr in rules_sat:
+                        # Models satisfying rule head & body
+                        filtered_hb = filtered
+                        if len(sr.head) > 0:
+                            for lits in [sr.head] + sr.body:
+                                filtered_hb = [f.filter(lits) for f in filtered_hb]
+                        else:
+                            filtered_hb = []
+
+                        # Models not satisfying body
+                        filtered_nb = filtered
+                        if len(sr.body) > 0:
+                            # Negation of conjunction of body literals == Disjunction of
+                            # negated body literals
+                            body_neg = [bl.flip() for bl in sr.body]
+                            filtered_nb = [f.filter(body_neg) for f in filtered_nb]
+                        else:
+                            filtered_nb = []
+
+                        filtered = filtered_hb + filtered_nb
+
+                    # For each rule to violate, body should hold whereas head should not
+                    # hold
+                    for vr in rules_viol:
+                        if len(vr.body) > 0:
+                            for bl in vr.body:
+                                filtered = [f.filter(bl) for f in filtered]
+
+                        if len(vr.head) > 0:
+                            # Negation of disjunction of head literals == Conjunction of
+                            # negated head literals
+                            for hl in vr.head:
+                                filtered = [f.filter(hl.flip()) for f in filtered]
+
+                    filtered_models[ans] = filtered
+
+            per_exh_answer = dict(filtered_models)
+            per_exh_answer = {
+                ans: (models, sum([m.marginals()[1] for m in models]) / self_pmass)
+                for ans, models in per_exh_answer.items()
+            }
+        else:
+            per_exh_answer = None
+
+        return per_assig, per_exh_answer
 
 
 def _logit(p):
