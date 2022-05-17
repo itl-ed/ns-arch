@@ -236,8 +236,8 @@ class MetaLearner(nn.Module):
                 ], dim=0)
                 box_features = rh.box_head(box_features)
 
-            cls_f, _, _ = rh.box_predictor(
-                box_features, None, (proposals_objs, None), return_features=True
+            _, (cls_f, _, _) = rh.box_predictor(
+                box_features, None, (proposals_objs, None)
             )
 
             del box_features
@@ -290,8 +290,8 @@ class MetaLearner(nn.Module):
                 ], dim=0)
                 box_features = rh.box_head(box_features)
 
-            _, att_f, _ = rh.box_predictor(
-                box_features, None, (proposals_objs, None), return_features=True
+            _, (_, att_f, _) = rh.box_predictor(
+                box_features, None, (proposals_objs, None)
             )
 
             del box_features
@@ -358,9 +358,8 @@ class MetaLearner(nn.Module):
                 box_pair_features = rh.box_head(box_pair_features)
 
             # Provide all the necessary arguments
-            _, _, rel_f = rh.box_predictor(
-                box_features, box_pair_features, (proposals_objs, proposals_rels),
-                return_features=True
+            _, (_, _, rel_f) = rh.box_predictor(
+                box_features, box_pair_features, (proposals_objs, proposals_rels)
             )
 
             # We only need the instance pairs indexed (0,1), so discard every other row

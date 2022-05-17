@@ -17,10 +17,9 @@ class DialogueManager:
             "env": {},  # Sensed via physical perception
             "dis": {}   # Introduced by dialogue
         }
-        self.assignment_soft = {}  # Store best assignments (tentative) obtained by reasoning
+
         self.assignment_hard = {}  # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}   # Store mapping from symbolic name to entity
-        self.word_senses = {}      # Store current estimate of symbol denotations
 
         # Each record is a 4-tuple of:
         #   1) speaker: user ("U") or agent ("A"),
@@ -134,6 +133,10 @@ class DialogueManager:
             # Ignore when selecting by drawing a new bbox
             if selector.get_active():
                 return
+            
+            # Ignore when no focus
+            if ui_status["focus"] is None:
+                return
 
             ui_status["clicked"] = ui_status["focus"]
 
@@ -145,6 +148,10 @@ class DialogueManager:
         def mouse_release(ev):
             # Ignore when selecting by drawing a new bbox
             if selector.get_active():
+                return
+
+            # Ignore when not clicked on any bbox
+            if ui_status["clicked"] is None:
                 return
 
             rect = rects[ui_status["clicked"]]
@@ -177,7 +184,7 @@ class DialogueManager:
         fig.canvas.mpl_connect("button_press_event", mouse_press)
         fig.canvas.mpl_connect("button_release_event", mouse_release)
         fig.canvas.mpl_connect("key_press_event", key_press)
-        plt.show()
+        plt.show(block=True)
 
         # If the choice is a newly drawn bounding box and doesn't overlap with 
         # any other box with high IoU, register this as new entity and return
@@ -218,12 +225,13 @@ class DialogueManager:
 
         return ui_status["choice"]
 
-    def understand(self, usr_in, parser, lex, vis_raw, agenda):
+    def understand(self, usr_in, parser, vis_raw):
         """
         Parse language input into MRS, process into ASP-compatible form, and then
-        update dialogue state. Also add new agenda items to the provided list.
+        update dialogue state. Also return any new agenda items.
         """
         ui = len(self.record)  # Utterance index
+        agenda = []
 
         # Processing natural language into appropriate logical form
         parse = parser.nl_parse(usr_in)
@@ -357,17 +365,6 @@ class DialogueManager:
 
             self.record.append(("U", "|", (info+info_aux, None), usr_in))
 
-            # Integrate new knowledge to KB, only if they don't involve any constant
-            occurring_lits = sum([
-                ([r[0]] if r[0] is not None else []) + (r[1] if r[1] is not None else [])
-                for r in info+info_aux
-            ], [])
-            occurring_args = set(sum([
-                sum([a[1] if type(a)==tuple else (a,) for a in l[2]], ()) for l in occurring_lits
-            ], ()))
-            if all(a[0].isupper() for a in occurring_args):
-                agenda.append(("unintegrated_knowledge", ui))
-
         elif parse["utt_type"] == "ques":
             # Interrogatives
 
@@ -448,20 +445,8 @@ class DialogueManager:
         else:
             # Ambiguous SF
             raise NotImplementedError
-        
-        # Handle neologisms
-        for rel in parse["relations"]["by_id"].values():
-            if not rel["lexical"]: continue
 
-            term = (rel["predicate"], rel["pos"])
-
-            # Some reserved terms
-            if term[1] == "q" or \
-                term == ("be", "v") or \
-                term == ("have", "v"): continue
-
-            if term not in lex.s2d:
-                agenda.append(("unresolved_neologism", term))
+        return agenda
 
 
 def _map_and_format(data, ref_map, tail):

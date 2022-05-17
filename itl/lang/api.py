@@ -11,7 +11,7 @@ from ..lpmln.utils import wrap_args
 
 class LanguageModule:
 
-    def __init__(self, opts, lex=None):
+    def __init__(self, opts):
         """
         Args:
             opts: argparse.Namespace, from parse_argument()
@@ -19,7 +19,6 @@ class LanguageModule:
         self.opts = opts
         self.semantic = SemanticParser(opts.grammar_image_path, opts.ace_binary_path)
         self.dialogue = DialogueManager()
-        self.lexicon = lex
 
         self.vis_raw = None
 
@@ -48,8 +47,8 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names = {i: i for i in self.dialogue.referents["env"]}
 
-    def understand(self, usr_in, agenda):
-        self.dialogue.understand(usr_in, self.semantic, self.lexicon, self.vis_raw, agenda)
+    def understand(self, usr_in, vis_raw):
+        self.dialogue.understand(usr_in, self.semantic, vis_raw)
 
     def generate(self):
         """ Flush the buffer of utterances prepared """
@@ -60,45 +59,6 @@ class LanguageModule:
     def export_dialogue_state(self):
         """ Export the current dialogue information state as a dict """
         return vars(self.dialogue)
-    
-    def update_referent_assignment(self, assignment):
-        """
-        Update assignment from discourse referents to environment referents with provided mapping
-        (Overwrite if key exists)
-        """
-        self.dialogue.assignment_soft.update(assignment)
-    
-    def update_word_senses(self, word_senses):
-        """
-        Update word sense denotation under current dialogue context. Currently symbol type based,
-        but sophisticated use cases will require token based sense resolution.
-        """
-        self.dialogue.word_senses.update(word_senses)
-
-    def utt_contains_neologism(self, utt_id):
-        """
-        Check if logical content of dialogue record indexed by utt_id contains any neologism
-        """
-        _, _, (rules, query), _ = self.dialogue.record[utt_id]
-
-        if rules is not None:
-            for head, body, _ in rules:
-                if head is not None:
-                    if head[:2] not in self.lexicon.s2d: return True
-                if body is not None:
-                    for b in body:
-                        if b[:2] not in self.lexicon.s2d: return True
-        
-        if query is not None:
-            _, q_rules = query
-            for head, body, _ in q_rules:
-                if head is not None:
-                    if head[:2] not in self.lexicon.s2d: return True
-                if body is not None:
-                    for b in body:
-                        if b[:2] not in self.lexicon.s2d: return True
-
-        return False
 
     def utt_to_ASP(self, utt_id):
         """
@@ -108,7 +68,7 @@ class LanguageModule:
         utt = self.dialogue.record[utt_id]
         _, _, (rules, query), orig_utt = utt
 
-        assig = {**self.dialogue.assignment_soft, **self.dialogue.assignment_hard}
+        assig = {**self.dialogue.value_assignment, **self.dialogue.assignment_hard}
 
         if rules is not None:
             converted_rules = []

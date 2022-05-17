@@ -146,7 +146,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
         return cat([sem_f_arg1s, sem_f_arg2s], dim=-1)
     
-    def forward(self, box_features, box_pair_features, proposals, return_features=False):
+    def forward(self, box_features, box_pair_features, proposals):
         """
         Extended for a new interface --
 
@@ -157,25 +157,26 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 boxes to predict -- if None, skip relation prediction
             proposals: (Instances, Instances), passed from super().forward(); needed for spatial
                 feature extraction
-            return_features: bool (optional); if True, return the penultimate layer features right
-                before class/attribute/relation prediction instead (Intended for use by meta learners)
 
         Returns:
             (Tensor, Tensor, Tensor, Tensor, Tensor):
-            First tensor: shape (N_R, K_C), scores for each of the N_R boxes. Each row contains the
-            scores for K_C object classes.
+                First tensor: shape (N_R, K_C), scores for each of the N_R boxes. Each row contains the
+                scores for K_C object classes.
 
-            Second tensor: shape (N_R, 1), scores for each of the N_R boxes. Each row contains the
-            scores for whether the box contains an object (i.e. is foreground class) or not.
+                Second tensor: shape (N_R, 1), scores for each of the N_R boxes. Each row contains the
+                scores for whether the box contains an object (i.e. is foreground class) or not.
 
-            Third tensor: bounding box regression deltas for each box. Shape is shape (N_R, K_C*4),
-            or (N_R, 4) for class-agnostic regression.
+                Third tensor: bounding box regression deltas for each box. Shape is shape (N_R, K_C*4),
+                or (N_R, 4) for class-agnostic regression.
 
-            Fourth tensor: shape (N_R, K_A), scores for each of the N_R boxes. Each row contains the
-            scores for K_A object attributes.
+                Fourth tensor: shape (N_R, K_A), scores for each of the N_R boxes. Each row contains the
+                scores for K_A object attributes.
 
-            Fifth tensor: shape (N_P, K_R), scores for each of the N_P box pairs. Each row contains
-            the scores for K_R object pair relations.
+                Fifth tensor: shape (N_P, K_R), scores for each of the N_P box pairs. Each row contains
+                the scores for K_R object pair relations.
+            
+            (Tensor, Tensor, Tensor):
+                shape (N_R/N_R/N_P, D), feature vectors before object class/attribute/relation prediction
         """
         if box_features.dim() > 2:
             box_features = torch.flatten(box_features, start_dim=1)
@@ -273,10 +274,10 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 h_I, w_I = pos.image_size
                 bxs.scale(w_I, h_I)
 
-        if return_features:
-            return cls_compressed_f, att_compressed_f, rel_compressed_f
-        else:
-            return objectness_scores, cls_scores, att_scores, rel_scores, proposal_deltas
+        out = objectness_scores, cls_scores, att_scores, rel_scores, proposal_deltas
+        f_vecs = cls_compressed_f, att_compressed_f, rel_compressed_f
+
+        return out, f_vecs
 
     def losses(self, predictions, proposals):
         """
@@ -475,8 +476,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
             # Reshape relation prediction outputs from 1-D flattened tensor (without diags;
             # shape (N^2 - N, R)) tensor to 2-D square tensor (shape (N, N, R))
-            N = len(boxes_per_image)
-            R = rel_scores_per_image.shape[-1]
+            N = len(boxes_per_image); R = rel_scores_per_image.shape[-1]
             if N > 0:
                 rel_scores_per_image = torch.stack([
                     torch.cat([

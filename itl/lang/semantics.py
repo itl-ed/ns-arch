@@ -46,6 +46,24 @@ class SemanticParser:
                 # 'Surface' (in ERG parlance) predicates with lexical symbols
                 lemma, pos, sense = predicate.split(ep.predicate)
 
+                if sense == "unknown":
+                    # Predicate not covered by parser lexicon
+                    lemma, pos = lemma.split("/")
+
+                    # Translate the tag obtained from the POS tagger to corresponding
+                    # MRS POS code
+                    if pos.startswith("n"):
+                        pos = "n"
+                    elif pos.startswith("j"):
+                        pos = "a"
+                    elif pos.startswith("v"):
+                        pos = "v"
+                    else:
+                        raise ValueError(f"I don't know how to grammatically process the token '{lemma}'")
+
+                # (R)MRS pos codes to WordNet synset pos tags
+                if pos == "p": pos = "r"
+
                 rel.update({
                     "predicate": lemma,
                     "pos": pos,
@@ -339,8 +357,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                     # We are not really interested in 3) (or others?), at least for now
                     raise ValueError("Weird sentence with copula")
 
-        elif rel["predicate"] == "have":
-            # (Here we assume the meaning of rel["predicate"] has to do with holonymy/meronymy)
+        elif arg2 is not None:
             # Two-place predicates have different semantics depending on referentiality of arg2
             # (or whether arg2 is wh-quantified)
 
@@ -349,7 +366,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                 # are considered topic message
                 topic_msgs += daughters[arg2]
 
-                rel_lit = ("have", "v", [arg1, arg2])
+                rel_lit = (rel["predicate"], rel["pos"], [arg1, arg2])
 
                 if negate_focus:
                     focus_msgs.append([rel_lit])
@@ -365,7 +382,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                 ref_map[arg2_sk] = ref_map[arg2]
                 del ref_map[arg2]
 
-                lits = [("have", "v", [arg1, arg2_sk])]
+                lits = [(rel["predicate"], rel["pos"], [arg1, arg2_sk])]
                 for a2_lit in daughters[arg2]:
                     # Replace occurrences of arg2 with the skolem term
                     args_sk = [arg2_sk if arg2==a else a for a in a2_lit[2]]

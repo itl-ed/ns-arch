@@ -11,6 +11,7 @@ from itertools import chain
 
 import cv2
 import torch
+import torch.nn as nn
 import detectron2.data.transforms as T
 import pytorch_lightning as pl
 import matplotlib.pyplot as plt
@@ -107,12 +108,13 @@ class VisionModule:
             
             if ckpt_path: self.load_model(ckpt_path)
         
-        # Latest raw vision perception and prediction outcomes
-        self.vis_raw = None
-        self.vis_scene = None
+        # Latest raw vision perception, prediction outcomes, feature vectors for RoIs
+        self.raw_input = None
+        self.scene = None
+        self.f_vecs = None
 
         # Visualized prediction summary (pyplot figure)
-        self.vis_summ = None
+        self.summ = None
 
         # Flag: new prediction was made
         self.updated = False
@@ -322,9 +324,11 @@ class VisionModule:
             inp = [self.dm.mapper_batch["test_props"](inp)]
 
         with torch.no_grad():
-            output = self.model.base_model.inference(inp)
+            output, f_vecs = self.model.base_model.inference(inp)
             output = [out["instances"] for out in output]
-        
+
+        f_vecs_org = ({}, {}, {})
+
         pred_value_fields = output[0].get_fields()
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
@@ -332,45 +336,127 @@ class VisionModule:
         img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
         img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
 
-        # Label and reorganize into a more intelligible format...
+        # Label and reorganize scene graph and feature vectors into a more intelligible
+        # format...
         scene = {
             f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
             for i, obj in enumerate(pred_values)
         }
-        for oi, obj in scene.items():
+        for i, (oi, obj) in enumerate(scene.items()):
             obj["pred_relations"] = {
                 f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
                 if oi != f"o{j}"
             }
-        
+
+            f_vecs_org[0][oi] = f_vecs[0][i]
+            f_vecs_org[1][oi] = f_vecs[1][i]
+            f_vecs_org[2][oi] = {
+                f"o{j}": f_vecs[2][i][j] for j in range(len(scene))
+                if oi != f"o{j}"
+            }
+
         if visualize:
-            self.vis_summ = visualize_sg_predictions(img, scene, self.predicates)
+            self.summ = visualize_sg_predictions(img, scene, self.predicates)
+
+        # Store input arg values in case they are needed later
+        self.raw_input = img
+        self.latest_bboxes = bboxes
 
         # Store results as state in this vision module
-        self.vis_raw = img
-        self.vis_scene = scene
+        self.scene = scene
+        self.f_vecs = f_vecs_org
 
         self.updated = True
     
     def reshow_pred(self):
-        assert self.vis_summ is not None, "No predictions have been made yet"
+        assert self.summ is not None, "No predictions have been made yet"
         dummy = plt.figure()
         new_manager = dummy.canvas.manager
-        new_manager.canvas.figure = self.vis_summ
-        self.vis_summ.set_canvas(new_manager.canvas)
+        new_manager.canvas.figure = self.summ
+        self.summ.set_canvas(new_manager.canvas)
         plt.show()
 
     @has_model
-    def add_concept(self):
+    def add_concept(self, cat_type):
         """
-        Register novel concepts with the few-shot learning capability of the vision module,
-        by computing their class codes from given exemplars, while storing feature vectors
-        for the exemplars as well, to be ultimately stored in disk storage
+        Register a novel visual concept to the model, expanding the concept inventory of
+        corresponding category type (class/attribute/relation). Initialize the new concept's
+        category code with a NaN vector. Returns the index of the newly added concept.
 
         Args:
-
+            cat_type: str; either "cls", "att", or "rel", each representing category type
+                class, attribute or relation
+        Return:
+            int index of newly added visual concept
         """
-        ...
+        # Fetch category predictor head
+        predictor_heads = self.model.base_model.roi_heads.box_predictor
+        cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
+
+        D = cat_predictor.in_features       # Code dimension
+        C = cat_predictor.out_features      # Number of categories (concepts)
+
+        # Expanded category predictor head with novel concept added
+        new_cat_predictor = nn.Linear(
+            D, C+1, bias=False, device=cat_predictor.weight.device
+        )
+        new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
+        new_cat_predictor.weight.data[C] = float("NaN")
+
+        setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
+
+        # Keep category count up to date
+        if cat_type == "cls":
+            self.cfg.MODEL.ROI_HEADS.NUM_CLASSES = \
+                self.model.base_model.roi_heads.num_classes = \
+                predictor_heads.num_classes = C+1
+        elif cat_type == "att":
+            self.cfg.MODEL.ROI_HEADS.NUM_ATTRIBUTES = \
+                self.model.base_model.roi_heads.num_attributes = \
+                predictor_heads.num_attributes = C+1
+        else:
+            assert cat_type == "rel"
+            self.cfg.MODEL.ROI_HEADS.NUM_RELATIONS = \
+                self.model.base_model.roi_heads.num_relations = \
+                predictor_heads.num_relations = C+1
+
+        return C
+    
+    @has_model
+    def update_concept(self, concept, ex_vecs):
+        """
+        Update the category code parameter for the designated visual concept in the category
+        prediction head, with a set of feature vectors provided as argument.
+
+        Args:
+            concept: Concept for which category code vector will be updated
+            ex_vecs: numpy.array; set of vector representations of concept exemplars, used
+                to update the code vector
+        """
+        assert ex_vecs is not None
+        cat_type, cat_ind = concept
+
+        with torch.no_grad():
+            code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
+            ex_vecs = torch.tensor(ex_vecs, device=self.model.base_model.device)
+
+            new_code = code_gen(ex_vecs).mean(dim=0)
+        
+        # Fetch category predictor head
+        predictor_heads = self.model.base_model.roi_heads.box_predictor
+        cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
+
+        # Update category code vector
+        D = cat_predictor.in_features       # Code dimension
+        C = cat_predictor.out_features      # Number of categories (concepts)
+
+        new_cat_predictor = nn.Linear(
+            D, C, bias=False, device=cat_predictor.weight.device
+        )
+        new_cat_predictor.weight.data = cat_predictor.weight.data
+        new_cat_predictor.weight.data[cat_ind] = new_code
+
+        setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
 
     @has_model
     def save_model(self):
@@ -390,7 +476,7 @@ class VisionModule:
         real use of the vision component.
 
         Args:
-            ckpt_path: str, path to checkpoint to load
+            ckpt_path: str; path to checkpoint to load
         """
         assert ckpt_path, "Provided checkpoint path is empty"
 

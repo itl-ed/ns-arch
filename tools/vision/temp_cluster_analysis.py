@@ -60,8 +60,8 @@ if __name__ == "__main__":
             box_features = rh.box_head(box_features)
 
             # Compute code
-            cls_f, _, _ = rh.box_predictor(
-                box_features, None, ([proposals_objs], None), return_features=True
+            _, (cls_f, _, _) = rh.box_predictor(
+                box_features, None, ([proposals_objs], None)
             )
             cls_codes = meta.cls_code_gen(cls_f)
             

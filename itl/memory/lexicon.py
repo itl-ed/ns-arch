@@ -32,8 +32,8 @@ class Lexicon:
         else:
             self.d2s[denotation] = [symbol]
         
-        if freq is not None:
-            self.d_freq[denotation] = freq
+        freq = freq or 1
+        self.d_freq[denotation] = freq
 
     def fill_from_vision(self, vision):
         """
@@ -47,18 +47,26 @@ class Lexicon:
                 freq = vision.predicates_freq["cls"][i]
             else:
                 freq = None
-            self.add((c.split(".")[0], "n"), (i, "cls"), freq)
+            lemma, pos, _ = c.split(".")
+            self.add((lemma, pos), (i, "cls"), freq)
 
         for i, a in enumerate(vision.predicates["att"]):
             if vision.predicates_freq is not None:
                 freq = vision.predicates_freq["att"][i]
             else:
                 freq = None
-            self.add((a.split(".")[0], "a"), (i, "att"), freq)
+            lemma, pos, _ = a.split(".")
+
+            # For consistency; we don't need the 'adjective satellite' thingy
+            # from WordNet
+            if pos == "s": pos = "a"
+
+            self.add((lemma, pos), (i, "att"), freq)
 
         for i, r in enumerate(vision.predicates["rel"]):
             if vision.predicates_freq is not None:
                 freq = vision.predicates_freq["rel"][i]
             else:
                 freq = None
-            self.add((r.split(".")[0], "v"), (i, "rel"), freq)
+            lemma, pos, _ = r.split(".")
+            self.add((lemma, pos), (i, "rel"), freq)

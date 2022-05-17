@@ -134,6 +134,7 @@ class Program:
         ctl.add("base", [], self._pure_ASP_str())
         ctl.ground([("base", [])])
 
+        # All grounded atoms that are worth considering
         atoms_map = {
             Literal.from_clingo_symbol(atom.symbol): atom.literal
             for atom in ctl.symbolic_atoms
@@ -141,18 +142,8 @@ class Program:
         atoms_inv_map = {v: k for k, v in atoms_map.items()}
         aux_i = len(atoms_map)
 
-        # Index rules by grounded atoms. When tracking which original rules have yielded
-        # the grounded rules below, relevant rules may be directly retrieved without having
-        # to iterate over self.rules for every grounded rule.
-        rules_by_atom_inv = defaultdict(set)
-        for atm, ris in self._rules_by_atom.items():
-            for ri in ris:
-                rules_by_atom_inv[ri].add(atm)
-        rules_by_atom_set = defaultdict(set)
-        for ri, atms in rules_by_atom_inv.items():
-            rules_by_atom_set[FrozenMultiset(atms)].add(ri)
-        rules_by_atom_set = dict(rules_by_atom_set)
-
+        # All grounded atoms that each occurring atom can instantiate (grounded atom
+        # can instantiate only self)
         instantiable_atoms = {
             ra: {
                 ma for ma in atoms_map
@@ -164,71 +155,52 @@ class Program:
             for ra in self._rules_by_atom
         }
 
-        # For any atom sets including non-grounded atoms, fully instantiate
-        for atms in rules_by_atom_set:
-            grounded_atms = [{a} for a in atms if a.is_grounded()]
-            non_grounded_atms = [
-                instantiable_atoms[a] for a in atms if not a.is_grounded()
-            ]
-
-            if len(non_grounded_atms) > 0:
-                for instance in product(*grounded_atms, *non_grounded_atms):
-                    instance = FrozenMultiset(instance)
-                    rules_by_atom_set[instance] = rules_by_atom_set[atms]
-
         # Iterate over the grounded rules for the following processes:
         #   1) Track which rule in the original program could have instantiated each
         #        grounded rule (wish clingo python API supported such feature...)
         #   2) Construct dependency graph from grounded rules
         dep_graph = nx.DiGraph()
-        grounded_rules = FrozenMultiset()
-        grounded_rules_by_head = defaultdict(FrozenMultiset)
-        for head, body, choice in rules_obs.rules:
-            # Find the original rule in the program that this grounded rule unifies with
-            head_inv = [
-                atoms_inv_map[hl] if hl > 0 else atoms_inv_map[abs(hl)].flip()
-                for hl in head
+        grounded_rules = set()
+        grounded_rules_by_head = defaultdict(set)
+
+        for ri, (rule, w_pr) in enumerate(self.rules):
+            # All possible grounded rules that may originate from this rule
+            gr_head_insts = [instantiable_atoms[hl] for hl in rule.head]
+            gr_head_insts = product(*gr_head_insts)
+            gr_body_insts = [instantiable_atoms[bl] for bl in rule.body]
+            gr_body_insts = product(*gr_body_insts)
+
+            gr_rule_insts = product(gr_head_insts, gr_body_insts)
+            gr_rule_insts = [
+                Rule(head=list(gh), body=list(gb)) for gh, gb in gr_rule_insts
             ]
-            body_inv = [
-                atoms_inv_map[bl] if bl > 0 else atoms_inv_map[abs(bl)].flip()
-                for bl in body
-            ]
-            gr_rule = Rule(head=head_inv, body=body_inv)
+            gr_rule_insts = {(gr_rule, w_pr, ri) for gr_rule in gr_rule_insts}
 
-            rule_copies = Multiset()
-            occurring_atms = FrozenMultiset([l.as_atom() for l in gr_rule.literals()])
-            for ri in rules_by_atom_set[occurring_atms]:
-                rule, w_pr = self.rules[ri]
+            grounded_rules |= gr_rule_insts
 
-                orig_soft = not ((1.0 in w_pr) or (0.0 in w_pr))
-                if orig_soft != choice:
-                    # Soft-hard weight mismatch; continue
-                    continue
+        for gr_rule, w_pr, ri in grounded_rules:
+            if len(gr_rule.head) > 0:
+                for gh in gr_rule.head:
+                    gh_i = atoms_map[gh]
+                    grounded_rules_by_head[gh_i].add((gr_rule, w_pr, ri))
 
-                rule_copies.add((gr_rule, w_pr))
-
-            grounded_rules = grounded_rules + rule_copies
-
-            if len(head) > 0:
-                grounded_rules_by_head[head[0]] = \
-                    grounded_rules_by_head[head[0]] + rule_copies
-
-                for h_lit in head:
-                    dep_graph.add_node(abs(h_lit))
-                    for b_lit in body:
-                        dep_graph.add_node(abs(b_lit))
-                        dep_graph.add_edge(abs(b_lit), abs(h_lit))
-                    
+                    dep_graph.add_node(gh_i)
+                    for gb in gr_rule.body:
+                        gb_i = atoms_map[gb]
+                        dep_graph.add_node(gb_i)
+                        dep_graph.add_edge(gb_i, gh_i)
             else:
                 # Integrity constraint; add rule-specific auxiliary atom
                 aux_i += 1
-                grounded_rules_by_head[aux_i] = \
-                    grounded_rules_by_head[aux_i] + rule_copies
+                grounded_rules_by_head[aux_i].add((gr_rule, w_pr, ri))
 
-                for b_lit in body:
-                    dep_graph.add_node(abs(b_lit))
+                for gb in gr_rule.body:
+                    gb_i = atoms_map[gb]
+                    dep_graph.add_node(gb_i)
                     dep_graph.add_node(aux_i)
-                    dep_graph.add_edge(abs(b_lit), aux_i)
+                    dep_graph.add_edge(gb_i, aux_i)
+
+        grounded_rules = FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grounded_rules])
 
         # Try exploiting memoized solutions for the whole grounded rule set
         if len(provided_mem) > 0:
@@ -248,8 +220,12 @@ class Program:
         
         # Grounded rule sets for each component
         grounded_rules_per_comp = [
-            sum([grounded_rules_by_head[a] for a in comp.nodes()], FrozenMultiset())
+            set.union(*[grounded_rules_by_head[a] for a in comp.nodes()])
             for comp in comps
+        ]
+        grounded_rules_per_comp = [
+            FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grs_c])
+            for grs_c in grounded_rules_per_comp
         ]
 
         # Try exploiting memoized solutions by assembling from provided_mem
@@ -414,8 +390,8 @@ class Program:
                     # Combine the results with hard-weighted facts
                     bottom_models = [
                         (
-                            pos_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr==1.0},
-                            neg_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr==0.0},
+                            pos_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==1.0},
+                            neg_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==0.0},
                             lp
                         )
                         for pos_atoms, neg_atoms, lp in bottom_models

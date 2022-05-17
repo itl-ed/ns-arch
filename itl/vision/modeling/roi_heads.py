@@ -19,7 +19,7 @@ from detectron2.modeling.roi_heads import (
 )
 
 from .fast_rcnn import SceneGraphRCNNOutputLayers
-from ..utils import pair_vals
+from ..utils import pair_vals, pair_select_indices
 
 
 @ROI_HEADS_REGISTRY.register()
@@ -363,7 +363,7 @@ class SceneGraphROIHeads(StandardROIHeads):
         box_pair_features = self.box_pooler(features, [x.proposal_pair_boxes for x in proposals_rels])
         box_pair_features = self.box_head(box_pair_features)
 
-        predictions = self.box_predictor(box_features, box_pair_features, proposals)
+        predictions, f_vecs = self.box_predictor(box_features, box_pair_features, proposals)
         del box_features, box_pair_features
 
         if self.training:
@@ -378,10 +378,27 @@ class SceneGraphROIHeads(StandardROIHeads):
                         proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
             return losses
         else:
-            pred_instances, _ = self.box_predictor.inference(
+            pred_instances, kept_indices = self.box_predictor.inference(
                 predictions, proposals, boxes_provided=boxes_provided
             )
-            return pred_instances
+            # Filter f_vecs as well with kept_indices
+            cls_f_vecs = f_vecs[0][kept_indices[0]]
+            att_f_vecs = f_vecs[1][kept_indices[0]]
+
+            # Filter, reshape and pad relation feature vectors ((N^2-N, D) to (N, N, D))
+            N = kept_indices[0].shape[0]; D = f_vecs[2].shape[-1]
+            rel_f_vecs = f_vecs[2][pair_select_indices(N, kept_indices[0])]
+            rel_f_vecs = torch.stack([
+                torch.cat([
+                    f_vecs[2][i*(N-1):i*(N-1)+i],
+                    torch.zeros([1,D], device=f_vecs[2].device),
+                    f_vecs[2][i*(N-1)+i:(i+1)*(N-1)]],
+                dim=0)
+            for i in range(N)], dim=0)
+
+            f_vecs = (cls_f_vecs, att_f_vecs, rel_f_vecs)
+
+            return pred_instances, f_vecs
 
     def forward(self, images, features, proposals, targets=None, boxes_provided=False):
         """
@@ -404,8 +421,8 @@ class SceneGraphROIHeads(StandardROIHeads):
             losses.update(self._forward_keypoint(features, proposals))
             return proposals, losses
         else:
-            pred_instances = self._forward_box(features, proposals, boxes_provided=boxes_provided)
+            pred_instances, f_vecs = self._forward_box(features, proposals, boxes_provided=boxes_provided)
             # During inference cascaded prediction is used: the mask and keypoints heads are only
             # applied to the top scoring box detections.
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
-            return pred_instances, {}
+            return pred_instances, f_vecs

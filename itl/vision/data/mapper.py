@@ -62,7 +62,7 @@ class _VGMapper(DatasetMapper):
                 instances.pred_objectness = torch.stack([
                     torch.tensor(obj["objectness_scores"])
                         if obj["objectness_scores"] is not None
-                        else torch.tensor([1])
+                        else torch.tensor([1.0])
                     for obj in annos
                 ])
             dataset_dict["proposals"] = instances

@@ -35,25 +35,28 @@ class DualModeRCNN(GeneralizedRCNN):
                 # run roi_heads on the boxes with boxes_provided=True to prevent any of them
                 # getting filtered out
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
-                results, _ = self.roi_heads(
+                results, f_vecs = self.roi_heads(
                     images, features, proposals, None, boxes_provided=True
                 )
             else:
                 # Otherwise, default behavior of the parent class
                 assert self.proposal_generator is not None
                 proposals, _ = self.proposal_generator(images, features, None)
-                results, _ = self.roi_heads(
+                results, f_vecs = self.roi_heads(
                     images, features, proposals, None, boxes_provided=False
                 )
         else:
+            # No use case handled by this snippet yet...
+            raise NotImplementedError
             detected_instances = [x.to(self.device) for x in detected_instances]
             results = self.roi_heads.forward_with_given_boxes(features, detected_instances)
+            f_vecs = None
 
         if do_postprocess:
             assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
-            return self._postprocess(results, batched_inputs, images.image_sizes)
+            return self._postprocess(results, batched_inputs, images.image_sizes), f_vecs
         else:
-            return results
+            return results, f_vecs
 
     def visualize_training(self, batched_inputs, proposals):
         """

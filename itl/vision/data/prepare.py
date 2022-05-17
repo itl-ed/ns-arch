@@ -236,12 +236,10 @@ def reformat_annotations(target_dir, img_count, img_anns):
                 if len(r["synsets"]) == 0:
                     if r["predicate"] == "OF":
                         # Relations with "OF" predicate do not have canonicalized synsets, presumably
-                        # due to the fact that WordNet doesn't have "of" entry (because it's open-class)
-                        #
-                        # However, we would like to include a fake synset here that represents the 
-                        # "part-of" relationship, for it has high importance for our purpose
-                        # (The *somewhat* 'inverse' relation of 'has' is represented by "have.v.01")
-
+                        # due to the fact that WordNet doesn't have "of" entry. We include a fake
+                        # synset here that represents the "part-of" relationship, for it has high
+                        # importance for our purpose
+                        # (The *somewhat* 'inverse' relation of 'have' is represented by "have.v.01")
                         r["synsets"] = ["of.r.01"]
                     else:
                         # Otherwise skip relations with empty synsets

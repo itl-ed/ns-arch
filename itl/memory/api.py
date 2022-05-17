@@ -5,6 +5,7 @@ concept exemplars
 """
 from .lexicon import Lexicon
 from .kb import KnowledgeBase
+from .exemplars import Exemplars
 
 
 U_W_PR = 1.0         # How much the agent values information provided by the user
@@ -14,6 +15,7 @@ class LongTermMemoryModule:
     def __init__(self):
         self.lexicon = Lexicon()
         self.kb = KnowledgeBase()
+        self.exemplars = Exemplars()
 
     def kb_add_from_dialogue(self, utt_id, lang):
         """
