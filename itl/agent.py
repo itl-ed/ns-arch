@@ -161,31 +161,30 @@ class ITLAgent:
             return
 
         # Handle resolvable/unresolvable neologisms, if any
-        self._process_neologisms()
+        self._handle_neologisms()
 
         # Sensemaking from vision input only
         if self.vision.updated:
             self.cognitive.sensemake_vis(self.vision.scene)
 
-        if len(self.lang.dialogue.record) > 0:
-            dialogue_state = self.lang.export_dialogue_state()
+        dialogue_state = self.lang.export_dialogue_state()
 
-            # Reference & word sense resolution to connect vision & discourse
-            self.cognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
+        # Reference & word sense resolution to connect vision & discourse
+        self.cognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
 
-            # Learning from user language input at two levels: neural few-shot learning
-            # and symbolic rule learning
-            self._learn()
+        # Learning from user language input at two levels: neural few-shot learning
+        # and symbolic rule learning
+        self._learn()
 
-            # Sensemaking from vision & language input
-            self.cognitive.sensemake_vis_lang(dialogue_state)
+        # Sensemaking from vision & language input
+        self.cognitive.sensemake_vis_lang(dialogue_state)
 
-            # Identify any mismatch between vision-only sensemaking result vs. info conveyed
-            # by user utterance inputs
-            self._identify_mismatch()
+        # Identify any mismatch between vision-only sensemaking result vs. info conveyed
+        # by user utterance inputs
+        self._identify_mismatch()
 
-            # Compute answers to any unanswered questions that can be computed
-            self._compute_Q_answers()
+        # Compute answers to any unanswered questions that can be computed
+        self._compute_Q_answers()
 
         # self.vision.reshow_pred()
 
@@ -233,7 +232,7 @@ class ITLAgent:
     ##  Below implements agent capabilities that require interplay between modules  ##
     ##################################################################################
 
-    def _process_neologisms(self):
+    def _handle_neologisms(self):
         """
         Identify any neologisms that can(not) be resolved without interacting further
         with user (definition/exemplar already provided)
@@ -378,6 +377,10 @@ class ITLAgent:
         Recognize any mismatch between sensemaking results obtained from vision-only
         vs. info provided in discourse utterances, and add to agenda if any is found
         """
+        if len(self.lang.dialogue.record) == 0:
+            # Don't bother
+            return
+
         # Shortcut vars
         a_map = lambda args: [self.cognitive.value_assignment[a] for a in args]
         word_senses = self.cognitive.word_senses
@@ -447,6 +450,10 @@ class ITLAgent:
 
     def _compute_Q_answers(self):
         """ Compute answers to question indexed by indexed by utt_id """
+        if len(self.lang.dialogue.record) == 0:
+            # Don't bother
+            return
+
         assert self.cognitive.concl_vis_lang is not None
         models_vl, _, _ = self.cognitive.concl_vis_lang
 

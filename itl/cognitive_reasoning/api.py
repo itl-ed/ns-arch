@@ -154,6 +154,10 @@ class CognitiveReasonerModule:
             lexicon: Agent's lexicon, required for matching between environment entities
                 vs. discourse referents for variable assignment
         """
+        if len(dialogue_state["record"]) == 0:
+            # Don't bother
+            return
+
         assert self.concl_vis is not None
         models_v, _, _ = self.concl_vis
 
@@ -391,6 +395,10 @@ class CognitiveReasonerModule:
             dialogue_state: Current dialogue information state exported from the dialogue
                 manager
         """
+        if len(dialogue_state["record"]) == 0:
+            # Don't bother
+            return
+
         assert self.concl_vis is not None
 
         dprog = Program()
