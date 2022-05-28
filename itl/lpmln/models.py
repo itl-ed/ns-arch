@@ -5,10 +5,9 @@ from itertools import product, chain, combinations
 from functools import reduce
 from collections import defaultdict
 
-import numpy as np
-
 from .literal import Literal
 from .rule import Rule
+from .utils import logit, sigmoid
 
 
 class Models:
@@ -56,7 +55,7 @@ class Models:
 
                 lits_agg = defaultdict(lambda: (0.5, None))
                 for lit, w_pr, coll in lit_factors:
-                    w_pr_agg = _sigmoid(_logit(lits_agg[lit][0]) + _logit(w_pr))
+                    w_pr_agg = sigmoid(logit(lits_agg[lit][0]) + logit(w_pr))
                     coll_agg = lits_agg[lit][1] if coll is None else coll
                     lits_agg[lit] = (w_pr_agg, coll_agg)
 
@@ -654,22 +653,3 @@ class Models:
             per_exh_answer = None
 
         return per_assig, per_exh_answer
-
-
-def _logit(p):
-    """ Compute logit of the probability value p """
-    if p == 1:
-        return float("inf")
-    elif p == 0:
-        return float("-inf")
-    else:
-        return np.log(p/(1-p))
-
-def _sigmoid(l):
-    """ Compute probability of the logit value l """
-    if l == float("inf"):
-        return 1
-    elif l == float("-inf"):
-        return 0
-    else:
-        return 1 / (1 + np.exp(-l))

@@ -31,28 +31,29 @@ class Lexicon:
             self.d2s[denotation].append(symbol)
         else:
             self.d2s[denotation] = [symbol]
-        
+
         freq = freq or 1
         self.d_freq[denotation] = freq
 
-    def fill_from_vision(self, vision):
+    def fill_from_dicts(self, predicates, predicates_freq):
         """
         Populate empty lexicon with provided dicts of visual concept predicates
+        and their frequency info
         """
         assert len(self.s2d) == len(Lexicon.RESERVED), \
             "This method initializes empty lexicons only"
 
-        for i, c in enumerate(vision.predicates["cls"]):
-            if vision.predicates_freq is not None:
-                freq = vision.predicates_freq["cls"][i]
+        for i, c in enumerate(predicates["cls"]):
+            if predicates_freq is not None:
+                freq = predicates_freq["cls"][i]
             else:
                 freq = None
             lemma, pos, _ = c.split(".")
             self.add((lemma, pos), (i, "cls"), freq)
 
-        for i, a in enumerate(vision.predicates["att"]):
-            if vision.predicates_freq is not None:
-                freq = vision.predicates_freq["att"][i]
+        for i, a in enumerate(predicates["att"]):
+            if predicates_freq is not None:
+                freq = predicates_freq["att"][i]
             else:
                 freq = None
             lemma, pos, _ = a.split(".")
@@ -63,9 +64,9 @@ class Lexicon:
 
             self.add((lemma, pos), (i, "att"), freq)
 
-        for i, r in enumerate(vision.predicates["rel"]):
-            if vision.predicates_freq is not None:
-                freq = vision.predicates_freq["rel"][i]
+        for i, r in enumerate(predicates["rel"]):
+            if predicates_freq is not None:
+                freq = predicates_freq["rel"][i]
             else:
                 freq = None
             lemma, pos, _ = r.split(".")

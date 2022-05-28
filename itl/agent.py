@@ -17,10 +17,11 @@ from .lpmln import Literal, Rule
 from .lpmln.utils import wrap_args
 
 
-FT_THRES = 0.5                # Few-shot learning trigger score threshold
-SR_THRES = -math.log(0.5)     # Mismatch surprisal threshold
-EPS = 1e-10                   # Value used for numerical stabilization
-TAB = "\t"                    # For use in format strings
+FT_THRES = 0.5              # Few-shot learning trigger score threshold
+SR_THRES = -math.log(0.5)   # Mismatch surprisal threshold
+U_W_PR = 1.0                # How much the agent values information provided by the user
+EPS = 1e-10                 # Value used for numerical stabilization
+TAB = "\t"                  # For use in format strings
 
 class ITLAgent:
 
@@ -29,11 +30,13 @@ class ITLAgent:
         self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
         self.lang = LanguageModule(opts)
-        self.cognitive = CognitiveReasonerModule(kb=self.lt_mem.kb)
+        self.cognitive = CognitiveReasonerModule()
         self.practical = PracticalReasonerModule()
 
         # Initialize empty lexicon with concepts in visual module
-        self.lt_mem.lexicon.fill_from_vision(self.vision)
+        self.lt_mem.lexicon.fill_from_dicts(
+            self.vision.predicates, self.vision.predicates_freq
+        )
 
         # Image file selection CUI
         self.dcompleter = DatasetImgsCompleter()
@@ -155,7 +158,10 @@ class ITLAgent:
     def _update_belief(self):
         """ Form beliefs based on visual and/or language input """
 
-        if self.vision.raw_input is None and len(self.lang.dialogue.record) == 0:
+        dialogue_state = self.lang.dialogue.export_as_dict()
+        kb_prog = self.lt_mem.kb.export_as_program()
+
+        if self.vision.raw_input is None and len(dialogue_state["record"]) == 0:
             # No information whatsoever to form any sort of beliefs
             print("A> (Idling the moment away...)")
             return
@@ -165,15 +171,13 @@ class ITLAgent:
 
         # Sensemaking from vision input only
         if self.vision.updated:
-            self.cognitive.sensemake_vis(self.vision.scene)
-
-        dialogue_state = self.lang.export_dialogue_state()
+            self.cognitive.sensemake_vis(self.vision.scene, kb_prog)
 
         # Reference & word sense resolution to connect vision & discourse
         self.cognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
 
-        # Learning from user language input at two levels: neural few-shot learning
-        # and symbolic rule learning
+        # Learning from user language input at neural level (incremental few-shot visual
+        # concept registration) & symbolic level (knowledge base expansion)
         self._learn()
 
         # Sensemaking from vision & language input
@@ -291,19 +295,26 @@ class ITLAgent:
 
     def _learn(self):
         """
-        All the actual 'learning' from user interactions happens here (after all, learning
-        is a form of belief update). An instance of lifelong learning?
+        Neural (low-level) learning: Happens when 'reflex'-perception from neural
+        sensor module doesn't agree with provided info
+
+        Symbolic (high-level) learning: Add any novel generic rules to knowledge
+        base; rule shouldn't contain any constant term to be considered generic
         """
+        unresolved_neologisms = {
+            ag_content for (ag_type, ag_content) in self.practical.agenda
+            if ag_type == "address_neologism"
+        }
+
         # Shortcut vars
         a_map = lambda args: [self.cognitive.value_assignment[a] for a in args]
         word_senses = self.cognitive.word_senses
 
-        for speaker, _, (rules, _), _ in self.lang.dialogue.record:
+        for speaker, _, (rules, _), orig_utt in self.lang.dialogue.record:
             if speaker == "U" and rules is not None:
                 for head, body, _ in rules:
-                    # Neural (low-level) learning: Happens when 'reflex'-perception from neural
-                    # sensor module doesn't agree with provided info
                     if body is None:
+                        ## Neural incremental few-shot concept registration
                         vis_concept = word_senses[head[:2]]
                         cat_type, cat_ind = vis_concept
 
@@ -337,40 +348,42 @@ class ITLAgent:
                             self.vision.predict(raw_input_bgr, bboxes=self.vision.latest_bboxes)
                             self.cognitive.sensemake_vis(self.vision.scene)
 
-                    # Symbolic (high-level) learning: Add any novel generic rules to knowledge
-                    # base; rule shouldn't contain any constant term to be considered generic
-                    print(0)
+                    else:
+                        ## Symbolic knowledge base expansion
+                        head_args = {} if head is None else set(head[2])
+                        body_args = set(sum([b[2] for b in body], ()))
+                        occurring_args = head_args | body_args
 
-            # occurring_lits = sum([
-            #     ([r[0]] if r[0] is not None else []) + (r[1] if r[1] is not None else [])
-            #     for r in info+info_aux
-            # ], [])
-            # occurring_args = set(sum([
-            #     sum([a[1] if type(a)==tuple else (a,) for a in l[2]], ()) for l in occurring_lits
-            # ], ()))
+                        if not all(a[0].isupper() for a in occurring_args):
+                            # Ignore non-generic rules with any non-var arg
+                            continue
 
-            # If rule contains unresolved neologism postpone knowledge integration
-            # unresolved_neologisms = {
-            #     ag_content for (ag_type, ag_content) in self.practical.agenda
-            #     if ag_type == "address_neologism"
-            # }
-            # if rules is not None:
-            #     _, q_fmls = query
+                        head_syms = {} if head is None else {head[:2]}
+                        body_syms = {b[:2] for b in body}
+                        occurring_preds = head_syms | body_syms
 
-            #     skip_query = False
-            #     for head, body, _ in q_fmls:
-            #         if head is not None:
-            #             if head[:2] in unresolved_neologisms:
-            #                 skip_query = True; break
-            #         if body is not None:
-            #             for b in body:
-            #                 if b[:2] in unresolved_neologisms:
-            #                     skip_query = True; break
-            #     if skip_query:
-            #         continue
+                        if len(occurring_preds & unresolved_neologisms) > 0:
+                            # If rule contains unresolved neologism postpone KB update
+                            continue
 
-            # if all(a[0].isupper() for a in occurring_args):
-            #     agenda.append(("unintegrated_knowledge", ui))
+                        rule_head = word_senses[head[:2]]
+                        rule_head = Literal(
+                            f"{rule_head[1]}_{rule_head[0]}", args=wrap_args(*head[2])
+                        )
+
+                        rule_body = [word_senses[b[:2]] for b in body]
+                        rule_body = [
+                            Literal(
+                                f"{rule_body[i][1]}_{rule_body[i][0]}",
+                                args=wrap_args(*b[2]), naf=b[3]
+                            )
+                            for i, b in enumerate(body)
+                        ]
+
+                        # Integrate the rule into KB by adding (for now we won't worry about
+                        # intra-KB consistency, etc.)
+                        rule = Rule(head=rule_head, body=rule_body)
+                        self.lt_mem.kb.add(rule, U_W_PR, orig_utt)
 
     def _identify_mismatch(self):
         """

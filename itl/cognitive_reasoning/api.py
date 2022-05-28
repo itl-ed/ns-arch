@@ -30,8 +30,7 @@ TAB = "\t"           # For use in format strings
 
 class CognitiveReasonerModule:
 
-    def __init__(self, kb):
-        self.kb = kb
+    def __init__(self):
         self.concl_vis = None
         self.concl_vis_lang = None
         self.Q_answers = {}
@@ -47,7 +46,7 @@ class CognitiveReasonerModule:
         self.value_assignment = {}
         self.word_senses = {}
 
-    def sensemake_vis(self, vis_scene, objectness_thresh=0.75, category_thresh=0.75):
+    def sensemake_vis(self, vis_scene, kb_prog, objectness_thresh=0.75, category_thresh=0.75):
         """
         Combine raw visual perception outputs from the vision module (predictions with
         confidence) with existing knowledge to make final verdicts on the state of affairs,
@@ -60,10 +59,7 @@ class CognitiveReasonerModule:
             category_thresh: float; Only consider recognised categories with category
                 score higher than this value
         """
-        #########################################
-        ## TODO: Add knowledgebase integration ##
-        #########################################
-        prog = Program()
+        prog = kb_prog
 
         # Filter by objectness threshold (recognized objects are already ranked by
         # objectness score)
@@ -158,27 +154,27 @@ class CognitiveReasonerModule:
             # Don't bother
             return
 
-        assert self.concl_vis is not None
-        models_v, _, _ = self.concl_vis
-
         # Find the best estimate of referent value assignment
         aprog = Program()
 
-        # Environment entities
-        marginals_v, _ = models_v.marginals()
-        for atom, conf in marginals_v.items():
-            pred = atom.name
-            args = atom.args
+        if self.concl_vis is not None:
+            models_v, _, _ = self.concl_vis
 
-            if pred == "object":
-                # Occurring entities
-                aprog.add_hard_rule(Rule(head=Literal("env", args)))
+            # Environment entities
+            marginals_v, _ = models_v.marginals()
+            for atom, conf in marginals_v.items():
+                pred = atom.name
+                args = atom.args
 
-            else:
-                # Estimated marginals with probabilities
-                aprog.add_hard_rule(
-                    Rule(head=Literal("hold", args+wrap_args(pred, str(int(100*float(conf))))))
-                )
+                if pred == "object":
+                    # Occurring entities
+                    aprog.add_hard_rule(Rule(head=Literal("env", args)))
+
+                else:
+                    # Estimated marginals with probabilities
+                    aprog.add_hard_rule(
+                        Rule(head=Literal("hold", args+wrap_args(pred, str(int(100*float(conf))))))
+                    )
 
         # Discourse referents: Consider information from dialogue state
 
@@ -193,21 +189,15 @@ class CognitiveReasonerModule:
             for i, rule in enumerate(info):
                 head, body, _ = rule
 
-                # Skip any non-grounded content
-                head_has_var = head is not None and any([
-                    type(x)==str and x[0].isupper() for x in head[2]
-                ])
-                body_has_var = body is not None and any([
-                    any([type(x)==str and x[0].isupper() for x in bl[2]])
-                    for bl in body
-                ])
-                if head_has_var or body_has_var: continue
-
                 # The most general way of adding constraints from understood rule, though
                 # most rules will be either body-less facts or head-less constraints and thus
-                # won't require the full processing implemented below
+                # won't require the full processing implemented below...
 
                 if body is not None:
+                    body_has_var = body is not None and any([
+                        any([type(x)==str and x[0].isupper() for x in bl[2]])
+                        for bl in body
+                    ])
                     body_pos = [bl for bl in body if not bl[3]]
                     body_neg = [bl for bl in body if bl[3]]
 
@@ -216,9 +206,6 @@ class CognitiveReasonerModule:
                         # be relieved later if the rule head exists and is satisfied)
                         a_body = []
                         for j, bl in enumerate(body_pos):
-                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
-                            a_body.append(Literal("hold", wrap_args(*b_args)))
-
                             # Consult lexicon for word sense selection
                             vis_concepts = lexicon.s2d[(bl[0], bl[1])]
                             aprog.add_rule(Rule(
@@ -231,20 +218,23 @@ class CognitiveReasonerModule:
                                 lb=1, ub=1
                             ))
 
-                        W_summ = [op for j in range(len(body_pos)) for op in (f"Wb{str(j)}", "+")][:-1]
-                        aprog.add_hard_rule(Rule(
-                            head=Literal("pen", [(f"r{i}_bp", False), (W_summ, True)]),
-                            body=a_body
-                        ))
+                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
+                            a_body.append(Literal("hold", wrap_args(*b_args)))
+
+                        if not body_has_var:
+                            W_summ = [
+                                op for j in range(len(body_pos)) for op in (f"Wb{str(j)}", "+")
+                            ][:-1]
+                            aprog.add_hard_rule(Rule(
+                                head=Literal("pen", [(f"r{i}_bp", False), (W_summ, True)]),
+                                body=a_body
+                            ))
 
                     if len(body_neg) > 0:
-                        # Lessen penalties for assignments satisfying the negative part of rule body, so
-                        # that assignments fulfilling the whole body is penalized the most
+                        # Lessen penalties for assignments satisfying the negative part of rule body,
+                        # so that assignments fulfilling the whole body is penalized the most
                         a_body = []
                         for j, bl in enumerate(body_neg):
-                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
-                            a_body.append(Literal("hold", wrap_args(*b_args)))
-
                             # Consult lexicon for word sense selection
                             vis_concepts = lexicon.s2d[(bl[0], bl[1])]
                             aprog.add_rule(Rule(
@@ -257,13 +247,21 @@ class CognitiveReasonerModule:
                                 lb=1, ub=1
                             ))
 
-                        W_summ = ["-"]+[op for j in range(len(body_neg)) for op in (f"Wb{str(j)}", "-")][:-1]
-                        aprog.add_hard_rule(Rule(
-                            head=Literal("pen", [(f"r{i}_bn", False), (W_summ, True)]),
-                            body=a_body
-                        ))
+                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
+                            a_body.append(Literal("hold", wrap_args(*b_args), naf=True))
+
+                        if not body_has_var:
+                            W_summ = str(len(body_neg) * 100)
+                            aprog.add_hard_rule(Rule(
+                                head=Literal("pen", [(f"r{i}_bn", False), (W_summ, True)]),
+                                body=a_body
+                            ))
 
                 if head is not None:
+                    head_has_var = head is not None and any([
+                        type(x)==str and x[0].isupper() for x in head[2]
+                    ])
+
                     # Reward assignments satisfying the rule head and body so that the potential penalties
                     # imposed above could be compensated
                     h_args = head[2] + (f"{head[1]}_{head[0]}", "Wh")
@@ -291,11 +289,12 @@ class CognitiveReasonerModule:
                         lb=1, ub=1
                     ))
 
-                    hb_rule = Rule(
-                        head=Literal("pen", [(f"r{i}_hb", False), (W_summ, True)]),
-                        body=a_body
-                    )
-                    aprog.add_hard_rule(hb_rule)
+                    if not head_has_var:
+                        hb_rule = Rule(
+                            head=Literal("pen", [(f"r{i}_hb", False), (W_summ, True)]),
+                            body=a_body
+                        )
+                        aprog.add_hard_rule(hb_rule)
 
         # Hard assignments by pointing, etc.
         for ref, env in dialogue_state["assignment_hard"].items():
@@ -306,23 +305,23 @@ class CognitiveReasonerModule:
 
         ## Assignment program rules
 
-        # hold(X,PL,W) :- hold(E,PV,W), assign(X,E), denote(PL, PV, F).
+        # hold(X,PS,W) :- hold(E,PD,W), assign(X,E), denote(PS, PD, F).
         aprog.add_hard_rule(Rule(
-            head=Literal("hold", wrap_args("X", "PL", "W")),
+            head=Literal("hold", wrap_args("X", "PS", "W")),
             body=[
-                Literal("hold", wrap_args("E", "PV", "W")),
+                Literal("hold", wrap_args("E", "PD", "W")),
                 Literal("assign", wrap_args("X", "E")),
-                Literal("denote", wrap_args("PL", "PV", "F"))
+                Literal("denote", wrap_args("PS", "PD", "F"))
             ]
         ))
-        # hold(X1,X2,PL,W) :- hold(E1,E2,PV,W), assign(X1,E1), assign(X2,E2), denote(PL, PV, F).
+        # hold(X1,X2,PS,W) :- hold(E1,E2,PD,W), assign(X1,E1), assign(X2,E2), denote(PS, PD, F).
         aprog.add_hard_rule(Rule(
             head=Literal("hold", wrap_args("X1", "X2", "P", "W")),
             body=[
                 Literal("hold", wrap_args("E1", "E2", "P", "W")),
                 Literal("assign", wrap_args("X1", "E1")),
                 Literal("assign", wrap_args("X2", "E2")),
-                Literal("denote", wrap_args("PL", "PV", "F"))
+                Literal("denote", wrap_args("PS", "PD", "F"))
             ]
         ))
 
@@ -365,7 +364,7 @@ class CognitiveReasonerModule:
                 ([Literal("pen", wrap_args("RI", "W"))], "W", ["RI"])
             ]),
             ("maximize", [
-                ([Literal("denote", wrap_args("PL", "PV", "F"))], "F", ["PL"])
+                ([Literal("denote", wrap_args("PS", "PD", "F"))], "F", ["PS"])
             ])
         ])
 

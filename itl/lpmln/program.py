@@ -10,12 +10,13 @@ from functools import reduce
 import clingo
 import numpy as np
 import networkx as nx
-from multiset import Multiset, FrozenMultiset
+from multiset import FrozenMultiset
 
 from .literal import Literal
 from .rule import Rule
 from .models import Models
 from .topk_subset import topk_subset_gen
+from .utils import logit
 
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
@@ -352,7 +353,7 @@ class Program:
                     # rule weights with the marginal probabilities of rule head atoms across all possible
                     # models (... on the assumption that there are no probabilistic choice rules with the
                     # same head atoms with non-disjoint body in program)
-                    rule_weights = [_logit(w_pr[0]) for _, w_pr in soft_facts]
+                    rule_weights = [logit(w_pr[0], LARGE) for _, w_pr in soft_facts]
 
                     # (Log of) partition function for all the soft rules can be analytically computed as below
                     logZ = sum([np.log(1+np.exp(w)) for w in rule_weights])
@@ -701,7 +702,7 @@ class Program:
                         if unsats:
                             # Add rule with unsat atom which is derived whenever
                             # rule head is not true
-                            weight = int(_logit(w_pr[0]) * SCALE_PREC)
+                            weight = int(logit(w_pr[0], LARGE) * SCALE_PREC)
                             unsat_args = [(ri, False), (weight, False)]
                             unsat_rule = Rule(
                                 head=Literal("unsat", unsat_args),
@@ -713,7 +714,7 @@ class Program:
                             # Add a modified rule with the same body but unsat atom
                             # as head, which is satisfied whenever constraint body is
                             # true
-                            weight = int(_logit(w_pr[0]) * SCALE_PREC)
+                            weight = int(logit(w_pr[0], LARGE) * SCALE_PREC)
                             unsat_args = [(ri, False), (weight, False)]
                             unsat_rule = Rule(
                                 head=Literal("unsat", unsat_args),
@@ -748,13 +749,3 @@ class _Observer:
         self.rules = []
     def rule(self, choice, head, body):
         self.rules.append((head, body, choice))
-
-
-def _logit(p):
-    """ Compute logit of the probability value p, capped by LARGE value (+/-) """
-    if p == 1:
-        return LARGE
-    elif p == 0:
-        return -LARGE
-    else:
-        return np.log(p/(1-p))

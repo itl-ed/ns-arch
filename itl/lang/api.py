@@ -55,10 +55,6 @@ class LanguageModule:
         while len(self.dialogue.to_generate) > 0:
             utt = self.dialogue.to_generate.pop()
             print(f"A> {utt}")
-    
-    def export_dialogue_state(self):
-        """ Export the current dialogue information state as a dict """
-        return vars(self.dialogue)
 
     def utt_to_ASP(self, utt_id):
         """

@@ -35,6 +35,10 @@ class DialogueManager:
         """Clear the current dialogue state to start fresh in a new situation"""
         self.__init__()
     
+    def export_as_dict(self):
+        """ Export the current dialogue information state as a dict """
+        return vars(self)
+
     def _dem_point(self, vis_raw):
         """
         Simple pointing interface for entities quantified by demonstratives
