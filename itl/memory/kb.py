@@ -31,6 +31,6 @@ class KnowledgeBase:
             # For rules with multiple provenance, probabilities are aggregated by
             # summing in logit-space and then sigmoid-ing back to probability space
             w_pr = sigmoid(sum(logit(w) for w, _ in prov))
-            kb_prog.add(rule, w_pr)
+            kb_prog.add_rule(rule, w_pr)
 
         return kb_prog

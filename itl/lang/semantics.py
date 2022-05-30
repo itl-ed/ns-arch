@@ -256,6 +256,10 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             rel_args = rel_args[:1]
 
         if len(rel_args) > 1:
+            if len(rel_args) > 2 and rel_args[2].startswith("i"):
+                # Let's deal with i-referents later... Just ignore it for now
+                rel_args = rel_args[:2]
+
             if len(rel_args) > 2:
                 if rel["predicate"] == "be" and is_wh_quantified(rel_args[2]):
                     # MRS flips the arg order when subject is quantified with 'which',

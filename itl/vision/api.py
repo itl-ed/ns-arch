@@ -381,7 +381,7 @@ class VisionModule:
         """
         Register a novel visual concept to the model, expanding the concept inventory of
         corresponding category type (class/attribute/relation). Initialize the new concept's
-        category code with a NaN vector. Returns the index of the newly added concept.
+        category code with a zero vector. Returns the index of the newly added concept.
 
         Args:
             cat_type: str; either "cls", "att", or "rel", each representing category type
@@ -401,7 +401,7 @@ class VisionModule:
             D, C+1, bias=False, device=cat_predictor.weight.device
         )
         new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
-        new_cat_predictor.weight.data[C] = float("NaN")
+        new_cat_predictor.weight.data[C] = 0
 
         setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
 

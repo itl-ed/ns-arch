@@ -54,7 +54,7 @@ class Rule:
         (Expected to be called when translating rule with weight "-a" (negative inf;
         i.e. zero-probability) into pure ASP rule)
         """
-        assert self.head is not None, "Cannot flip integrity constraint"
+        assert len(self.head) > 0, "Cannot flip integrity constraint"
 
         return Rule(body=self.body+self.head)
     
@@ -94,7 +94,7 @@ class Rule:
 
     def is_fact(self):
         """ Return True if rule consists of its head and empty body """
-        return (self.head is not None) and (len(self.head) == 1) and (len(self.body) == 0)
+        return (len(self.head) == 1) and (len(self.body) == 0)
 
     def is_grounded(self):
         """ Returns True if the rule is variable-free """

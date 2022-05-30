@@ -247,11 +247,12 @@ class ITLAgent:
             if rules is not None:
                 for head, body, _ in rules:
                     if head is not None:
-                        if head[:2] not in self.lt_mem.lexicon.s2d:
-                            # Occurrence in rule head implies either definition or exemplar
-                            # is provided by this utterance
-                            resolvable_neologisms.add(head[:2])
-                            neologisms.add(head[:2])
+                        for h in head:
+                            if h[:2] not in self.lt_mem.lexicon.s2d:
+                                # Occurrence in rule head implies either definition or
+                                # exemplar is provided by this utterance
+                                resolvable_neologisms.add(h[:2])
+                                neologisms.add(h[:2])
                     if body is not None:
                         for b in body:
                             if b[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(b[:2])
@@ -259,7 +260,8 @@ class ITLAgent:
                 _, q_fmls = query
                 for head, body, _ in q_fmls:
                     if head is not None:
-                        if head[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(head[:2])
+                        for h in head:
+                            if h[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(h[:2])
                     if body is not None:
                         for b in body:
                             if b[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(b[:2])
@@ -301,24 +303,22 @@ class ITLAgent:
         Symbolic (high-level) learning: Add any novel generic rules to knowledge
         base; rule shouldn't contain any constant term to be considered generic
         """
-        unresolved_neologisms = {
-            ag_content for (ag_type, ag_content) in self.practical.agenda
-            if ag_type == "address_neologism"
-        }
+        dialogue_state = self.lang.dialogue.export_as_dict()
+        translated = self.cognitive.translate_dialogue_content(dialogue_state)
 
-        # Shortcut vars
-        a_map = lambda args: [self.cognitive.value_assignment[a] for a in args]
-        word_senses = self.cognitive.word_senses
-
-        for speaker, _, (rules, _), orig_utt in self.lang.dialogue.record:
-            if speaker == "U" and rules is not None:
-                for head, body, _ in rules:
-                    if body is None:
+        learned = False
+        for ui, (rules, _) in enumerate(translated):
+            speaker, _, _, orig_utt = self.lang.dialogue.record[ui]
+            if rules is not None and speaker == "U":
+                for r in rules:
+                    if len(r.body) == 0:
                         ## Neural incremental few-shot concept registration
-                        vis_concept = word_senses[head[:2]]
-                        cat_type, cat_ind = vis_concept
+                        if len(r.head) > 1:
+                            raise NotImplementedError      # This shouldn't happen
 
-                        args = a_map(head[2])
+                        cat_type, cat_ind = r.head[0].name.split("_")
+                        cat_ind = int(cat_ind)
+                        args = [a for a, _ in r.head[0].args]
 
                         # Fetch current score for the asserted fact (if exists)
                         if cat_type == "cls":
@@ -331,108 +331,64 @@ class ITLAgent:
                             assert cat_type == "rel"
                             cat_scores = self.vision.scene[args[0]]["pred_relations"][args[1]]
                             f_vec = self.vision.f_vecs[2][args[0]][args[1]]
-
-                        # If score doesn't exist (due to being novel concept) or score is below the
-                        # predefined threshold, trigger few-shot learning
+                        
+                        # If score doesn't exist (due to being novel concept) or score is
+                        # below the predefined threshold, trigger few-shot learning
                         if cat_ind >= len(cat_scores) or cat_scores[cat_ind] < FT_THRES:
-                            # Add new concept exemplars to memory, as feature vectors at the penultimate
-                            # layer right before category prediction heads
-                            self.lt_mem.exemplars.add(vis_concept, f_vec.cpu().numpy())
+                            novel_concept = (cat_type, cat_ind)
 
-                            # Update the category code parameter in the vision model's predictor head
-                            # using the new set of exemplars
-                            self.vision.update_concept(vis_concept, self.lt_mem.exemplars[vis_concept])
+                            # Add new concept exemplars to memory, as feature vectors at
+                            # the penultimate layer right before category prediction heads
+                            self.lt_mem.exemplars.add(novel_concept, f_vec.cpu().numpy())
 
-                            # Re-run vision prediction with updated model then sensemake again
+                            # Update the category code parameter in the vision model's predictor
+                            # head using the new set of exemplars
+                            self.vision.update_concept(
+                                novel_concept, self.lt_mem.exemplars[novel_concept]
+                            )
+
+                            learned = True
+
+                            # Re-run vision prediction with updated model
                             raw_input_bgr = self.vision.raw_input[:, :, [2,1,0]]
                             self.vision.predict(raw_input_bgr, bboxes=self.vision.latest_bboxes)
-                            self.cognitive.sensemake_vis(self.vision.scene)
-
                     else:
                         ## Symbolic knowledge base expansion
-                        head_args = {} if head is None else set(head[2])
-                        body_args = set(sum([b[2] for b in body], ()))
+                        head_args = set(sum([h.args for h in r.head], []))
+                        body_args = set(sum([b.args for b in r.body], []))
                         occurring_args = head_args | body_args
 
-                        if not all(a[0].isupper() for a in occurring_args):
+                        if any(not is_var for _, is_var in occurring_args):
                             # Ignore non-generic rules with any non-var arg
                             continue
-
-                        head_syms = {} if head is None else {head[:2]}
-                        body_syms = {b[:2] for b in body}
-                        occurring_preds = head_syms | body_syms
-
-                        if len(occurring_preds & unresolved_neologisms) > 0:
-                            # If rule contains unresolved neologism postpone KB update
-                            continue
-
-                        rule_head = word_senses[head[:2]]
-                        rule_head = Literal(
-                            f"{rule_head[1]}_{rule_head[0]}", args=wrap_args(*head[2])
-                        )
-
-                        rule_body = [word_senses[b[:2]] for b in body]
-                        rule_body = [
-                            Literal(
-                                f"{rule_body[i][1]}_{rule_body[i][0]}",
-                                args=wrap_args(*b[2]), naf=b[3]
-                            )
-                            for i, b in enumerate(body)
-                        ]
-
+                        
                         # Integrate the rule into KB by adding (for now we won't worry about
                         # intra-KB consistency, etc.)
-                        rule = Rule(head=rule_head, body=rule_body)
-                        self.lt_mem.kb.add(rule, U_W_PR, orig_utt)
+                        self.lt_mem.kb.add(r, U_W_PR, orig_utt)
+                        learned = True
+        
+        # Sensemake again if any learning happened (only if has sensemade already before)
+        if learned and self.cognitive.concl_vis is not None:
+            kb_prog = self.lt_mem.kb.export_as_program()
+            self.cognitive.sensemake_vis(self.vision.scene, kb_prog)
 
     def _identify_mismatch(self):
         """
         Recognize any mismatch between sensemaking results obtained from vision-only
         vs. info provided in discourse utterances, and add to agenda if any is found
         """
-        if len(self.lang.dialogue.record) == 0:
-            # Don't bother
+        if self.cognitive.concl_vis is None or len(self.lang.dialogue.record) == 0:
+            # Don't bother if lacking either vision or language input
             return
 
-        # Shortcut vars
-        a_map = lambda args: [self.cognitive.value_assignment[a] for a in args]
-        word_senses = self.cognitive.word_senses
         models_v, _, _ = self.cognitive.concl_vis
 
-        for _, _, (rules, _), _ in self.lang.dialogue.record:
+        dialogue_state = self.lang.dialogue.export_as_dict()
+        translated = self.cognitive.translate_dialogue_content(dialogue_state)
+
+        for rules, _ in translated:
             if rules is not None:
-                content = set()
-                for rule in rules:
-                    head, body, _ = rule
-
-                    # Skip any non-grounded content
-                    head_has_var = head is not None and any([
-                        type(x)==str and x[0].isupper() for x in head[2]
-                    ])
-                    body_has_var = body is not None and any([
-                        any([type(x)==str and x[0].isupper() for x in bl[2]])
-                        for bl in body
-                    ])
-                    if head_has_var or body_has_var: continue
-
-                    if head is not None:
-                        pred = "_".join([str(s) for s in word_senses[head[:2]]])
-                        args = [a for a in a_map(head[2])]
-                        subs_head = Literal(pred, wrap_args(*args))
-                    else:
-                        subs_head = None
-                    
-                    if body is not None:
-                        subs_body = []
-                        for bl in body:
-                            pred = "_".join([str(s) for s in word_senses[bl[:2]]])
-                            args = [a for a in a_map(bl[2])]
-                            bl = Literal(pred, wrap_args(*args), naf=bl[3])
-                            subs_body.append(bl)
-                    else:
-                        subs_body = None
-                    
-                    content.add(Rule(head=subs_head, body=subs_body))
+                content = set(rules)
 
                 # Make a yes-no query to obtain the likelihood of content
                 q_response, _ = models_v.query(None, content)
@@ -462,41 +418,21 @@ class ITLAgent:
         #     print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
 
     def _compute_Q_answers(self):
-        """ Compute answers to question indexed by indexed by utt_id """
-        if len(self.lang.dialogue.record) == 0:
-            # Don't bother
+        """ Compute answers to unanswered questions """
+        if self.cognitive.concl_vis_lang is None or len(self.lang.dialogue.record) == 0:
+            # Don't bother if lacking either vision or language input
             return
 
-        assert self.cognitive.concl_vis_lang is not None
         models_vl, _, _ = self.cognitive.concl_vis_lang
 
-        for utt_id, (_, utt_type, (_, query), _) in enumerate(self.lang.dialogue.record):
-            if utt_type == "?" and utt_id not in self.cognitive.Q_answers:
-                # If query contains unresolved neologism postpone answer computation
-                unresolved_neologisms = {
-                    ag_content for (ag_type, ag_content) in self.practical.agenda
-                    if ag_type == "address_neologism"
-                }
-                if query is not None:
-                    _, q_fmls = query
+        dialogue_state = self.lang.dialogue.export_as_dict()
+        translated = self.cognitive.translate_dialogue_content(dialogue_state)
 
-                    skip_query = False
-                    for head, body, _ in q_fmls:
-                        if head is not None:
-                            if head[:2] in unresolved_neologisms:
-                                skip_query = True; break
-                        if body is not None:
-                            for b in body:
-                                if b[:2] in unresolved_neologisms:
-                                    skip_query = True; break
-                    if skip_query:
-                        continue
+        # If query contains unresolved neologism, postpone answer computation
 
-                    # Compute answer to the query
-                    _, query = self.lang.utt_to_ASP(utt_id)
-                    q_ents, q_rules, _ = query
-
-                    # Store the computed answer, and add to agenda to generate answer
-                    # utterance
-                    self.cognitive.Q_answers[utt_id] = models_vl.query(q_ents, q_rules)
-                    self.practical.agenda.append(("answer_Q", utt_id))
+        for ui, (_, query) in enumerate(translated):
+            if query is not None:
+                # Store the computed answer, and add to agenda to generate answer
+                # utterance
+                self.cognitive.Q_answers[ui] = models_vl.query(*query)
+                self.practical.agenda.append(("answer_Q", ui))

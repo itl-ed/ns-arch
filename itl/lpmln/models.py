@@ -483,7 +483,7 @@ class Models:
         filtering as well.
 
         If q_vars is None we have a yes/no (polar) question, where having a non-empty
-        set as q_vars indicates we have a wh-question.
+        tuple as q_vars indicates we have a wh-question.
         """
         if type(event) != set:
             try:
@@ -507,7 +507,7 @@ class Models:
             ev_instances = { (): list(event) }
         else:
             # Assign some arbitrary order among the variables
-            q_vars = tuple(q_vars)
+            assert type(q_vars) == tuple, "Provide q_vars as tuple"
 
             # All possible grounded instances of event
             ev_instances = {
@@ -522,7 +522,7 @@ class Models:
             }
 
             # Initial pruning of q_vars assignments that are not worth considering; we may
-            # disregard assignments yielding in any body-less rule (i.e. facts) whose head
+            # disregard assignments yielding any body-less rules (i.e. facts) whose head
             # atom(s) does not appear in atoms_covered
             ev_instances = {
                 assig: evt_ins for assig, evt_ins in ev_instances.items()

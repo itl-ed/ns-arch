@@ -244,8 +244,16 @@ class DialogueManager:
         # Add to the list of discourse referents
         for rf, v in ref_map.items():
             if type(rf) == tuple:
+                # Function term
                 if v is not None:
-                    rf = (rf[0], tuple(f"x{ref_map[a]['map_id']}u{ui}" for a in rf[1]))
+                    f_args = tuple(
+                        f"X{ref_map[a]['map_id']}u{ui}"
+                            if ref_map[a]["is_univ_quantified"] or ref_map[a]["is_wh_quantified"]
+                            else f"x{ref_map[a]['map_id']}u{ui}"
+                        for a in rf[1]
+                    )
+                    rf = (rf[0], f_args)
+
                     self.referents["dis"][rf] = {
                         "is_referential": v["is_referential"],
                         "is_univ_quantified": v["is_univ_quantified"],
@@ -254,7 +262,12 @@ class DialogueManager:
             else:
                 assert type(rf) == str
                 if v is not None:
-                    self.referents["dis"][f"x{v['map_id']}u{ui}"] = {
+                    if v["is_univ_quantified"] or v["is_wh_quantified"]:
+                        rf = f"X{v['map_id']}u{ui}"
+                    else:
+                        rf = f"x{v['map_id']}u{ui}"
+
+                    self.referents["dis"][rf] = {
                         "is_referential": v["is_referential"],
                         "is_univ_quantified": v["is_univ_quantified"],
                         "is_wh_quantified": v["is_wh_quantified"]
@@ -304,7 +317,7 @@ class DialogueManager:
 
                 if var_free:
                     # Add the grounded literal as body-less fact
-                    info.append((m[:2]+(tuple(m[2]),False), None, None))
+                    info.append(([m[:2]+(tuple(m[2]),False)], None, None))
                 else:
                     # Add the non-grounded literal as rule body literal
                     body_lits.append(m[:2]+(tuple(m[2]),False))
@@ -334,7 +347,7 @@ class DialogueManager:
                         aux_body = [l[:2]+(tuple(l[2]),False) for l in m]
                         aux_body = list(set(aux_body))  # Remove duplicate literals
 
-                        info_aux.append((aux_head, aux_body, None))
+                        info_aux.append(([aux_head], aux_body, None))
                         body_lits.append(aux_head_neg)
                     else:
                         # Simpler case; add negated literal straight to rule body
@@ -353,7 +366,7 @@ class DialogueManager:
 
                 if type(m) == tuple:
                     # Non-negated message
-                    rule_head = m[:2] + (tuple(m[2]), False)
+                    rule_head = [m[:2] + (tuple(m[2]), False)]
                 else:
                     # Negation of conjunction
                     rule_head = None
@@ -387,7 +400,7 @@ class DialogueManager:
 
                     if type(m) == tuple:
                         # Non-negated message
-                        rule_head = m[:2] + (tuple(m[2]), False)
+                        rule_head = [m[:2] + (tuple(m[2]), False)]
                     else:
                         # Negation of conjunction
                         rule_head = None
@@ -410,7 +423,7 @@ class DialogueManager:
 
                     if type(m) == tuple:
                         # Non-negated message
-                        rule_head = m[:2] + (tuple(m[2]), False)
+                        rule_head = [m[:2] + (tuple(m[2]), False)]
                     else:
                         # Negation of conjunction
                         rule_head = None
@@ -423,7 +436,7 @@ class DialogueManager:
                 
                 # Then pull out any rules containing wh-quantified referents
                 rule_lits = [
-                    ([r[0]] if r[0] is not None else []) + ([r[1]] if r[1] is not None else [])
+                    (r[0] if r[0] is not None else []) + (r[1] if r[1] is not None else [])
                     for r in info
                 ]
                 rule_args = [
@@ -435,7 +448,10 @@ class DialogueManager:
                 q_ents = set.union(*rule_args) & wh_ents
                 query = (q_ents, q_rules)
 
-            info = _map_and_format(info, ref_map, f"u{ui}")
+            if len(info) > 0:
+                info = _map_and_format(info, ref_map, f"u{ui}")
+            else:
+                info = None
             query = _map_and_format(query, ref_map, f"u{ui}")
 
             self.record.append(("U", "?", (info, query), usr_in))
@@ -473,7 +489,9 @@ def _map_and_format(data, ref_map, tail):
             if h is None:
                 new_h = None
             else:
-                new_h = (h[0], h[1], tuple(_fmt(a) for a in h[2]), h[3])
+                new_h = [
+                    (l[0], l[1], tuple(_fmt(a) for a in l[2]), l[3]) for l in h
+                ]
 
             if b is None:
                 new_b = None
@@ -494,7 +512,7 @@ def _map_and_format(data, ref_map, tail):
         # Queries to make on computed ASP models
         q_ents, q_rules = data
 
-        new_q_ents = {_fmt(e) for e in q_ents} if q_ents is not None else None
+        new_q_ents = tuple(_fmt(e) for e in q_ents) if q_ents is not None else None
 
         return (new_q_ents, _process_rules(q_rules))
 

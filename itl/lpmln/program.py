@@ -130,7 +130,7 @@ class Program:
 
         # Feed compiled program string to clingo.Control object and ground program
         rules_obs = _Observer()
-        ctl = clingo.Control()
+        ctl = clingo.Control(["--warn=none"])
         ctl.register_observer(rules_obs)
         ctl.add("base", [], self._pure_ASP_str())
         ctl.ground([("base", [])])
@@ -291,7 +291,7 @@ class Program:
                 else:
                     # Solve the bottom (== comp) with clingo and return answer sets (with
                     # associated probabilities)
-                    ctl = clingo.Control()
+                    ctl = clingo.Control(["--warn=none"])
                     ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
                     ctl.ground([("base", [])])
                     ctl.configuration.solve.models = 0
@@ -474,7 +474,7 @@ class Program:
             stm_asp_str += f"#{max_or_min} {{ {'; '.join(formulas_asp_str)} }}.\n"
 
         # Optimize with clingo
-        ctl = clingo.Control()
+        ctl = clingo.Control(["--warn=none"])
         ctl.add("base", [], self._pure_ASP_str()+stm_asp_str)
         ctl.ground([("base", [])])
         ctl.configuration.solve.models = 0
@@ -562,10 +562,10 @@ class Program:
                 # Add to set of explored states
                 visited.add(current_state)
 
-                # Find the lowest (in index) rule that needs to be included in splitting
+                # Find the lowest rule (i.e. first find) that needs to be included in splitting
                 # bottom; i.e. rule with a head in current state, and any of the other atoms
                 # not in current state
-                for r, _ in self.rules:
+                for r, _ in grounded_rules_rel:
                     # Auxiliary heads of integrity constraints are never sources, and don't 
                     # need to be included minimal splitting sets.
                     if len(r.head) == 0:

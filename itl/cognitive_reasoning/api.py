@@ -17,6 +17,8 @@ logic programs (written in the language of weighted ASP) and solve with a dedica
 (clingo).
 """
 import copy
+from itertools import product
+from collections import defaultdict
 
 import numpy as np
 
@@ -157,144 +159,30 @@ class CognitiveReasonerModule:
         # Find the best estimate of referent value assignment
         aprog = Program()
 
+        # Environmental entities & recognized visual concepts
         if self.concl_vis is not None:
             models_v, _, _ = self.concl_vis
-
-            # Environment entities
             marginals_v, _ = models_v.marginals()
-            for atom, conf in marginals_v.items():
-                pred = atom.name
-                args = atom.args
 
-                if pred == "object":
-                    # Occurring entities
-                    aprog.add_hard_rule(Rule(head=Literal("env", args)))
-
+            vis_concepts = defaultdict(float)
+            for atom, pr in marginals_v.items():
+                if atom.name == "object":
+                    aprog.add_hard_rule(Rule(head=Literal("env", atom.args)))
                 else:
-                    # Estimated marginals with probabilities
-                    aprog.add_hard_rule(
-                        Rule(head=Literal("hold", args+wrap_args(pred, str(int(100*float(conf))))))
-                    )
+                    # Collect 'priming intensity' by recognized concepts
+                    vis_concepts[atom.name] += pr
+            
+            for vc, score in vis_concepts.items():
+                aprog.add_hard_rule(Rule(
+                    head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
+                ))
 
-        # Discourse referents: Consider information from dialogue state
-
-        # Referent info
-        for rf, value in dialogue_state["referents"]["dis"].items():
-            aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(rf))))
-            if value["is_referential"]:
-                aprog.add_hard_rule(Rule(head=Literal("referential", wrap_args(rf))))
-
-        # Understood dialogue record contents
-        for _, _, (info, _), _ in dialogue_state["record"]:
-            for i, rule in enumerate(info):
-                head, body, _ = rule
-
-                # The most general way of adding constraints from understood rule, though
-                # most rules will be either body-less facts or head-less constraints and thus
-                # won't require the full processing implemented below...
-
-                if body is not None:
-                    body_has_var = body is not None and any([
-                        any([type(x)==str and x[0].isupper() for x in bl[2]])
-                        for bl in body
-                    ])
-                    body_pos = [bl for bl in body if not bl[3]]
-                    body_neg = [bl for bl in body if bl[3]]
-
-                    if len(body_pos) > 0:
-                        # Penalize assignments satisfying the positive part of rule body (which could
-                        # be relieved later if the rule head exists and is satisfied)
-                        a_body = []
-                        for j, bl in enumerate(body_pos):
-                            # Consult lexicon for word sense selection
-                            vis_concepts = lexicon.s2d[(bl[0], bl[1])]
-                            aprog.add_rule(Rule(
-                                head=[
-                                    Literal("denote", wrap_args(
-                                        f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
-                                    ))
-                                    for vc in vis_concepts
-                                ],
-                                lb=1, ub=1
-                            ))
-
-                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
-                            a_body.append(Literal("hold", wrap_args(*b_args)))
-
-                        if not body_has_var:
-                            W_summ = [
-                                op for j in range(len(body_pos)) for op in (f"Wb{str(j)}", "+")
-                            ][:-1]
-                            aprog.add_hard_rule(Rule(
-                                head=Literal("pen", [(f"r{i}_bp", False), (W_summ, True)]),
-                                body=a_body
-                            ))
-
-                    if len(body_neg) > 0:
-                        # Lessen penalties for assignments satisfying the negative part of rule body,
-                        # so that assignments fulfilling the whole body is penalized the most
-                        a_body = []
-                        for j, bl in enumerate(body_neg):
-                            # Consult lexicon for word sense selection
-                            vis_concepts = lexicon.s2d[(bl[0], bl[1])]
-                            aprog.add_rule(Rule(
-                                head=[
-                                    Literal("denote", wrap_args(
-                                        f"{bl[1]}_{bl[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
-                                    ))
-                                    for vc in vis_concepts
-                                ],
-                                lb=1, ub=1
-                            ))
-
-                            b_args = bl[2] + (f"{bl[1]}_{bl[0]}", f"Wb{j}")
-                            a_body.append(Literal("hold", wrap_args(*b_args), naf=True))
-
-                        if not body_has_var:
-                            W_summ = str(len(body_neg) * 100)
-                            aprog.add_hard_rule(Rule(
-                                head=Literal("pen", [(f"r{i}_bn", False), (W_summ, True)]),
-                                body=a_body
-                            ))
-
-                if head is not None:
-                    head_has_var = head is not None and any([
-                        type(x)==str and x[0].isupper() for x in head[2]
-                    ])
-
-                    # Reward assignments satisfying the rule head and body so that the potential penalties
-                    # imposed above could be compensated
-                    h_args = head[2] + (f"{head[1]}_{head[0]}", "Wh")
-                    a_body = [Literal("hold", wrap_args(*h_args))]
-                    W_summ = ["-", "Wh"]
-
-                    if body is not None:
-                        for j, bl in enumerate(body):
-                            vis_concept = lexicon.s2d[(bl[0], bl[1])]
-                            b_args = bl[2] + (f"{vis_concept[1]}_{vis_concept[0]}", f"Wb{j}")
-                            a_body.append(Literal("hold", wrap_args(*b_args)))
-
-                            if not bl[3]:
-                                W_summ += ["-", f"Wb{j}"]
-
-                    # Consult lexicon for word sense selection
-                    vis_concepts = lexicon.s2d[(head[0], head[1])]
-                    aprog.add_rule(Rule(
-                        head=[
-                            Literal("denote", wrap_args(
-                                f"{head[1]}_{head[0]}", f"{vc[1]}_{vc[0]}", lexicon.d_freq[vc]
-                            ))
-                            for vc in vis_concepts
-                        ],
-                        lb=1, ub=1
-                    ))
-
-                    if not head_has_var:
-                        hb_rule = Rule(
-                            head=Literal("pen", [(f"r{i}_hb", False), (W_summ, True)]),
-                            body=a_body
-                        )
-                        aprog.add_hard_rule(hb_rule)
+        # Discourse referents
+        for rf, v in dialogue_state["referents"]["dis"].items():
+            if not (v["is_univ_quantified"] or v["is_wh_quantified"]):
+                aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(rf))))
+                if v["is_referential"]:
+                    aprog.add_hard_rule(Rule(head=Literal("referential", wrap_args(rf))))
 
         # Hard assignments by pointing, etc.
         for ref, env in dialogue_state["assignment_hard"].items():
@@ -303,32 +191,121 @@ class CognitiveReasonerModule:
                 Rule(body=[Literal("assign", [(ref, False), (env, False)], naf=True)])
             )
 
-        ## Assignment program rules
+        # Understood dialogue record contents
+        occurring_preds = set()
+        for ui, (_, _, (rules, query), _) in enumerate(dialogue_state["record"]):
+            if rules is not None:
+                for ri, rule in enumerate(rules):
+                    head, body, _ = rule
 
-        # hold(X,PS,W) :- hold(E,PD,W), assign(X,E), denote(PS, PD, F).
-        aprog.add_hard_rule(Rule(
-            head=Literal("hold", wrap_args("X", "PS", "W")),
-            body=[
-                Literal("hold", wrap_args("E", "PD", "W")),
-                Literal("assign", wrap_args("X", "E")),
-                Literal("denote", wrap_args("PS", "PD", "F"))
-            ]
-        ))
-        # hold(X1,X2,PS,W) :- hold(E1,E2,PD,W), assign(X1,E1), assign(X2,E2), denote(PS, PD, F).
-        aprog.add_hard_rule(Rule(
-            head=Literal("hold", wrap_args("X1", "X2", "P", "W")),
-            body=[
-                Literal("hold", wrap_args("E1", "E2", "P", "W")),
-                Literal("assign", wrap_args("X1", "E1")),
-                Literal("assign", wrap_args("X2", "E2")),
-                Literal("denote", wrap_args("PS", "PD", "F"))
-            ]
-        ))
+                    head_preds = [] if head is None else [h[:2] for h in head]
+                    body_preds = [] if body is None else [b[:2] for b in body]
+                    preds = head_preds+body_preds
+                    occurring_preds |= set(preds)
+
+                    # Symbol token occurrence locations
+                    for pi, p in enumerate(preds):
+                        sym = f"{p[1]}_{p[0]}"
+                        tok_loc = f"u{ui}_r{ri}_p{pi}"
+                        aprog.add_hard_rule(
+                            Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
+                        )
+
+                    head_args = set() if head is None else set(sum([h[2] for h in head], ()))
+                    body_args = set() if body is None else set(sum([b[2] for b in body], ()))
+                    occurring_args = head_args | body_args
+
+                    if all(a in dialogue_state["assignment_hard"] for a in occurring_args):
+                        # Below not required if all occurring args are hard-assigned to some entity
+                        continue
+
+                    # If models_v is present and rule is grounded, add bias in favor of
+                    # assignments which would satisfy the rule
+                    is_grounded = all(not a[0].isupper() for a in occurring_args)
+                    if self.concl_vis is not None and is_grounded:
+                        # Rule instances by possible word sense selections
+                        wsd_cands = [lexicon.s2d[sym[:2]] for sym in preds]
+
+                        for vcs in product(*wsd_cands):
+                            if head is not None:
+                                head_vcs = vcs[:len(head_preds)]
+                                rule_head = [
+                                    Literal(f"{vc[1]}_{vc[0]}", wrap_args(*h[2]), naf=h[3])
+                                    for h, vc in zip(head, head_vcs)
+                                ]
+                            else:
+                                rule_head = None
+
+                            if body is not None:
+                                body_vcs = vcs[len(head_preds):]
+                                rule_body = [
+                                    Literal(f"{vc[1]}_{vc[0]}", wrap_args(*b[2]), naf=b[3])
+                                    for b, vc in zip(body, body_vcs)
+                                ]
+                            else:
+                                rule_body = None
+
+                            # Rule to query models_v with
+                            q_rule = Rule(head=rule_head, body=rule_body)
+                            q_vars = tuple(occurring_args)
+                            query_result, _ = models_v.query(q_vars, q_rule)
+
+                            for ans, (_, score) in query_result.items():
+                                c_head = Literal("cons", wrap_args(f"r{ri}", int(score*100)))
+                                c_body = [
+                                    Literal("assign", wrap_args(x, e)) for x, e in zip(q_vars, ans)
+                                ] + [
+                                    Literal("denote", wrap_args(f"u{ui}_r{ri}_p{pi}", f"{d[1]}_{d[0]}"))
+                                    for pi, d in enumerate(vcs)
+                                ]
+
+                                aprog.add_hard_rule(Rule(head=c_head, body=c_body))
+            
+            if query is not None:
+                _, q_rules = query
+
+                for qi, rule in enumerate(q_rules):
+                    head, body, _ = rule
+
+                    head_preds = [] if head is None else [h[:2] for h in head]
+                    body_preds = [] if body is None else [b[:2] for b in body]
+                    preds = head_preds+body_preds
+                    occurring_preds |= set(preds)
+
+                    # Symbol token occurrence locations
+                    for pi, p in enumerate(preds):
+                        sym = f"{p[1]}_{p[0]}"
+                        tok_loc = f"u{ui}_q{qi}_p{pi}"
+                        aprog.add_hard_rule(
+                            Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
+                        )
+
+        # Predicate info needed for word sense selection
+        for p in occurring_preds:
+            # Consult lexicon to list denotation candidates
+            sym = f"{p[1]}_{p[0]}"
+            if p in lexicon.s2d:
+                for vc in lexicon.s2d[p]:
+                    den = f"{vc[1]}_{vc[0]}"
+                    aprog.add_hard_rule(
+                        Rule(head=Literal("may_denote", wrap_args(sym, den)))
+                    )
+                    aprog.add_hard_rule(
+                        Rule(head=Literal("d_freq", wrap_args(den, lexicon.d_freq[vc])))
+                    )
+            else:
+                # Predicate symbol not found in lexicon: unresolved neologism
+                aprog.add_hard_rule(
+                    Rule(head=Literal("may_denote", wrap_args(sym, "_neo")))
+                )
+
+        ## Assignment program rules
 
         # 1 { assign(X,E) : env(E) } 1 :- dis(X), referential(X).
         aprog.add_rule(Rule(
             head=Literal(
-                "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
+                "assign", wrap_args("X", "E"),
+                conds=[Literal("env", wrap_args("E"))]
             ),
             body=[
                 Literal("dis", wrap_args("X")),
@@ -340,13 +317,26 @@ class CognitiveReasonerModule:
         # { assign(X,E) : env(E) } 1 :- dis(X), not referential(X).
         aprog.add_rule(Rule(
             head=Literal(
-                "assign", wrap_args("X", "E"), conds=[Literal("env", wrap_args("E"))]
+                "assign", wrap_args("X", "E"),
+                conds=[Literal("env", wrap_args("E"))]
             ),
             body=[
                 Literal("dis", wrap_args("X")),
                 Literal("referential", wrap_args("X"), naf=True)
             ],
             ub=1
+        ))
+
+        # 1 { denote(T,D) : may_denote(S,D) } 1 :- pred_token(T,S).
+        aprog.add_rule(Rule(
+            head=Literal(
+                "denote", wrap_args("T", "D"),
+                conds=[Literal("may_denote", wrap_args("S", "D"))]
+            ),
+            body=[
+                Literal("pred_token", wrap_args("T", "S"))
+            ],
+            lb=1, ub=1
         ))
 
         # 'Base cost' for cases where no assignments are any better than others
@@ -358,13 +348,25 @@ class CognitiveReasonerModule:
         # (Note: this is not a probabilistic inference, and the confidence scores provided as 
         # arguments are better understood as properties of the env. entities & disc. referents.)
         opt_models = aprog.optimize([
-            # Note: Earlier statements receive higher optimization priority
-            ("minimize", [
-                ([Literal("zero_p", [])], "0", []),
-                ([Literal("pen", wrap_args("RI", "W"))], "W", ["RI"])
-            ]),
+            # (Note: Earlier statements receive higher optimization priority)
+            # Prioritize assignments that agree with given statements
             ("maximize", [
-                ([Literal("denote", wrap_args("PS", "PD", "F"))], "F", ["PS"])
+                ([Literal("zero_p", [])], "0", []),
+                ([Literal("cons", wrap_args("RI", "S"))], "S", ["RI"])
+            ]),
+            # Prioritize word senses that occur in visual scene (if any): 'priming effect'
+            ("maximize", [
+                ([
+                    Literal("denote", wrap_args("T", "D")),
+                    Literal("vis_prime", wrap_args("D", "S"))
+                ], "S", ["T"])
+            ]),
+            # Prioritize word senses with higher frequency
+            ("maximize", [
+                ([
+                    Literal("denote", wrap_args("T", "D")),
+                    Literal("d_freq", wrap_args("D", "F"))
+                ], "F", ["T"])
             ])
         ])
 
@@ -373,16 +375,122 @@ class CognitiveReasonerModule:
 
         word_senses = [atom.args[:2] for atom in opt_models[0] if atom.name == "denote"]
         word_senses = {
-            tuple(symbol[0].split("_")): tuple(denotation[0].split("_"))
-            for symbol, denotation in word_senses
+            tuple(token[0].split("_")): tuple(denotation[0].split("_"))
+            for token, denotation in word_senses
         }
         word_senses = {
-            (symbol[1], symbol[0]): (denotation[0], int(denotation[1]))
-            for symbol, denotation in word_senses.items()
+            token: (denotation[0], int(denotation[1])) if len(denotation[0])>0 else None
+            for token, denotation in word_senses.items()
         }
 
         self.value_assignment.update(best_assignment)
         self.word_senses.update(word_senses)
+
+    def translate_dialogue_content(self, dialogue_state):
+        """
+        Translate logical content of dialogue record (which should be already ASP-
+        compatible) into ASP (LP^MLN) rules/queries, based on current estimate of
+        value assignment and word sense selection. Dismiss (replace with None) any
+        utterances containing unresolved neologisms.
+        """
+        result = []
+        a_map = lambda args: [self.value_assignment.get(a, a) for a in args]
+
+        for ui, (_, _, (rules, query), _) in enumerate(dialogue_state["record"]):
+            # If the utterance contains an unresolved neologism, give up translation
+            # for the time being
+            contains_unresolved_neologism = any([
+                den is None for tok, den in self.word_senses.items() if tok[0]==f"u{ui}"
+            ])
+            if contains_unresolved_neologism:
+                result.append((None, None))
+                continue
+
+            # Translate rules
+            if rules is not None:
+                translated_rules = []
+                for ri, rule in enumerate(rules):
+                    head, body, _ = rule
+
+                    if head is not None:
+                        rule_head = [
+                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{hi}")]
+                            for hi in range(len(head))
+                        ]
+                        rule_head = [
+                            Literal(
+                                f"{rule_head[i][0]}_{rule_head[i][1]}",
+                                args=wrap_args(*a_map(h[2])), naf=h[3]
+                            )
+                            for i, h in enumerate(head)
+                        ]
+                    else:
+                        rule_head = None
+
+                    if body is not None:
+                        rule_body = [
+                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{bi+len(head)}")]
+                            for bi in range(len(body))
+                        ]
+                        rule_body = [
+                            Literal(
+                                f"{rule_body[i][0]}_{rule_body[i][1]}",
+                                args=wrap_args(*a_map(b[2])), naf=b[3]
+                            )
+                            for i, b in enumerate(body)
+                        ]
+                    else:
+                        rule_body = None
+
+                    translated_rules.append(Rule(head=rule_head, body=rule_body))
+            else:
+                translated_rules = None
+            
+            # Translate query
+            if query is not None:
+                q_ents, q_rules = query
+
+                translated_qrs = []
+                for qi, (head, body, _) in enumerate(q_rules):
+                    if head is not None:
+                        rule_head = [
+                            self.word_senses[(f"u{ui}",f"q{qi}",f"p{hi}")]
+                            for hi in range(len(head))
+                        ]
+                        rule_head = [
+                            Literal(
+                                f"{rule_head[i][0]}_{rule_head[i][1]}",
+                                args=wrap_args(*a_map(h[2])), naf=h[3]
+                            )
+                            for i, h in enumerate(head)
+                        ]
+                    else:
+                        rule_head = None
+
+                    if body is not None:
+                        rule_body = [
+                            self.word_senses[(f"u{ui}",f"q{qi}",f"p{bi+len(head)}")]
+                            for bi in range(len(body))
+                        ]
+                        rule_body = [
+                            Literal(
+                                f"{rule_body[i][0]}_{rule_body[i][1]}",
+                                args=wrap_args(*a_map(b[2])), naf=b[3]
+                            )
+                            for i, b in enumerate(body)
+                        ]
+                    else:
+                        rule_body = None
+
+                    translated_qrs.append(Rule(head=rule_head, body=rule_body))
+
+                translated_query = q_ents, translated_qrs
+            else:
+                translated_query = None
+
+            result.append((translated_rules, translated_query))
+
+        return result
 
     def sensemake_vis_lang(self, dialogue_state):
         """
@@ -394,55 +502,35 @@ class CognitiveReasonerModule:
             dialogue_state: Current dialogue information state exported from the dialogue
                 manager
         """
-        if len(dialogue_state["record"]) == 0:
-            # Don't bother
+        if self.concl_vis is None or len(dialogue_state["record"]) == 0:
+            # Don't bother if lacking either vision or language input
             return
 
-        assert self.concl_vis is not None
-
         dprog = Program()
-        a_map = lambda args: [self.value_assignment[a] for a in args]
-
-        _, memoized_v, prog = self.concl_vis
+        models_v, memoized_v, prog = self.concl_vis
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking
-        for _, _, (info, _), _ in dialogue_state["record"]:
-            for i, rule in enumerate(info):
-                head, body, _ = rule
+        for rules, _ in self.translate_dialogue_content(dialogue_state):
+            if rules is not None:
+                for r in rules:
+                    # Skip any non-grounded content
+                    head_has_var = len(r.head) > 0 and any([
+                        any(is_var for _, is_var in h.args) for h in r.head
+                    ])
+                    body_has_var = len(r.body) > 0 and any([
+                        any(is_var for _, is_var in b.args) for b in r.body
+                    ])
+                    if head_has_var or body_has_var: continue
 
-                # Skip any non-grounded content
-                head_has_var = head is not None and any([
-                    type(x)==str and x[0].isupper() for x in head[2]
-                ])
-                body_has_var = body is not None and any([
-                    any([type(x)==str and x[0].isupper() for x in bl[2]])
-                    for bl in body
-                ])
-                if head_has_var or body_has_var: continue
-
-                if head is not None:
-                    pred = "_".join([str(s) for s in self.word_senses[head[:2]]])
-                    args = [a for a in a_map(head[2])]
-                    subs_head = Literal(pred, wrap_args(*args))
-                else:
-                    subs_head = None
-                
-                if body is not None:
-                    subs_body = []
-                    for bl in body:
-                        pred = "_".join(self.word_senses[bl[:2]])
-                        args = [a for a in a_map(bl[2])]
-                        bl = Literal(pred, wrap_args(*args), naf=bl[3])
-                        subs_body.append(bl)
-                else:
-                    subs_body = None
-
-                dprog.add_rule(Rule(head=subs_head, body=subs_body), U_W_PR)
+                    dprog.add_rule(r, U_W_PR)
 
         # Finally, reasoning with all visual+language info
-        prog += dprog
-        models_vl, memoized_vl = prog.solve(provided_mem=memoized_v)
+        if len(dprog) > 0:
+            prog += dprog
+            models_vl, memoized_vl = prog.solve(provided_mem=memoized_v)
+        else:
+            models_vl, memoized_vl = models_v, memoized_v
 
         # Store sensemaking result as module state
         self.concl_vis_lang = models_vl, memoized_vl, prog
