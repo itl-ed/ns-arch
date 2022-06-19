@@ -163,7 +163,8 @@ class SemanticParser:
                     "map_id": ref_map_map[ref_map[ref]["map_id"]],
                     "is_referential": ref_map[ref]["is_referential"],
                     "is_univ_quantified": ref_map[ref]["is_univ_quantified"],
-                    "is_wh_quantified": ref_map[ref]["is_wh_quantified"]
+                    "is_wh_quantified": ref_map[ref]["is_wh_quantified"],
+                    "is_pred": ref_map[ref]["is_pred"]
                 }
 
         return translation, dict(ref_map)
@@ -222,7 +223,8 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                 ),
                 "is_referential": is_referential(id),
                 "is_univ_quantified": is_univ_quantified(id),
-                "is_wh_quantified": is_wh_quantified(id)
+                "is_wh_quantified": is_wh_quantified(id),
+                "is_pred": False      # Whether it is a predicate (init default) or individual
             }
         else:
             # For referents we are not interested about
@@ -263,9 +265,14 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             if len(rel_args) > 2:
                 if rel["predicate"] == "be" and is_wh_quantified(rel_args[2]):
                     # MRS flips the arg order when subject is quantified with 'which',
-                    # presumably seeing it as wh-movement?
-                    arg1 = rel_args[2]
-                    arg2 = rel_args[1]
+                    # presumably seeing it as wh-movement? Re-flip, except when the
+                    # wh-word is 'what' (represented as 'which thing' in MRS)
+                    if parse["relations"]["by_id"][rel_args[2]]["predicate"] == "thing":
+                        arg1 = rel_args[1]
+                        arg2 = rel_args[2]
+                    else:
+                        arg1 = rel_args[2]
+                        arg2 = rel_args[1]
                 else:
                     # Default case
                     arg1 = rel_args[1]
@@ -335,14 +342,31 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             # complement only.)
 
             if not referential_arg2:
-                # Predicational; provide predicates as additional info about subject
-                if negate_focus:
-                    focus_msgs.append(daughters[arg2])
-                else:
+                if parse["utt_type"]=="ques" and parse["relations"]["by_id"][arg2]["predicate"]=="thing":
+                    # "What is X?" type of question; attach a special reserved predicate
+                    # to focus_msgs, which signals that which predicate arg2 belongs to is
+                    # under question
+                    rel_lit = ("?", "*", [arg2, arg1])
+                    if negate_focus:
+                        focus_msgs.append([rel_lit])
+                    else:
+                        focus_msgs.append(rel_lit)
+
+                    # Any restrictor of the wh-quantified predicate
                     focus_msgs += daughters[arg2]
 
-                # arg1 and arg2 are the same entity
-                ref_map[arg2] = ref_map[arg1]
+                    # Mark arg2 refers to a predicate, not an entity
+                    ref_map[arg2]["is_pred"] = True
+
+                else:
+                    # Predicational; provide predicates as additional info about subject
+                    if negate_focus:
+                        focus_msgs.append(daughters[arg2])
+                    else:
+                        focus_msgs += daughters[arg2]
+
+                    # arg2 is the same entity as arg1
+                    ref_map[arg2] = ref_map[arg1]
 
             else:
                 if referential_arg1:

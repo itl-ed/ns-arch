@@ -39,7 +39,7 @@ library = {
         # Prepare answering utterance to generate
         {
             "action_method": Val(referrable=["lang", "prepare_answer"]),
-            "action_args_getter": lambda x: (Val(data=x), Val(referrable=["cognitive"]))
+            "action_args_getter": lambda x: (Val(data=x), Val(referrable=["recognitive"]))
         },
         # Generate the utterance
         {

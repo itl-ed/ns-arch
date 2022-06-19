@@ -90,12 +90,22 @@ class Literal:
         else:
             return self
     
-    def substitute(self, arg, new_arg, new_arg_is_var):
+    def substitute(self, val, subs_val, is_pred):
         """
-        Return new Literal instance where all occurrences of arg are replaced with new_arg
+        Return new Rule instance where all occurrences of designated arg or pred are
+        replaced with provided new value
         """
-        new_args = [(new_arg, new_arg_is_var) if a[0] == arg else a for a in self.args]
-        return Literal(self.name, new_args, self.naf)
+        if is_pred:
+            assert self.name == "*_?", \
+                "Predicate substitution must only be called on literal with the special " \
+                "reserved predicate '*_?'."
+            subs_name = subs_val[0]
+            subs_args = self.args[1:]
+        else:
+            subs_name = self.name
+            subs_args = [subs_val if a[0] == val else a for a in self.args]
+
+        return Literal(subs_name, subs_args, self.naf)
 
     @staticmethod
     def from_clingo_symbol(symbol):

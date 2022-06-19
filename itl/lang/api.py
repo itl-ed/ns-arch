@@ -92,7 +92,7 @@ class LanguageModule:
             converted_rules = None
 
         if query is not None:
-            q_ents, q_rules = query
+            q_vars, q_rules = query
 
             wrapped_qrs = []
             for head, body, _ in q_rules:
@@ -125,12 +125,8 @@ class LanguageModule:
                 r = Rule(head=wrapped_head, body=wrapped_bls)
                 wrapped_qrs.append(r)
 
-            converted_query = (q_ents, wrapped_qrs, orig_utt)
+            converted_query = (q_vars, wrapped_qrs, orig_utt)
         else:
             converted_query = None
 
         return converted_rules, converted_query
-
-    def prepare_answer(self, utt_id, cognitive):
-        """ Synthesize natural language answer to question """
-        self.dialogue.to_generate.append(f"Answer: {cognitive.Q_answers[utt_id]}")

@@ -169,11 +169,12 @@ class Rule:
 
         return True
 
-    def substitute(self, arg, new_arg, new_arg_is_var):
+    def substitute(self, val, new_val, is_pred):
         """
-        Return new Rule instance where all occurrences of arg_x are replaced with arg_y
+        Return new Rule instance where all occurrences of designated arg or pred are
+        replaced with provided new value
         """
-        new_head = [hl.substitute(arg, new_arg, new_arg_is_var) for hl in self.head]
-        new_body = [bl.substitute(arg, new_arg, new_arg_is_var) for bl in self.body]
+        new_head = [hl.substitute(val, new_val, is_pred) for hl in self.head]
+        new_body = [bl.substitute(val, new_val, is_pred) for bl in self.body]
 
         return Rule(head=new_head, body=new_body)

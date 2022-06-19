@@ -494,10 +494,6 @@ class Models:
                 assert isinstance(event, Rule)
                 event = set([event])
 
-        # Set of atoms & entities that appear in models covered by this Models instance
-        atoms_covered = self.atoms()     # Effectively the union of all models covered
-        ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
-
         if q_vars is None:
             # Empty tuple representing no wh-quantified variables to test. () in the
             # returned dicts may as well be interpreted as the "Yes" answer.
@@ -509,19 +505,36 @@ class Models:
             # Assign some arbitrary order among the variables
             assert type(q_vars) == tuple, "Provide q_vars as tuple"
 
+            # Set of atoms that appear in models covered by this Models instance
+            atoms_covered = self.atoms()     # Effectively the union of all models covered
+
+            # Set of entities and predicates (along w/ arity info) occurring in atoms_covered
+            ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
+            preds = set((atm.name, len(atm.args)) for atm in atoms_covered)
+            pred_arities = {
+                l for l in set.union(*[ev_rule.literals() for ev_rule in event])
+                if l.name=="*_?"
+            }
+            pred_arities = {l.args[0][0]: len(l.args)-1 for l in pred_arities}
+
             # All possible grounded instances of event
+            subs_options = product(*[
+                [p[0] for p in preds if pred_arities[qv]==p[1]]
+                    if is_pred else ents
+                for qv, is_pred in q_vars]
+            )
             ev_instances = {
-                prd: [
+                s_opt: [
                     reduce(
-                        lambda r, a: r.substitute(a[0], a[1], False),
-                        [ev_rule]+[(v, e) for v, e in zip(q_vars, prd)]
+                        lambda r, a: r.substitute(a[0][0], (a[1], False), a[0][1]),
+                        [ev_rule]+[(qv, o) for qv, o in zip(q_vars, s_opt)]
                     )
                     for ev_rule in event
                 ]
-                for prd in product(ents, repeat=len(q_vars))
+                for s_opt in subs_options
             }
 
-            # Initial pruning of q_vars assignments that are not worth considering; we may
+            # Initial pruning of q_vars assignments that are not worth considering; may
             # disregard assignments yielding any body-less rules (i.e. facts) whose head
             # atom(s) does not appear in atoms_covered
             ev_instances = {

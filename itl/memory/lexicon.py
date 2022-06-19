@@ -5,7 +5,8 @@ class Lexicon:
     """
     # Special reserved symbols
     RESERVED = {
-        ("=", "*"): ("=", "*")      # 'Object identity' predicate
+        ("=", "*"): ("=", "*"),     # 'Object identity' predicate
+        ("?", "*"): ("?", "*")      # Wh-quantified predicate
     }
 
     def __init__(self):

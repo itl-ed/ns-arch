@@ -11,10 +11,8 @@ from .memory import LongTermMemoryModule
 from .vision import VisionModule
 from .vision.utils.completer import DatasetImgsCompleter
 from .lang import LanguageModule
-from .cognitive_reasoning import CognitiveReasonerModule
+from .recognitive_reasoning import RecognitiveReasonerModule
 from .practical_reasoning import PracticalReasonerModule
-from .lpmln import Literal, Rule
-from .lpmln.utils import wrap_args
 
 
 FT_THRES = 0.5              # Few-shot learning trigger score threshold
@@ -30,7 +28,7 @@ class ITLAgent:
         self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
         self.lang = LanguageModule(opts)
-        self.cognitive = CognitiveReasonerModule()
+        self.recognitive = RecognitiveReasonerModule()
         self.practical = PracticalReasonerModule()
 
         # Initialize empty lexicon with concepts in visual module
@@ -43,17 +41,26 @@ class ITLAgent:
         readline.parse_and_bind("tab: complete")
 
     def __call__(self):
-        """Main function: Kickstart infinite ITL agent loop"""
+        """Main function: Kickstart infinite ITL agent loop with user interface"""
         print(f"Sys> At any point, enter 'exit' to quit")
 
         while True:
-            self._vis_inp()
-            self._lang_inp()
-            self._update_belief()
-            self._act()
+            self.loop()
     
-    def _vis_inp(self):
+    def loop(self, v_usr_in=None, l_usr_in=None):
+        """
+        Single agent activity loop. Provide usr_in for programmatic execution; otherwise,
+        prompt user input on command line REPL
+        """
+        self._vis_inp(usr_in=v_usr_in)
+        self._lang_inp(usr_in=l_usr_in)
+        self._update_belief()
+        self._act()
+
+    def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
+        input_provided = usr_in is not None
+
         # Register autocompleter for REPL
         readline.set_completer(self.dcompleter.complete)
 
@@ -61,10 +68,13 @@ class ITLAgent:
 
         while True:
 
-            print(f"Sys> Choose an image to process")
-            print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
-            usr_in = input("U> ")
-            print("")
+            if input_provided:
+                print(f"U> {usr_in}")
+            else:
+                print(f"Sys> Choose an image to process")
+                print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
+                usr_in = input("U> ")
+                print("")
 
             try:
                 if usr_in == "n":
@@ -82,7 +92,10 @@ class ITLAgent:
                     img_f = usr_in
 
             except ValueError as e:
-                print(f"Sys> {e}, try again")
+                if input_provided:
+                    raise e
+                else:
+                    print(f"Sys> {e}, try again")
 
             else:
                 print(f"Sys> Selected image file: {img_f}")
@@ -96,12 +109,14 @@ class ITLAgent:
         # Restore default completer
         readline.set_completer(rlcompleter.Completer().complete)
     
-    def _lang_inp(self):
+    def _lang_inp(self, usr_in=None):
         """Language input prompt (from user)"""
+        input_provided = usr_in is not None
+
         if self.vision.updated:
             # Inform the language module of the visual context
             self.lang.situate(self.vision.raw_input, self.vision.scene)
-            self.cognitive.refresh()
+            self.recognitive.refresh()
 
         print("")
         print("Sys> Awaiting user input...")
@@ -109,8 +124,11 @@ class ITLAgent:
 
         valid_input = False
         while not valid_input:
-            usr_in = input("U> ")
-            print("")
+            if input_provided:
+                print(f"U> {usr_in}")
+            else:
+                usr_in = input("U> ")
+                print("")
 
             # Understand the user input in the context of the dialogue
             try:
@@ -124,14 +142,20 @@ class ITLAgent:
                     self.lang.understand(usr_in, self.vision.raw_input)
 
             except IndexError as e:
-                print(f"Sys> Ungrammatical input or IndexError: {e.args}")
-                continue
+                if input_provided:
+                    raise e
+                else:
+                    print(f"Sys> Ungrammatical input or IndexError: {e.args}")
             except ValueError as e:
-                print(f"Sys> {e.args[0]}")
-                continue
+                if input_provided:
+                    raise e
+                else:
+                    print(f"Sys> {e.args[0]}")
             except NotImplementedError:
-                print("Sys> Sorry, can't handle the input sentence (yet)")
-                continue
+                if input_provided:
+                    raise e
+                else:
+                    print("Sys> Sorry, can't handle the input sentence (yet)")
 
             else:
                 valid_input = True
@@ -171,17 +195,17 @@ class ITLAgent:
 
         # Sensemaking from vision input only
         if self.vision.updated:
-            self.cognitive.sensemake_vis(self.vision.scene, kb_prog)
+            self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
 
         # Reference & word sense resolution to connect vision & discourse
-        self.cognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
+        self.recognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
 
         # Learning from user language input at neural level (incremental few-shot visual
         # concept registration) & symbolic level (knowledge base expansion)
         self._learn()
 
         # Sensemaking from vision & language input
-        self.cognitive.sensemake_vis_lang(dialogue_state)
+        self.recognitive.sensemake_vis_lang(dialogue_state)
 
         # Identify any mismatch between vision-only sensemaking result vs. info conveyed
         # by user utterance inputs
@@ -304,7 +328,7 @@ class ITLAgent:
         base; rule shouldn't contain any constant term to be considered generic
         """
         dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.cognitive.translate_dialogue_content(dialogue_state)
+        translated = self.recognitive.translate_dialogue_content(dialogue_state)
 
         learned = False
         for ui, (rules, _) in enumerate(translated):
@@ -368,23 +392,23 @@ class ITLAgent:
                         learned = True
         
         # Sensemake again if any learning happened (only if has sensemade already before)
-        if learned and self.cognitive.concl_vis is not None:
+        if learned and self.recognitive.concl_vis is not None:
             kb_prog = self.lt_mem.kb.export_as_program()
-            self.cognitive.sensemake_vis(self.vision.scene, kb_prog)
+            self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
 
     def _identify_mismatch(self):
         """
         Recognize any mismatch between sensemaking results obtained from vision-only
         vs. info provided in discourse utterances, and add to agenda if any is found
         """
-        if self.cognitive.concl_vis is None or len(self.lang.dialogue.record) == 0:
+        if self.recognitive.concl_vis is None or len(self.lang.dialogue.record) == 0:
             # Don't bother if lacking either vision or language input
             return
 
-        models_v, _, _ = self.cognitive.concl_vis
+        models_v, _, _ = self.recognitive.concl_vis
 
         dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.cognitive.translate_dialogue_content(dialogue_state)
+        translated = self.recognitive.translate_dialogue_content(dialogue_state)
 
         for rules, _ in translated:
             if rules is not None:
@@ -418,21 +442,19 @@ class ITLAgent:
         #     print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
 
     def _compute_Q_answers(self):
-        """ Compute answers to unanswered questions """
-        if self.cognitive.concl_vis_lang is None or len(self.lang.dialogue.record) == 0:
+        """ Compute (raw ingredients of) answers to unanswered questions """
+        if self.recognitive.concl_vis_lang is None or len(self.lang.dialogue.record) == 0:
             # Don't bother if lacking either vision or language input
             return
 
-        models_vl, _, _ = self.cognitive.concl_vis_lang
+        models_vl, _, _ = self.recognitive.concl_vis_lang
 
         dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.cognitive.translate_dialogue_content(dialogue_state)
-
-        # If query contains unresolved neologism, postpone answer computation
+        translated = self.recognitive.translate_dialogue_content(dialogue_state)
 
         for ui, (_, query) in enumerate(translated):
             if query is not None:
                 # Store the computed answer, and add to agenda to generate answer
                 # utterance
-                self.cognitive.Q_answers[ui] = models_vl.query(*query)
+                self.recognitive.Q_answers[ui] = models_vl.query(*query)
                 self.practical.agenda.append(("answer_Q", ui))

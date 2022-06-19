@@ -386,9 +386,9 @@ class DialogueManager:
             # Interrogatives
 
             # Determine type of question: Y/N or wh-
-            wh_ents = {rf for rf, v in ref_map.items() if v is not None and v["is_wh_quantified"]}
+            wh_refs = {rf for rf, v in ref_map.items() if v is not None and v["is_wh_quantified"]}
 
-            if len(wh_ents) == 0:
+            if len(wh_refs) == 0:
                 # Y/N question with no wh-quantified entities; add built rules as
                 # queried formulas
 
@@ -442,11 +442,11 @@ class DialogueManager:
                 rule_args = [
                     set(sum([l[2] for l in rls], ())) for rls in rule_lits
                 ]
-                q_rules = [info[i] for i, args in enumerate(rule_args) if len(wh_ents & args) > 0]
-                info = [info[i] for i, args in enumerate(rule_args) if len(wh_ents & args) == 0]
+                q_rules = [info[i] for i, args in enumerate(rule_args) if len(wh_refs & args) > 0]
+                info = [info[i] for i, args in enumerate(rule_args) if len(wh_refs & args) == 0]
                 
-                q_ents = set.union(*rule_args) & wh_ents
-                query = (q_ents, q_rules)
+                q_vars = set.union(*rule_args) & wh_refs
+                query = (q_vars, q_rules)
 
             if len(info) > 0:
                 info = _map_and_format(info, ref_map, f"u{ui}")
@@ -479,7 +479,10 @@ def _map_and_format(data, ref_map, tail):
             assert type(rf) == str
             is_var = ref_map[rf]['is_univ_quantified'] or ref_map[rf]['is_wh_quantified']
 
-            return f"{'X' if is_var else 'x'}" f"{ref_map[rf]['map_id']}{tail}"
+            term_char = "p" if ref_map[rf]["is_pred"] else "x"
+            term_char = term_char.upper() if is_var else term_char
+
+            return f"{term_char}{ref_map[rf]['map_id']}{tail}"
 
     def _process_rules(entries):
         formatted = []
@@ -510,11 +513,16 @@ def _map_and_format(data, ref_map, tail):
 
     elif type(data) == tuple:
         # Queries to make on computed ASP models
-        q_ents, q_rules = data
+        q_vars, q_rules = data
 
-        new_q_ents = tuple(_fmt(e) for e in q_ents) if q_ents is not None else None
+        # Annotate whether the variable is zeroth-order (entity) or first-order (predicate)
+        # (May generalize this to handle second-order (gen. quantifiers) and beyond? Though
+        # I don't think that would happen in near future...)
+        new_q_vars = tuple(
+            (_fmt(e), ref_map[e]["is_pred"]) for e in q_vars
+        ) if q_vars is not None else None
 
-        return (new_q_ents, _process_rules(q_rules))
+        return (new_q_vars, _process_rules(q_rules))
 
     else:
         raise ValueError("Can't _map_and_format this")

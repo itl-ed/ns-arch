@@ -1,5 +1,5 @@
 """
-Cognitive reasoning module API that exposes only the high-level functionalities
+Recognitive reasoning module API that exposes only the high-level functionalities
 required by the ITL agent: make sense out of the current visual & language inputs
 plus existing knowledge stored in knowledge base.
 
@@ -8,7 +8,7 @@ perceived information from various modalities to establish a set of judgements s
 in such a manner that they can later be exploited for other symbolic reasoning tasks --
 in light of the existing general knowledge held by the perceiving agent.
 
-(I borrow the term 'sensemaking' from the discipline of cognitive science & psychology.
+(I borrow the term 'sensemaking' from the discipline of recognitive science & psychology.
 According to Klein (2006), sensemaking is "the process of creating situational awareness
 and understanding in situations of high complexity or uncertainty in order to make decisions".)
 
@@ -30,7 +30,7 @@ EPS = 1e-10          # Value used for numerical stabilization
 U_W_PR = 1.0         # How much the agent values information provided by the user
 TAB = "\t"           # For use in format strings
 
-class CognitiveReasonerModule:
+class RecognitiveReasonerModule:
 
     def __init__(self):
         self.concl_vis = None
@@ -205,6 +205,9 @@ class CognitiveReasonerModule:
 
                     # Symbol token occurrence locations
                     for pi, p in enumerate(preds):
+                        # Skip special reserved predicates
+                        if p[1] == "*": continue
+
                         sym = f"{p[1]}_{p[0]}"
                         tok_loc = f"u{ui}_r{ri}_p{pi}"
                         aprog.add_hard_rule(
@@ -274,6 +277,9 @@ class CognitiveReasonerModule:
 
                     # Symbol token occurrence locations
                     for pi, p in enumerate(preds):
+                        # Skip special reserved predicates
+                        if p[1] == "*": continue
+
                         sym = f"{p[1]}_{p[0]}"
                         tok_loc = f"u{ui}_q{qi}_p{pi}"
                         aprog.add_hard_rule(
@@ -282,6 +288,9 @@ class CognitiveReasonerModule:
 
         # Predicate info needed for word sense selection
         for p in occurring_preds:
+            # Skip special reserved predicates
+            if p[1] == "*": continue
+
             # Consult lexicon to list denotation candidates
             sym = f"{p[1]}_{p[0]}"
             if p in lexicon.s2d:
@@ -448,13 +457,15 @@ class CognitiveReasonerModule:
             
             # Translate query
             if query is not None:
-                q_ents, q_rules = query
+                q_vars, q_rules = query
 
                 translated_qrs = []
                 for qi, (head, body, _) in enumerate(q_rules):
                     if head is not None:
                         rule_head = [
-                            self.word_senses[(f"u{ui}",f"q{qi}",f"p{hi}")]
+                            # If head literal predicate is not found in self.word_senses,
+                            # it means the predicate is a special reserved one
+                            self.word_senses.get((f"u{ui}",f"q{qi}",f"p{hi}"), head[hi][1::-1])
                             for hi in range(len(head))
                         ]
                         rule_head = [
@@ -484,7 +495,7 @@ class CognitiveReasonerModule:
 
                     translated_qrs.append(Rule(head=rule_head, body=rule_body))
 
-                translated_query = q_ents, translated_qrs
+                translated_query = q_vars, translated_qrs
             else:
                 translated_query = None
 
