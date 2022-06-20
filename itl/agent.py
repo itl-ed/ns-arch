@@ -211,9 +211,6 @@ class ITLAgent:
         # by user utterance inputs
         self._identify_mismatch()
 
-        # Compute answers to any unanswered questions that can be computed
-        self._compute_Q_answers()
-
         # self.vision.reshow_pred()
 
     def _act(self):
@@ -223,6 +220,22 @@ class ITLAgent:
         wonder if we'll ever need a more sophisticated mechanism than this simple, greedy
         method for a good while?
         """
+        ## Generate agenda items from maintenance goals
+        # (Currently, the maintenance goal is not to leave any unaddressed neologism which
+        # is unresolvable, unaddressed recognition inconsistency btw. agent and user, or 
+        # unanswered question that is answerable. In principle this is to be accomplished
+        # declaratively by properly setting up formal maintenance goals and then performing
+        # automated planning or something to come up with right sequence of actions to be added
+        # to agenda. However, the ad-hoc code below (+ plan library in practical/plans/library.py)
+        # will do for our purpose right now; we will see later if we'll ever need to generalize
+        # and implement the said procedure.)
+        for n in self.lang.unresolved_neologisms:
+            self.practical.agenda.append(("address_neologism", n))
+        for m in self.recognitive.unresolved_mismatches:
+            self.practical.agenda.append(("address_mismatch", m))
+        for ui in self.lang.dialogue.unanswered_Q:
+            self.practical.agenda.append(("address_unanswered_Q", ui))
+
         while True:
             resolved_items = []
             for i, todo in enumerate(self.practical.agenda):
@@ -315,9 +328,7 @@ class ITLAgent:
                 )
 
         if len(unresolvable_neologisms) > 0:
-            # Add as agenda item to request what each unresolvable neologism 'means'
-            for n in unresolvable_neologisms:
-                self.practical.agenda.append(("address_neologism", n))
+            self.lang.unresolved_neologisms |= unresolvable_neologisms
 
     def _learn(self):
         """
@@ -414,15 +425,15 @@ class ITLAgent:
             if rules is not None:
                 content = set(rules)
 
-                # Make a yes-no query to obtain the likelihood of content
+                # Make a yes/no query to obtain the likelihood of content
                 q_response, _ = models_v.query(None, content)
                 ev_prob = q_response[()][1]
 
                 surprisal = -math.log(ev_prob + EPS)
                 if surprisal > SR_THRES:
                     m = (content, surprisal)
-                    self.practical.agenda.append(("address_mismatch", m))
-        
+                    self.recognitive.unresolved_mismatches.add(m)
+
         ## TODO: Print surprisal reports to resolve_mismatch action ##
         # print("A> However, I was quite surprised to hear that:")
 
@@ -441,20 +452,67 @@ class ITLAgent:
 
         #     print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
 
-    def _compute_Q_answers(self):
-        """ Compute (raw ingredients of) answers to unanswered questions """
-        if self.recognitive.concl_vis_lang is None or len(self.lang.dialogue.record) == 0:
-            # Don't bother if lacking either vision or language input
-            return
+    def attempt_answer_Q(self, ui):
+        """
+        Attempt to answer an unanswered question from user.
+        
+        If it turns out the question cannot be answered at all with the agent's current
+        knowledge (e.g. question contains unresolved neologism), do nothing and wait for
+        it to become answerable.
 
-        models_vl, _, _ = self.recognitive.concl_vis_lang
-
+        If the agent can come up with an answer to the question, right or wrong, schedule
+        to actually answer it by adding a new agenda item.
+        """
         dialogue_state = self.lang.dialogue.export_as_dict()
         translated = self.recognitive.translate_dialogue_content(dialogue_state)
 
-        for ui, (_, query) in enumerate(translated):
-            if query is not None:
-                # Store the computed answer, and add to agenda to generate answer
-                # utterance
-                self.recognitive.Q_answers[ui] = models_vl.query(*query)
-                self.practical.agenda.append(("answer_Q", ui))
+        _, query = translated[ui]
+
+        if query is None:
+            # Question cannot be answered for some reason
+            return
+        else:
+            # Schedule to answer the question
+            self.practical.agenda.append(("answer_Q", ui))
+            return
+    
+    def prepare_answer_Q(self, ui):
+        """
+        Prepare an answer a question that has been deemed answerable, by first computing
+        raw ingredients from which answer candidates can be composed, picking out an answer
+        among the candidates, then translating the answer into natural language form to be
+        uttered
+        """
+        dialogue_state = self.lang.dialogue.export_as_dict()
+        translated = self.recognitive.translate_dialogue_content(dialogue_state)
+
+        _, query = translated[ui]
+        assert query is not None
+
+        # Compute raw answer candidates by appropriately querying current world models
+        models_vl, _, _ = self.recognitive.concl_vis_lang
+        answers_raw, _ = models_vl.query(*query)
+
+        # Pick out an answer to deliver; maximum confidence
+        answer_selected = max(answers_raw, key=lambda a: answers_raw[a][1])
+
+        # Translate the selected answer into natural language
+        # (Parse the original question utterance, manipulate, then generate back)
+        _, _, _, orig_utt = dialogue_state["record"][ui]
+
+        _, ev_prob = answers_raw[answer_selected]
+
+        if len(answer_selected) == 0:
+            # Yes/no question; cast original question to proposition
+            answer_translated = self.lang.semantic.change_sf_nl(orig_utt, "prop")
+
+            if ev_prob < 0.5:
+                # Flip polarity for negative answer with event probability lower than 0.5
+                answer_translated = self.lang.semantic.negate_nl(answer_translated)
+        else:
+            # Wh- question; replace wh-quantified referent(s) with appropriate answer values
+            q_vars, _ = query
+            answer_translated = ...
+
+        # Push the translated answer to buffer of utterances to generate
+        self.lang.dialogue.to_generate.append(answer_translated)

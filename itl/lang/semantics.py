@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
 
-from delphin import ace, predicate
+from delphin import ace, predicate, codecs
 
 
 class SemanticParser:
@@ -169,6 +169,71 @@ class SemanticParser:
 
         return translation, dict(ref_map)
 
+    def negate_nl(self, sentence):
+        """
+        Return the negated version of the sentence by parsing, manipulating MRS, then
+        generating with grammar
+        """
+        # MRS parse (again)
+        parsed = ace.parse(self.grammar, sentence, executable=self.ace_bin)
+        parsed = parsed.result(0).mrs()
+
+        # pydelphin EP and HCons constructor shoplifted
+        EP_Class = type(parsed.rels[0])
+        HCons_Class = type(parsed.hcons[0])
+
+        # Find appropriate indices for new variables
+        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
+        handle_hi = max_var_ind+1
+        handle_lo = max_var_ind+2
+        ev_var_neg = max_var_ind+3
+
+        # New handle constraint list
+        hcons_orig_top = [hc for hc in parsed.hcons if hc.hi == parsed.top][0]
+        hcons_remainder = [hc for hc in parsed.hcons if hc.hi != parsed.top]
+        hcons_hi = HCons_Class(parsed.top, "qeq", f"h{handle_hi}")
+        hcons_lo = HCons_Class(f"h{handle_lo}", "qeq", hcons_orig_top.lo)
+        new_hcons = hcons_remainder + [hcons_hi, hcons_lo]
+
+        if [r for r in parsed.rels if r.label==hcons_orig_top.lo][0].predicate == "neg":
+            # Return sentence as-is if it already has negative polarity
+            return sentence
+
+        # New EP object for neg predicate
+        neg_args = {"ARG0": f"e{ev_var_neg}", "ARG1": f"h{handle_lo}"}
+        neg_EP = EP_Class("neg", f"h{handle_hi}", args=neg_args)
+
+        parsed.rels.append(neg_EP)
+        parsed.hcons = new_hcons
+
+        # Generate with grammar
+        generated = ace.generate(
+            self.grammar, codecs.simplemrs.encode(parsed), executable=self.ace_bin
+        )
+
+        return generated.result(0)["surface"]
+
+    def change_sf_nl(self, sentence, new_SF):
+        """
+        Return the version of the sentence with specified sentential force (SF) by parsing,
+        manipulating MRS, then generating with grammar
+        """
+        assert new_SF == "prop" or new_SF == "ques"
+
+        # MRS parse (again)
+        parsed = ace.parse(self.grammar, sentence, executable=self.ace_bin)
+        parsed = parsed.result(0).mrs()
+
+        # Apply new SF provided
+        parsed.variables[parsed.index]["SF"] = new_SF
+        
+        # Generate with grammar
+        generated = ace.generate(
+            self.grammar, codecs.simplemrs.encode(parsed), executable=self.ace_bin
+        )
+
+        return generated.result(0)["surface"]
+
 
 def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     """
@@ -301,7 +366,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
 
         negate_focus = rel["handle"] in negs
 
-        # For negative polar (yes-no) question we don't negate focus message
+        # For negative polar (yes/no) question we don't negate focus message
         if negate_focus and rel_id==parse["index"] and parse["utt_type"]=="ques":
             is_polar_q = not any(
                 v["is_wh_quantified"] for v in ref_map.values() if v is not None

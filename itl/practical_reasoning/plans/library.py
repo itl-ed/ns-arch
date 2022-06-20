@@ -28,20 +28,33 @@ class Val:
 
 
 library = {
-    # Resolve neologism by requesting definitions in language or exemplars
+    # Resolve neologism by requesting definitions in language or exemplars, in
+    # accordance with the agent's learning interaction stategy
     "address_neologism": None,
 
-    # Resolve mismatch between agent's vs. user's perception by asking question
+    # Resolve mismatch between agent's vs. user's perception by asking question,
+    # in accordance with the agent's learning interaction stategy
     "address_mismatch": None,
 
-    # Handle unanswered question by finding answer and making utterance
-    "answer_Q": [
+    # Handle unanswered question by first checking if it can be answered with agent's
+    # current knowledge, and if so, adding to agenda to actually answer it
+    "address_unanswered_Q": [
         # Prepare answering utterance to generate
         {
-            "action_method": Val(referrable=["lang", "prepare_answer"]),
-            "action_args_getter": lambda x: (Val(data=x), Val(referrable=["recognitive"]))
+            "action_method": Val(referrable=["attempt_answer_Q"]),
+            "action_args_getter": lambda x: (Val(data=x),)
         },
-        # Generate the utterance
+    ],
+
+    # Answer a question by computing answer candidates, selecting an answer, translating
+    # to natural language and then generating it
+    "answer_Q": [
+        # Prepare the answer to be uttered
+        {
+            "action_method": Val(referrable=["prepare_answer_Q"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
+        # Generate the prepared answer
         {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()

@@ -21,6 +21,7 @@ class LanguageModule:
         self.dialogue = DialogueManager()
 
         self.vis_raw = None
+        self.unresolved_neologisms = set()
 
     def situate(self, vis_raw, vis_scene):
         """
@@ -55,78 +56,3 @@ class LanguageModule:
         while len(self.dialogue.to_generate) > 0:
             utt = self.dialogue.to_generate.pop()
             print(f"A> {utt}")
-
-    def utt_to_ASP(self, utt_id):
-        """
-        Convert logical content of dialogue record (which should be already ASP-compatible)
-        indexed by utt_id to ASP (LP^MLN) rule(s) and return
-        """
-        utt = self.dialogue.record[utt_id]
-        _, _, (rules, query), orig_utt = utt
-
-        assig = {**self.dialogue.value_assignment, **self.dialogue.assignment_hard}
-
-        if rules is not None:
-            converted_rules = []
-            for head, body, _ in rules:
-                if head is not None:
-                    cat_ind, cat_type = self.dialogue.word_senses[head[:2]]
-                    wrapped_head = Literal(
-                        f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in head[2]])
-                    )
-                else:
-                    wrapped_head = None
-
-                wrapped_bls = []
-                if body is not None:
-                    for bl in body:
-                        cat_ind, cat_type = self.dialogue.word_senses[bl[:2]]
-                        bl = Literal(
-                            f"{cat_type}_{cat_ind}", wrap_args(*[assig[a] for a in bl[2]])
-                        )
-                        wrapped_bls.append(bl)
-                
-                r = Rule(head=wrapped_head, body=wrapped_bls)
-                converted_rules.append((r, orig_utt))
-        else:
-            converted_rules = None
-
-        if query is not None:
-            q_vars, q_rules = query
-
-            wrapped_qrs = []
-            for head, body, _ in q_rules:
-                if head is not None:
-                    # Here we are resolving any homonymy by always choosing denotation with
-                    # the highest frequency. In distant future we may implement exploiting
-                    # discourse/environment contexts for word sense disambiguation here...?
-                    cat_ind, cat_type = max(
-                        self.lexicon.s2d[head[:2]], key=lambda d: self.lexicon.d_freq[d]
-                    )
-                    wrapped_head = Literal(
-                        f"{cat_type}_{cat_ind}",
-                        wrap_args(*[assig.get(a, a) for a in head[2]])
-                    )
-                else:
-                    wrapped_head = None
-
-                wrapped_bls = []
-                if body is not None:
-                    for bl in body:
-                        cat_ind, cat_type = max(
-                            self.lexicon.s2d[head[:2]], key=lambda d: self.lexicon.d_freq[d]
-                        )
-                        bl = Literal(
-                            f"{cat_type}_{cat_ind}",
-                            wrap_args(*[assig.get(a, a) for a in bl[2]])
-                        )
-                        wrapped_bls.append(bl)
-
-                r = Rule(head=wrapped_head, body=wrapped_bls)
-                wrapped_qrs.append(r)
-
-            converted_query = (q_vars, wrapped_qrs, orig_utt)
-        else:
-            converted_query = None
-
-        return converted_rules, converted_query

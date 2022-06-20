@@ -28,6 +28,8 @@ class DialogueManager:
         #   4) original user input string
         self.record = []
 
+        self.unanswered_Q = set()
+
         # Buffer of utterances to generate
         self.to_generate = []
 
@@ -455,8 +457,7 @@ class DialogueManager:
             query = _map_and_format(query, ref_map, f"u{ui}")
 
             self.record.append(("U", "?", (info, query), usr_in))
-
-            agenda.append(("unanswered_Q", ui))
+            self.unanswered_Q.add(ui)
 
         elif parse["utt_type"] == "comm":
             # Imperatives

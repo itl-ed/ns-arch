@@ -37,9 +37,11 @@ class RecognitiveReasonerModule:
         self.concl_vis_lang = None
         self.Q_answers = {}
 
-        self.value_assignment = {}   # Store best assignments (tentative) obtained by reasoning
-        self.word_senses = {}          # Store current estimate of symbol denotations
-    
+        self.value_assignment = {}    # Store best assignments (tentative) obtained by reasoning
+        self.word_senses = {}         # Store current estimate of symbol denotations
+
+        self.unresolved_mismatches = set()
+
     def refresh(self):
         self.concl_vis = None
         self.concl_vis_lang = None
@@ -47,6 +49,8 @@ class RecognitiveReasonerModule:
 
         self.value_assignment = {}
         self.word_senses = {}
+
+        self.unresolved_mismatches = set()
 
     def sensemake_vis(self, vis_scene, kb_prog, objectness_thresh=0.75, category_thresh=0.75):
         """
