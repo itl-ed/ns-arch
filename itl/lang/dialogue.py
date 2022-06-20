@@ -245,31 +245,34 @@ class DialogueManager:
 
         # Add to the list of discourse referents
         for rf, v in ref_map.items():
-            if type(rf) == tuple:
-                # Function term
-                if v is not None:
+            if v is not None:
+                term_char = "p" if ref_map[rf]["is_pred"] else "x"
+
+                if type(rf) == tuple:
+                    # Function term
                     f_args = tuple(
-                        f"X{ref_map[a]['map_id']}u{ui}"
+                        f"{term_char.upper()}{ref_map[a]['map_id']}u{ui}"
                             if ref_map[a]["is_univ_quantified"] or ref_map[a]["is_wh_quantified"]
-                            else f"x{ref_map[a]['map_id']}u{ui}"
+                            else f"{term_char}{ref_map[a]['map_id']}u{ui}"
                         for a in rf[1]
                     )
                     rf = (rf[0], f_args)
 
                     self.referents["dis"][rf] = {
+                        "provenance": v["provenance"],
                         "is_referential": v["is_referential"],
                         "is_univ_quantified": v["is_univ_quantified"],
                         "is_wh_quantified": v["is_wh_quantified"]
                     }
-            else:
-                assert type(rf) == str
-                if v is not None:
+                else:
+                    assert type(rf) == str
                     if v["is_univ_quantified"] or v["is_wh_quantified"]:
-                        rf = f"X{v['map_id']}u{ui}"
+                        rf = f"{term_char.upper()}{v['map_id']}u{ui}"
                     else:
-                        rf = f"x{v['map_id']}u{ui}"
+                        rf = f"{term_char}{v['map_id']}u{ui}"
 
                     self.referents["dis"][rf] = {
+                        "provenance": v["provenance"],
                         "is_referential": v["is_referential"],
                         "is_univ_quantified": v["is_univ_quantified"],
                         "is_wh_quantified": v["is_wh_quantified"]

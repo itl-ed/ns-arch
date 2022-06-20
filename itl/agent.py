@@ -484,35 +484,78 @@ class ITLAgent:
         uttered
         """
         dialogue_state = self.lang.dialogue.export_as_dict()
+        _, _, _, orig_utt = dialogue_state["record"][ui]
+
         translated = self.recognitive.translate_dialogue_content(dialogue_state)
 
         _, query = translated[ui]
         assert query is not None
 
+        q_vars, _ = query
+
         # Compute raw answer candidates by appropriately querying current world models
         models_vl, _, _ = self.recognitive.concl_vis_lang
         answers_raw, _ = models_vl.query(*query)
 
+        if len(q_vars) > 0:
+            # (Temporary) For now, let's limit our answer to "what is X" questions to nouns:
+            # i.e. object class categories...
+            answers_raw = {
+                ans: val for ans, val in answers_raw.items()
+                if any(not is_pred or a.startswith("cls") for a, (_, is_pred) in zip(ans, q_vars))
+            }
+
         # Pick out an answer to deliver; maximum confidence
-        answer_selected = max(answers_raw, key=lambda a: answers_raw[a][1])
+        if len(answers_raw) > 0:
+            answer_selected = max(answers_raw, key=lambda a: answers_raw[a][1])
+            _, ev_prob = answers_raw[answer_selected]
+        else:
+            answer_selected = (None,) * len(q_vars)
+            ev_prob = None
 
         # Translate the selected answer into natural language
         # (Parse the original question utterance, manipulate, then generate back)
-        _, _, _, orig_utt = dialogue_state["record"][ui]
-
-        _, ev_prob = answers_raw[answer_selected]
-
         if len(answer_selected) == 0:
             # Yes/no question; cast original question to proposition
-            answer_translated = self.lang.semantic.change_sf_nl(orig_utt, "prop")
+            answer_translated = self.lang.semantic.nl_change_sf(orig_utt, "prop")
 
             if ev_prob < 0.5:
                 # Flip polarity for negative answer with event probability lower than 0.5
-                answer_translated = self.lang.semantic.negate_nl(answer_translated)
+                answer_translated = self.lang.semantic.nl_negate(answer_translated)
         else:
             # Wh- question; replace wh-quantified referent(s) with appropriate answer values
-            q_vars, _ = query
-            answer_translated = ...
+            answer_translated = orig_utt
+
+            replace_targets = []
+            replace_values = []
+
+            for (qv, is_pred), ans in zip(q_vars, answer_selected):
+                # Char range in original utterance, referring to expression to be replaced
+                tgt = dialogue_state["referents"]["dis"][qv]["provenance"]
+                replace_targets.append(tgt)
+
+                # Value to replace the designated wh-quantified referent with
+                if is_pred:
+                    # Predicate name; fetch from lexicon
+                    ans = ans.split("_")
+                    ans = (int(ans[1]), ans[0])
+
+                    is_named = False
+                    val = self.lt_mem.lexicon.d2s[ans][0]
+                else:
+                    # Entity by their constant name handle
+                    is_named = True
+                    val = ans
+
+                replace_values.append((val, is_named))
+
+            # Plug in the selected answer in place of the wh-quantified referent
+            answer_translated = self.lang.semantic.nl_replace_wh(
+                answer_translated, replace_targets, replace_values
+            )
+
+            # Don't forget to make it a prop
+            answer_translated = self.lang.semantic.nl_change_sf(answer_translated, "prop")
 
         # Push the translated answer to buffer of utterances to generate
         self.lang.dialogue.to_generate.append(answer_translated)

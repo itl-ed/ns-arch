@@ -5,8 +5,6 @@ understand & generate language input in the context of the dialogue
 """
 from .semantics import SemanticParser
 from .dialogue import DialogueManager
-from ..lpmln import Literal, Rule
-from ..lpmln.utils import wrap_args
 
 
 class LanguageModule:

@@ -13,6 +13,14 @@ class SemanticParser:
         self.grammar = grammar
         self.ace_bin = os.path.join(ace_bin, "ace")
 
+        # For redirecting ACE's stderr (so that messages don't print on console)
+        self.null_sink = open(os.devnull,"w")
+    
+    def __dell__(self):
+        """ For closing the null sink before destruction """
+        self.null_sink.close()
+        super().__del__()
+
     def nl_parse(self, usr_in):
         parse = {
             "relations": {
@@ -23,7 +31,9 @@ class SemanticParser:
         }
 
         # For now use the top result
-        parsed = ace.parse(self.grammar, usr_in, executable=self.ace_bin)
+        parsed = ace.parse(
+            self.grammar, usr_in, executable=self.ace_bin, stderr=self.null_sink
+        )
         parsed = parsed.result(0).mrs()
 
         # Extract essential parse, assuming flat structure (no significant semantic scoping)
@@ -109,7 +119,213 @@ class SemanticParser:
 
         return parse
 
-    @staticmethod    
+    def nl_negate(self, sentence):
+        """
+        Return the negated version of the sentence by parsing, manipulating MRS, then
+        generating with grammar
+        """
+        # MRS parse
+        parsed = ace.parse(
+            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
+        )
+        parsed = parsed.result(0).mrs()
+
+        # pydelphin EP and HCons constructor shoplifted
+        EP_Class = type(parsed.rels[0])
+        HCons_Class = type(parsed.hcons[0])
+
+        # Find appropriate indices for new variables
+        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
+        handle_hi = max_var_ind+1
+        handle_lo = max_var_ind+2
+        ev_var_neg = max_var_ind+3
+
+        # New handle constraint list
+        hcons_orig_top = [hc for hc in parsed.hcons if hc.hi == parsed.top][0]
+        hcons_kept = [hc for hc in parsed.hcons if hc.hi != parsed.top]
+        hcons_hi = HCons_Class(parsed.top, "qeq", f"h{handle_hi}")
+        hcons_lo = HCons_Class(f"h{handle_lo}", "qeq", hcons_orig_top.lo)
+        new_hcons = hcons_kept + [hcons_hi, hcons_lo]
+
+        if [r for r in parsed.rels if r.label==hcons_orig_top.lo][0].predicate == "neg":
+            # Return sentence as-is if it already has negative polarity
+            return sentence
+
+        # New EP object for neg predicate
+        neg_args = {"ARG0": f"e{ev_var_neg}", "ARG1": f"h{handle_lo}"}
+        neg_EP = EP_Class("neg", f"h{handle_hi}", args=neg_args)
+
+        parsed.rels.append(neg_EP)
+        parsed.hcons = new_hcons
+
+        # Generate with grammar
+        generated = ace.generate(
+            self.grammar, codecs.simplemrs.encode(parsed),
+            executable=self.ace_bin, stderr=self.null_sink
+        )
+
+        return generated.result(0)["surface"]
+
+    def nl_change_sf(self, sentence, new_SF):
+        """
+        Return the version of the sentence with specified sentential force (SF) by parsing,
+        manipulating MRS, then generating with grammar
+        """
+        assert new_SF == "prop" or new_SF == "ques"
+
+        # MRS parse
+        parsed = ace.parse(
+            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
+        )
+        parsed = parsed.result(0).mrs()
+
+        # Apply new SF provided
+        parsed.variables[parsed.index]["SF"] = new_SF
+        
+        # Generate with grammar
+        generated = ace.generate(
+            self.grammar, codecs.simplemrs.encode(parsed),
+            executable=self.ace_bin, stderr=self.null_sink
+        )
+
+        return generated.result(0)["surface"]
+    
+    def nl_replace_wh(self, sentence, replace_targets, replace_values):
+        # MRS parse
+        parsed = ace.parse(
+            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
+        )
+        parsed = parsed.result(0).mrs()
+
+        # MRS flips the arg order when subject is quantified with 'which',
+        # presumably seeing it as wh-movement? Re-flip, except when the
+        # wh-word is 'what' (represented as 'which thing' in MRS)
+        index_rel = [r for r in parsed.rels if parsed.index==r.id][0]
+        index_sf = parsed.variables[parsed.index]["SF"]
+        if index_rel.predicate=="_be_v_id" and index_sf=="ques":
+            a2_rels = [r.predicate for r in parsed.rels if index_rel.args["ARG2"]==r.iv]
+            a2_wh_quantified = ("which_q" in a2_rels) or ("_which_q" in a2_rels)
+
+            if a2_wh_quantified and ("thing" not in a2_rels):
+                index_rel.args["ARG1"], index_rel.args["ARG2"] = \
+                    index_rel.args["ARG2"], index_rel.args["ARG1"]
+
+        # pydelphin EP and HCons constructor shoplifted
+        EP_Class = type(parsed.rels[0])
+        HCons_Class = type(parsed.hcons[0])
+
+        hcons_h2l = {h.hi: h.lo for h in parsed.hcons}
+
+        # Find appropriate indices for new variables
+        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
+
+        for tgt, (val, is_named) in zip(replace_targets, replace_values):
+            # Recover target referent by id
+            tgt = [
+                r for r in parsed.rels
+                if (r.cfrom, r.cto)==tgt and r.id[0]=="x"
+            ][0].id
+
+            # The wh-quantifying relation
+            wh_i, wh_rel = [
+                (i, r) for i, r in enumerate(parsed.rels)
+                if r.iv==tgt and r.predicate.endswith("which_q")
+            ][0]
+
+            # Find relations & hcons to be replaced in the new MRS, sweeping down the
+            # MRS starting from wh_rel down to all children
+            rels_to_replace = {wh_i}
+            encountered_referents = {tgt}
+            encountered_handles = {wh_rel.args["RSTR"], hcons_h2l[wh_rel.args["RSTR"]]}
+            sweep_frontier = [hcons_h2l[wh_rel.args["RSTR"]]]
+
+            while len(sweep_frontier) > 0:
+                h = sweep_frontier.pop()
+
+                # Relations with the handle being explored
+                h_rels = {i: r for i, r in enumerate(parsed.rels) if r.label==h}
+
+                # Update relations to replace
+                rels_to_replace |= set(h_rels.keys())
+
+                # Newly encountered referents, and update set of encountered ones
+                new_referents = set.union(*[
+                    {a for n, a in r.args.items() if n.startswith("ARG")}
+                    for r in h_rels.values()
+                ]) - encountered_referents
+                encountered_referents |= new_referents
+
+                # Expand frontier with labels of rels that have newly encountered
+                # referents as argument
+                sweep_frontier += [
+                    hcons_h2l[r.label] for r in parsed.rels
+                    if len(new_referents & set(r.args.values())) > 0 and r.label!=h
+                ]
+                encountered_handles |= set(sweep_frontier)
+            
+            hcons_to_replace = {i: {h.hi, h.lo} for i, h in enumerate(parsed.hcons)}
+            hcons_to_replace = {
+                i for i, hs in hcons_to_replace.items()
+                if len(encountered_handles & hs) > 0
+            }
+
+            # Filter out rels/hcons to be replaced
+            for i in reversed(range(len(parsed.rels))):
+                if i in rels_to_replace: del parsed.rels[i]
+            for i in reversed(range(len(parsed.hcons))):
+                if i in hcons_to_replace: del parsed.hcons[i]
+
+            handle_lbl = f"h{max_var_ind+1}"
+            handle_rstr = f"h{max_var_ind+2}"
+            handle_body = f"h{max_var_ind+3}"
+            handle_n = f"h{max_var_ind+4}"
+            max_var_ind += 4
+
+            if is_named:
+                # Add a named referent quantified by proper_q
+                q_args = {
+                    "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
+                }
+
+                if val is None:
+                    # Nothing is answer
+                    q_EP = EP_Class("_no_q", handle_lbl, args=q_args)
+
+                    n_args = {"ARG0": tgt}
+                    n_EP = EP_Class("thing", handle_n, args=n_args)
+                else:
+                    # Something is answer
+                    q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
+
+                    n_args = {"ARG0": tgt, "CARG": val}
+                    n_EP = EP_Class("named", handle_n, args=n_args)
+
+            else:
+                # Add a common noun referent quantified by _a_q
+                # (It will attach the indefinte 'a' to uncountable nouns as well,
+                # let's keep it this way for now)
+                q_args = {
+                    "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
+                }
+                q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
+
+                n_args = {"ARG0": tgt}
+                n_EP = EP_Class(f"_{val[0]}_n_1", handle_n, args=n_args)
+
+            hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
+
+            parsed.rels.extend([q_EP, n_EP])
+            parsed.hcons.append(hcons_add)
+
+            # Generate with grammar
+            generated = ace.generate(
+                self.grammar, codecs.simplemrs.encode(parsed),
+                executable=self.ace_bin, stderr=self.null_sink
+            )
+
+        return generated.result(0)["surface"]
+
+    @staticmethod
     def asp_translate(parse):
         # First find chains of compound NPs and then appropriately merge them
         chains = {}
@@ -161,6 +377,7 @@ class SemanticParser:
             if ref_map[ref] is not None:
                 ref_map[ref] = {
                     "map_id": ref_map_map[ref_map[ref]["map_id"]],
+                    "provenance": ref_map[ref]["provenance"],
                     "is_referential": ref_map[ref]["is_referential"],
                     "is_univ_quantified": ref_map[ref]["is_univ_quantified"],
                     "is_wh_quantified": ref_map[ref]["is_wh_quantified"],
@@ -168,71 +385,6 @@ class SemanticParser:
                 }
 
         return translation, dict(ref_map)
-
-    def negate_nl(self, sentence):
-        """
-        Return the negated version of the sentence by parsing, manipulating MRS, then
-        generating with grammar
-        """
-        # MRS parse (again)
-        parsed = ace.parse(self.grammar, sentence, executable=self.ace_bin)
-        parsed = parsed.result(0).mrs()
-
-        # pydelphin EP and HCons constructor shoplifted
-        EP_Class = type(parsed.rels[0])
-        HCons_Class = type(parsed.hcons[0])
-
-        # Find appropriate indices for new variables
-        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
-        handle_hi = max_var_ind+1
-        handle_lo = max_var_ind+2
-        ev_var_neg = max_var_ind+3
-
-        # New handle constraint list
-        hcons_orig_top = [hc for hc in parsed.hcons if hc.hi == parsed.top][0]
-        hcons_remainder = [hc for hc in parsed.hcons if hc.hi != parsed.top]
-        hcons_hi = HCons_Class(parsed.top, "qeq", f"h{handle_hi}")
-        hcons_lo = HCons_Class(f"h{handle_lo}", "qeq", hcons_orig_top.lo)
-        new_hcons = hcons_remainder + [hcons_hi, hcons_lo]
-
-        if [r for r in parsed.rels if r.label==hcons_orig_top.lo][0].predicate == "neg":
-            # Return sentence as-is if it already has negative polarity
-            return sentence
-
-        # New EP object for neg predicate
-        neg_args = {"ARG0": f"e{ev_var_neg}", "ARG1": f"h{handle_lo}"}
-        neg_EP = EP_Class("neg", f"h{handle_hi}", args=neg_args)
-
-        parsed.rels.append(neg_EP)
-        parsed.hcons = new_hcons
-
-        # Generate with grammar
-        generated = ace.generate(
-            self.grammar, codecs.simplemrs.encode(parsed), executable=self.ace_bin
-        )
-
-        return generated.result(0)["surface"]
-
-    def change_sf_nl(self, sentence, new_SF):
-        """
-        Return the version of the sentence with specified sentential force (SF) by parsing,
-        manipulating MRS, then generating with grammar
-        """
-        assert new_SF == "prop" or new_SF == "ques"
-
-        # MRS parse (again)
-        parsed = ace.parse(self.grammar, sentence, executable=self.ace_bin)
-        parsed = parsed.result(0).mrs()
-
-        # Apply new SF provided
-        parsed.variables[parsed.index]["SF"] = new_SF
-        
-        # Generate with grammar
-        generated = ace.generate(
-            self.grammar, codecs.simplemrs.encode(parsed), executable=self.ace_bin
-        )
-
-        return generated.result(0)["surface"]
 
 
 def _traverse_dt(parse, rel_id, ref_map, covered, negs):
@@ -286,10 +438,13 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                         default=-1
                     )+1, 0
                 ),
+                "provenance": parse["relations"]["by_id"][id]["crange"],
+                    # Referent's source expression in original utterance, represented as char range
                 "is_referential": is_referential(id),
                 "is_univ_quantified": is_univ_quantified(id),
                 "is_wh_quantified": is_wh_quantified(id),
-                "is_pred": False      # Whether it is a predicate (init default) or individual
+                "is_pred": False
+                    # Whether it is a predicate (False; init default) or individual (True)
             }
         else:
             # For referents we are not interested about
