@@ -452,6 +452,12 @@ class ITLAgent:
 
         #     print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
 
+    def handle_mismatch(self, m):
+        """
+        Handle recognition gap following some specified strategy.
+        """
+        print(m)
+
     def attempt_answer_Q(self, ui):
         """
         Attempt to answer an unanswered question from user.
@@ -497,7 +503,7 @@ class ITLAgent:
         models_vl, _, _ = self.recognitive.concl_vis_lang
         answers_raw, _ = models_vl.query(*query)
 
-        if len(q_vars) > 0:
+        if q_vars is not None:
             # (Temporary) For now, let's limit our answer to "what is X" questions to nouns:
             # i.e. object class categories...
             answers_raw = {
@@ -541,7 +547,7 @@ class ITLAgent:
                     ans = (int(ans[1]), ans[0])
 
                     is_named = False
-                    val = self.lt_mem.lexicon.d2s[ans][0]
+                    val = self.lt_mem.lexicon.d2s[ans][0][0]
                 else:
                     # Entity by their constant name handle
                     is_named = True

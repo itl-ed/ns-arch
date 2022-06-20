@@ -34,7 +34,13 @@ library = {
 
     # Resolve mismatch between agent's vs. user's perception by asking question,
     # in accordance with the agent's learning interaction stategy
-    "address_mismatch": None,
+    "address_mismatch": [
+        # Prepare answering utterance to generate
+        {
+            "action_method": Val(referrable=["handle_mismatch"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
+    ],
 
     # Handle unanswered question by first checking if it can be answered with agent's
     # current knowledge, and if so, adding to agenda to actually answer it

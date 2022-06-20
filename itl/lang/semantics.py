@@ -163,8 +163,23 @@ class SemanticParser:
             self.grammar, codecs.simplemrs.encode(parsed),
             executable=self.ace_bin, stderr=self.null_sink
         )
+        try:
+            replaced = generated.result(0)["surface"]
+        except IndexError:
+            # In unfortunate cases the predicate is not in ERG lexicon. Fall back
+            # to passing val as named proper noun...
+            unk_rels = [r for r in parsed.rels if r.predicate.endswith("unknown")]
+            for r in unk_rels:
+                r.args["CARG"] = r.predicate.split("/")[0][1:]
+                r.predicate = "named"
 
-        return generated.result(0)["surface"]
+            generated = ace.generate(
+                self.grammar, codecs.simplemrs.encode(parsed),
+                executable=self.ace_bin, stderr=self.null_sink
+            )
+            replaced = generated.result(0)["surface"]
+
+        return replaced
 
     def nl_change_sf(self, sentence, new_SF):
         """
@@ -187,8 +202,23 @@ class SemanticParser:
             self.grammar, codecs.simplemrs.encode(parsed),
             executable=self.ace_bin, stderr=self.null_sink
         )
+        try:
+            replaced = generated.result(0)["surface"]
+        except IndexError:
+            # In unfortunate cases the predicate is not in ERG lexicon. Fall back
+            # to passing val as named proper noun...
+            unk_rels = [r for r in parsed.rels if r.predicate.endswith("unknown")]
+            for r in unk_rels:
+                r.args["CARG"] = r.predicate.split("/")[0][1:]
+                r.predicate = "named"
 
-        return generated.result(0)["surface"]
+            generated = ace.generate(
+                self.grammar, codecs.simplemrs.encode(parsed),
+                executable=self.ace_bin, stderr=self.null_sink
+            )
+            replaced = generated.result(0)["surface"]
+
+        return replaced
     
     def nl_replace_wh(self, sentence, replace_targets, replace_values):
         # MRS parse
@@ -310,7 +340,7 @@ class SemanticParser:
                 q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
 
                 n_args = {"ARG0": tgt}
-                n_EP = EP_Class(f"_{val[0]}_n_1", handle_n, args=n_args)
+                n_EP = EP_Class(f"_{val}_n_1", handle_n, args=n_args)
 
             hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
 
@@ -322,8 +352,28 @@ class SemanticParser:
                 self.grammar, codecs.simplemrs.encode(parsed),
                 executable=self.ace_bin, stderr=self.null_sink
             )
+            try:
+                replaced = generated.result(0)["surface"]
+            except IndexError:
+                # In unfortunate cases the predicate is not in ERG lexicon. Fall back
+                # to passing val as named proper noun...
+                n_args = {"ARG0": tgt, "CARG": val}
+                parsed.rels[-1] = EP_Class("named", handle_n, args=n_args)
 
-        return generated.result(0)["surface"]
+                generated = ace.generate(
+                    self.grammar, codecs.simplemrs.encode(parsed),
+                    executable=self.ace_bin, stderr=self.null_sink
+                )
+                replaced = generated.result(0)["surface"]
+
+                # Weird behaviour of ACE ERG generator; for some reason, 'indefinite
+                # named' nouns in a non-trivially manipulated MRS often get surface
+                # form trailing "an" even if it doesn't start with a vowel... Patch
+                # this by manual replacement
+                if val[0] not in 'aeiou':
+                    replaced = replaced.replace(f"an {val}", f"a {val}")
+
+        return replaced
 
     @staticmethod
     def asp_translate(parse):
