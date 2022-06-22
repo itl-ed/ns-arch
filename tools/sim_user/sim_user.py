@@ -1,0 +1,156 @@
+"""
+Simulated user for fine-grained grounding experiment suite; manage dialogue with
+rule-based pattern matching -- no cognitive architecture ongoing within the user
+"""
+import os
+import re
+import json
+import random
+
+
+class SimulatedTeacher:
+    
+    def __init__(self, opts, target_concepts, strat_feedback="min"):
+        with open("datasets/tabletop/annotations.json") as data_file:
+            self.data_annotation = json.load(data_file)
+        with open("datasets/tabletop/metadata.json") as md_file:
+            self.metadata = json.load(md_file)
+        with open("tools/sim_user/tabletop_domain.json") as dom_file:
+            self.domain_knowledge = json.load(dom_file)
+
+        self.image_dir_prefix = "datasets/tabletop/images"
+
+        # Target concepts to teach to agent; naturally controls ITL difficulty
+        self.target_concepts = target_concepts
+
+        # Fetch in advance set of images containing any instance of the target
+        # concepts
+        self.img_candidates = {
+            conc: [
+                (
+                    img,
+                    [self.metadata["classes"].index(conc) in obj["classes"]
+                        for obj in img["annotations"]]
+                ) for img in self.data_annotation
+            ]
+            for conc in self.target_concepts
+        }
+        self.img_candidates = {
+            conc: [
+                (img, [oi for oi, is_inst in enumerate(is_insts) if is_inst])
+                for (img, is_insts) in imgs if any(is_insts)
+            ]
+            for conc, imgs in self.img_candidates.items()
+        }
+
+        # History of ITL episode records
+        self.episode_records = []
+
+        # Teacher's strategy on how to give feedback upon student's wrong answer
+        # (provided the student has taken initiative for extended ITL interactions
+        # by asking further questions after correct answer feedback)
+        self.strat_feedback = strat_feedback
+
+    def initiate_episode(self):
+        """
+        Initiate an ITL episode by asking a what-question on a concept instance
+        """
+        # Fetch next target concept to test/teach this episode, then rotate the list
+        self.current_target_concept = self.target_concepts.pop()
+        self.target_concepts = [self.current_target_concept] + self.target_concepts
+
+        concept_string = self.current_target_concept.split(".")[0]
+        concept_string = concept_string.replace("_", " ")
+
+        # Initialize episode record
+        self.current_record = {
+            "target_concept": concept_string,
+            "answered_concept": None,
+            "answer_correct": None,
+            "number_of_exemplars": 0       # Exemplars used for learning
+        }
+
+        # Ideally, for situated (robotic) agent, the teacher would simply place an
+        # exemplar of the target concept in front of the agent's vision sensor...
+        # In this experiment, let's load an image containing an instance of the target
+        # concept, and then present to the agent along with the question.
+        img_cands = self.img_candidates[self.current_target_concept]
+        sampled_img, instances = random.sample(img_cands, 1)[0]
+        sampled_instance = random.sample(instances, 1)[0]
+
+        img_f = sampled_img["file_name"]
+        instance_bbox = sampled_img["annotations"][sampled_instance]["bbox"]
+
+        self.current_focus = (img_f, instance_bbox)
+
+        return {
+            "v_usr_in": os.path.join(self.image_dir_prefix, img_f),
+            "l_usr_in": "What is this?",
+            "pointing": { "this": [instance_bbox] }
+        }
+
+    def react(self, agent_reaction):
+        """ Rule-based pattern matching for handling agent responses """
+
+        if "I don't know." in agent_reaction:
+            # Agent answered it doesn't have any clue what the concept instance is;
+            # provide correct label, even if taking minimalist strategy (after all,
+            # learning cannot take place if we don't provide any!)
+            concept_string = self.current_target_concept.split(".")[0]
+            concept_string = concept_string.replace("_", " ")
+
+            self.current_record["answered_concept"] = "N/A"
+            self.current_record["answer_correct"] = False
+            self.current_record["number_of_exemplars"] += 1
+
+            response = {
+                "v_usr_in": "n",
+                "l_usr_in": f"This is a {concept_string}.",
+                "pointing": { "this": [self.current_focus[1]] }
+            }
+
+        elif any(utt.startswith("This is") for utt in agent_reaction):
+            # Agent provided an answer what the instance is
+            agent_reaction = [
+                utt for utt in agent_reaction if utt.startswith("This is")
+            ][0]
+            answer_content = re.findall(r"This is a (.*)\.$", agent_reaction)[0]
+
+            concept_string = self.current_target_concept.split(".")[0]
+            concept_string = concept_string.replace("_", " ")
+
+            self.current_record["answered_concept"] = answer_content
+
+            if concept_string == answer_content:
+                # Correct answer
+                self.current_record["answer_correct"] = True
+                self.current_record["number_of_exemplars"] += 0
+
+                response = {
+                    "v_usr_in": "n",
+                    "l_usr_in": "Correct.",
+                    "pointing": None
+                }
+            else:
+                # Incorrect answer; reaction branches here depending on teacher's strategy
+                self.current_record["answer_correct"] = False
+                self.current_record["number_of_exemplars"] += 1
+
+                # Minimal feedback; only let the agent know the answer is incorrect
+                response = {
+                    "v_usr_in": "n",
+                    "l_usr_in": f"This is not a {answer_content}.",
+                    "pointing": { "this": [self.current_focus[1]] }
+                }
+
+                # Additional labelling provided if teacher strategy is 'greater' than [minimal
+                # feedback] or the concept hasn't ever been taught
+                taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
+                if self.current_target_concept not in taught_concepts:
+                    response["l_usr_in"] += f" This is a {concept_string}."
+                    response["pointing"]["this"].append(self.current_focus[1])
+
+        else:
+            raise NotImplementedError
+
+        return response

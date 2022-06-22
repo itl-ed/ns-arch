@@ -61,7 +61,14 @@ def parse_arguments():
     parser.add_argument("-rt", "--resume_training",
         action="store_true",
         help="Whether to resume training")
-    
+
+    # Options primarily for 'in vivo' use, with no further batch training happening
+    # (only inference and incremental few-shot registration)
+    parser.add_argument("-ic", "--initialize_categories",
+        action="store_true",
+        help="If true, bomb the category prediction heads, leaving only the feature "
+            "extractor backbone and objectness & bbox dimension prediction heads")
+
 
     ## Options for language module
     parser.add_argument("-gp", "--grammar_image_path",
@@ -72,6 +79,26 @@ def parse_arguments():
         type=str,
         default="./assets/binaries/ace-0.9.34",
         help="Path to directory containing ACE binary file (Default: ./output)")
-    
+
+
+    ## Options that specify learner's strategy
+    parser.add_argument("-sm", "--strat_mismatch",
+        type=str,
+        default="zero_init",
+        choices=["zero_init", "request_exmp", "request_expl"],
+        help="Learner's strategy on how to address recognition mismatch:\n"
+            "1) zero_init: Zero initiative from learner whatsoever at mismatches\n"
+            "2) request_exmp: Always request new exemplars of imperfect concepts\n"
+            "3) request_expl: Request info in such a way that allows linguistic description\n"
+            "(Default: zero_init)")
+    parser.add_argument("-sg", "--strat_generic",
+        type=str,
+        default="sem_only",
+        choices=["sem_only", "scalar_impl"],
+        help="Learner's strategy on how to interpret linguistically provided generic rules:\n"
+            "1) sem_only: Read and incorporate face-value semantics of generic rules only\n"
+            "2) scalar_impl: Exploit discourse context to extract scalar implicature on similarity/difference as well\n"
+            "(Default: sem_only)")
+
 
     return parser.parse_args()

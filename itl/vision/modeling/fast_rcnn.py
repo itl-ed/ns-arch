@@ -53,6 +53,8 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         input_size = self.cls_score.in_features            # Inherited from parent class...
         input_size_cmp = min(input_size, self.CODE_SIZE)   # ... and compressed down to CODE_SIZE, if larger
 
+        delattr(self, "cls_score")                         # No longer needed
+
         self.compress_cls = nn.Linear(input_size, input_size_cmp)
         self.compress_att = nn.Linear(input_size+input_size_cmp, input_size_cmp)
         self.compress_rel = nn.Linear(input_size+22+input_size_cmp*2, input_size_cmp)

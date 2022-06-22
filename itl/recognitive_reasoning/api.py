@@ -92,7 +92,9 @@ class RecognitiveReasonerModule:
 
             # Object classes
             classes = set(np.where(obj["pred_classes"] > category_thresh)[0])
-            classes.add(obj["pred_classes"].argmax())    # Also add the max category
+            if len(obj["pred_classes"]) > 0:
+                # Also add the max category even if score is below threshold
+                classes.add(obj["pred_classes"].argmax())
             classes_all |= classes
             for c in classes:
                 rule = Rule(
@@ -104,7 +106,8 @@ class RecognitiveReasonerModule:
 
             # Object attributes
             attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
-            attributes.add(obj["pred_attributes"].argmax())
+            if len(obj["pred_attributes"]) > 0:
+                attributes.add(obj["pred_attributes"].argmax())
             attributes_all |= attributes
             for a in attributes:
                 rule = Rule(
@@ -120,7 +123,8 @@ class RecognitiveReasonerModule:
                 for oj, per_obj in obj["pred_relations"].items()
             }
             for oj, per_obj in relations.items():
-                per_obj.add(obj["pred_relations"][oj].argmax())
+                if len(obj["pred_relations"][oj]) > 0:
+                    per_obj.add(obj["pred_relations"][oj].argmax())
                 relations_all |= per_obj
                 for r in per_obj:
                     rule = Rule(
@@ -441,8 +445,9 @@ class RecognitiveReasonerModule:
                         rule_head = None
 
                     if body is not None:
+                        id_shift = len(head) if head is not None else 0
                         rule_body = [
-                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{bi+len(head)}")]
+                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{bi+id_shift}")]
                             for bi in range(len(body))
                         ]
                         rule_body = [

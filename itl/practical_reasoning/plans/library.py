@@ -40,6 +40,11 @@ library = {
             "action_method": Val(referrable=["handle_mismatch"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
+        # Generate whatever response queued
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
     ],
 
     # Handle unanswered question by first checking if it can be answered with agent's
@@ -61,6 +66,20 @@ library = {
             "action_args_getter": lambda x: (Val(data=x),)
         },
         # Generate the prepared answer
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
+
+    # Nothing special has to be addressed, just acknowledge user input
+    "acknowledge": [
+        # Acknowledge in a cool way, saying "OK."
+        {
+            "action_method": Val(referrable=["lang", "acknowledge"]),
+            "action_args_getter": lambda x: ()
+        },
+        # Generate the cool acknowledgement
         {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()

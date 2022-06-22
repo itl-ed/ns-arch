@@ -108,6 +108,26 @@ class VisionModule:
             
             if ckpt_path: self.load_model(ckpt_path)
         
+        # Initialize the category prediction heads (i.e. nuke em) if specified; mainly
+        # for experiment purposes, to prepare learners with zero concept knowledge but
+        # still with good feature extraction capability
+        if opts.initialize_categories:
+            roi_heads = self.model.base_model.roi_heads
+            predictor_heads = roi_heads.box_predictor
+
+            predictor_heads.num_classes = roi_heads.num_classes = 0
+            predictor_heads.num_attributes = roi_heads.num_attributes = 0
+            predictor_heads.num_relations = roi_heads.num_relations = 0
+
+            for cat_type in ["cls", "att", "rel"]:
+                empty_codes_layer = nn.Linear(
+                    predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
+                )
+                setattr(predictor_heads, f"{cat_type}_codes", empty_codes_layer)
+            
+            self.predicates = {"cls": [], "att": [], "rel": []}
+            self.predicates_freq = {"cls": [], "att": [], "rel": []}
+
         # Latest raw vision perception, prediction outcomes, feature vectors for RoIs
         self.raw_input = None
         self.scene = None
@@ -423,7 +443,7 @@ class VisionModule:
         return C
     
     @has_model
-    def update_concept(self, concept, ex_vecs):
+    def update_concept(self, concept, ex_vecs, mix_ratio=0.5):
         """
         Update the category code parameter for the designated visual concept in the category
         prediction head, with a set of feature vectors provided as argument.
@@ -432,6 +452,8 @@ class VisionModule:
             concept: Concept for which category code vector will be updated
             ex_vecs: numpy.array; set of vector representations of concept exemplars, used
                 to update the code vector
+            mix_ratio: Mixing ratio between old code vs. new code; 1.0 corresponds to total
+                update with new code
         """
         assert ex_vecs is not None
         cat_type, cat_ind = concept
@@ -440,11 +462,20 @@ class VisionModule:
             code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
             ex_vecs = torch.tensor(ex_vecs, device=self.model.base_model.device)
 
-            new_code = code_gen(ex_vecs).mean(dim=0)
+            # Weight average of codes computed from each vector, with heavier weights
+            # placed on more recent records
+            smoothing = len(ex_vecs)           # Additive smoothing parameter
+            weights = torch.arange(1, len(ex_vecs)+1, device=self.model.base_model.device)
+            weights = weights + smoothing
+            new_code = (code_gen(ex_vecs) * weights[:,None]).sum(dim=0) / weights.sum()
         
         # Fetch category predictor head
         predictor_heads = self.model.base_model.roi_heads.box_predictor
         cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
+
+        # Take existing code, to be averaged with new code
+        old_code = cat_predictor.weight.data[cat_ind]
+        final_code = mix_ratio*new_code + (1-mix_ratio)*old_code
 
         # Update category code vector
         D = cat_predictor.in_features       # Code dimension
@@ -454,7 +485,7 @@ class VisionModule:
             D, C, bias=False, device=cat_predictor.weight.device
         )
         new_cat_predictor.weight.data = cat_predictor.weight.data
-        new_cat_predictor.weight.data[cat_ind] = new_code
+        new_cat_predictor.weight.data[cat_ind] = final_code
 
         setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
 

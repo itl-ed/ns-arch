@@ -20,32 +20,44 @@ def visualize_sg_predictions(img, scene, predicates):
     """
     # Prepare labels for class/attribute/relation predictions; show only the categories
     # with the highest scores
-    cls_argmaxs = [obj["pred_classes"].argmax(axis=-1) for obj in scene.values()]
-    cls_maxs = [obj["pred_classes"].max(axis=-1) for obj in scene.values()]
-    cls_labels = {
-        oi: (predicates['cls'][i], v)
-        for oi, i, v in zip(scene, cls_argmaxs, cls_maxs)
-    }
+    if len(predicates["cls"]) > 0:
+        cls_argmaxs = [obj["pred_classes"].argmax(axis=-1) for obj in scene.values()]
+        cls_maxs = [obj["pred_classes"].max(axis=-1) for obj in scene.values()]
+        cls_labels = {
+            oi: (predicates['cls'][i], v)
+            for oi, i, v in zip(scene, cls_argmaxs, cls_maxs)
+        }
+    else:
+        cls_labels = {oi: ("n/a", float("nan")) for oi in scene}
 
-    att_argmaxs = [obj["pred_attributes"].argmax(axis=-1) for obj in scene.values()]
-    att_maxs = [obj["pred_attributes"].max(axis=-1) for obj in scene.values()]
-    att_labels = {
-        oi: (predicates['att'][i], v)
-        for oi, i, v in zip(scene, att_argmaxs, att_maxs)
-    }
+    if len(predicates["att"]) > 0:
+        att_argmaxs = [obj["pred_attributes"].argmax(axis=-1) for obj in scene.values()]
+        att_maxs = [obj["pred_attributes"].max(axis=-1) for obj in scene.values()]
+        att_labels = {
+            oi: (predicates['att'][i], v)
+            for oi, i, v in zip(scene, att_argmaxs, att_maxs)
+        }
+    else:
+        att_labels = {oi: ("n/a", float("nan")) for oi in scene}
 
-    rel_argmaxs = [
-        { obj2: rels.argmax(axis=-1) for obj2, rels in obj["pred_relations"].items() }
-        for obj in scene.values()
-    ]
-    rel_maxs = [
-        { obj2: rels.max(axis=-1) for obj2, rels in obj["pred_relations"].items() }
-        for obj in scene.values()
-    ]
-    rel_labels = {
-        oi: { obj: (predicates['rel'][indices[obj]], values[obj]) for obj in indices }
-        for oi, indices, values in zip(scene, rel_argmaxs, rel_maxs)
-    }
+    if len(predicates["rel"]) > 0:
+        rel_argmaxs = [
+            { obj2: rels.argmax(axis=-1) for obj2, rels in obj["pred_relations"].items() }
+            for obj in scene.values()
+        ]
+        rel_maxs = [
+            { obj2: rels.max(axis=-1) for obj2, rels in obj["pred_relations"].items() }
+            for obj in scene.values()
+        ]
+        rel_labels = {
+            oi: { obj: (predicates['rel'][indices[obj]], values[obj]) for obj in indices }
+            for oi, indices, values in zip(scene, rel_argmaxs, rel_maxs)
+        }
+    else:
+        rel_labels = {
+            oi: { obj2: ("n/a", float("nan")) for obj2 in scene[oi]["pred_relations"] }
+            for oi in scene
+        }
 
     rel_colors = defaultdict(lambda: random_color(rgb=True, maximum=1))
 

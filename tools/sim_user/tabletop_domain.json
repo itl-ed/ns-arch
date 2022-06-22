@@ -1,0 +1,137 @@
+{
+    "bordeaux_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "tapered.a.01"]
+        }
+    },
+
+    "brandy_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["wide.a.01", "tapered.a.01", "round.a.01"],
+            "stem.n.03": ["short.a.02"]
+        }
+    },
+
+    "burgundy_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["wide.a.01", "tapered.a.01", "round.a.01"]
+        }
+    },
+
+    "cabernet_sauvignon_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "tapered.a.01"]
+        }
+    },
+
+    "champagne_coupe.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["broad.a.01", "round.a.01"]
+        }
+    },
+
+    "champagne_flute.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["narrow.a.01", "upright.s.01"]
+        }
+    },
+
+    "martini_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["broad.a.01", "conic.a.01"]
+        }
+    },
+
+    "pinot_noir_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "flared.a.?"]
+        }
+    },
+
+    "riesling_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "upright.s.01"]
+        }
+    },
+
+    "rose_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["wide.a.01", "flared.a.?"]
+        }
+    },
+
+    "sauternes_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "bulbed.a.01"]
+        }
+    },
+
+    "sauvignon_blanc_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "upright.s.01"]
+        }
+    },
+
+    "sherry_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "tapered.a.01", "small.a.01"]
+        }
+    },
+
+    "champagne_tulip.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["narrow.a.01", "bulbed.a.01"]
+        }
+    },
+
+    "zinfandel_glass.n.*": {
+        "supertype": [
+            "drinking_glass.n.01"
+        ],
+        "part_property": {
+            "bowl.n.01": ["egg_shaped.a.01", "tapered.a.01"]
+        }
+    }
+}

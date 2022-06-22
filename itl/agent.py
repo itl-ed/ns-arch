@@ -15,7 +15,7 @@ from .recognitive_reasoning import RecognitiveReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 
 
-FT_THRES = 0.5              # Few-shot learning trigger score threshold
+# FT_THRES = 0.5              # Few-shot learning trigger score threshold
 SR_THRES = -math.log(0.5)   # Mismatch surprisal threshold
 U_W_PR = 1.0                # How much the agent values information provided by the user
 EPS = 1e-10                 # Value used for numerical stabilization
@@ -24,6 +24,8 @@ TAB = "\t"                  # For use in format strings
 class ITLAgent:
 
     def __init__(self, opts):
+        self.opts = opts
+
         # Initialize component modules
         self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
@@ -47,15 +49,17 @@ class ITLAgent:
         while True:
             self.loop()
     
-    def loop(self, v_usr_in=None, l_usr_in=None):
+    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None):
         """
         Single agent activity loop. Provide usr_in for programmatic execution; otherwise,
         prompt user input on command line REPL
         """
         self._vis_inp(usr_in=v_usr_in)
-        self._lang_inp(usr_in=l_usr_in)
+        self._lang_inp(usr_in=l_usr_in, pointing=pointing)
         self._update_belief()
-        self._act()
+        act_out = self._act()
+
+        return act_out
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
@@ -68,10 +72,10 @@ class ITLAgent:
 
         while True:
 
+            print(f"Sys> Choose an image to process")
             if input_provided:
                 print(f"U> {usr_in}")
             else:
-                print(f"Sys> Choose an image to process")
                 print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
                 usr_in = input("U> ")
                 print("")
@@ -104,12 +108,12 @@ class ITLAgent:
         if img_f is not None:
             # Run visual inference on designated image, and store raw image & generated
             # scene graph
-            self.vision.predict(img_f, visualize=True)
+            self.vision.predict(img_f, visualize=(not input_provided))
         
         # Restore default completer
         readline.set_completer(rlcompleter.Completer().complete)
     
-    def _lang_inp(self, usr_in=None):
+    def _lang_inp(self, usr_in=None, pointing=None):
         """Language input prompt (from user)"""
         input_provided = usr_in is not None
 
@@ -117,8 +121,8 @@ class ITLAgent:
             # Inform the language module of the visual context
             self.lang.situate(self.vision.raw_input, self.vision.scene)
             self.recognitive.refresh()
+            self.vision.updated = False
 
-        print("")
         print("Sys> Awaiting user input...")
         print("Sys> Enter 'n' for skipping language input")
 
@@ -138,8 +142,13 @@ class ITLAgent:
                 elif usr_in == "exit":
                     print(f"Sys> Terminating...")
                     quit()
+                elif usr_in == "Correct.":
+                    # Positive feedback provided
+                    break
                 else:
-                    self.lang.understand(usr_in, self.vision.raw_input)
+                    self.lang.understand(
+                        usr_in, self.vision.raw_input, pointing=pointing
+                    )
 
             except IndexError as e:
                 if input_provided:
@@ -151,7 +160,7 @@ class ITLAgent:
                     raise e
                 else:
                     print(f"Sys> {e.args[0]}")
-            except NotImplementedError:
+            except NotImplementedError as e:
                 if input_provided:
                     raise e
                 else:
@@ -236,6 +245,12 @@ class ITLAgent:
         for ui in self.lang.dialogue.unanswered_Q:
             self.practical.agenda.append(("address_unanswered_Q", ui))
 
+        return_val = []
+
+        if len(self.practical.agenda) == 0:
+            # Everything seems okay, acknowledge user input
+            self.practical.agenda.append(("acknowledge", None))
+
         while True:
             resolved_items = []
             for i, todo in enumerate(self.practical.agenda):
@@ -256,7 +271,9 @@ class ITLAgent:
                             else:
                                 act_args = (act_args.extract(self),)
 
-                            act_method(*act_args)
+                            act_out = act_method(*act_args)
+                            if act_out is not None:
+                                return_val.append(act_out)
 
                     resolved_items.append(i)
 
@@ -268,6 +285,8 @@ class ITLAgent:
                 resolved_items.reverse()
                 for i in resolved_items:
                     del self.practical.agenda[i]
+
+        return return_val
 
     ##################################################################################
     ##  Below implements agent capabilities that require interplay between modules  ##
@@ -351,9 +370,10 @@ class ITLAgent:
                         if len(r.head) > 1:
                             raise NotImplementedError      # This shouldn't happen
 
-                        cat_type, cat_ind = r.head[0].name.split("_")
+                        fact = r.head[0]
+                        cat_type, cat_ind = fact.name.split("_")
                         cat_ind = int(cat_ind)
-                        args = [a for a, _ in r.head[0].args]
+                        args = [a for a, _ in fact.args]
 
                         # Fetch current score for the asserted fact (if exists)
                         if cat_type == "cls":
@@ -367,9 +387,13 @@ class ITLAgent:
                             cat_scores = self.vision.scene[args[0]]["pred_relations"][args[1]]
                             f_vec = self.vision.f_vecs[2][args[0]][args[1]]
                         
-                        # If score doesn't exist (due to being novel concept) or score is
-                        # below the predefined threshold, trigger few-shot learning
-                        if cat_ind >= len(cat_scores) or cat_scores[cat_ind] < FT_THRES:
+                        # If score doesn't exist (due to being novel concept), trigger few-shot
+                        # learning
+                        # (TODO: How about already possessed concept? Should we set some interval
+                        # of score? I.e. blatant mismatch should be addressed, not silently performing
+                        # few-shot learning here?)
+                        # if cat_ind >= len(cat_scores) or cat_scores[cat_ind] < FT_THRES:
+                        if cat_ind >= len(cat_scores):
                             novel_concept = (cat_type, cat_ind)
 
                             # Add new concept exemplars to memory, as feature vectors at
@@ -379,7 +403,7 @@ class ITLAgent:
                             # Update the category code parameter in the vision model's predictor
                             # head using the new set of exemplars
                             self.vision.update_concept(
-                                novel_concept, self.lt_mem.exemplars[novel_concept]
+                                novel_concept, self.lt_mem.exemplars[novel_concept], mix_ratio=1.0
                             )
 
                             learned = True
@@ -431,32 +455,56 @@ class ITLAgent:
 
                 surprisal = -math.log(ev_prob + EPS)
                 if surprisal > SR_THRES:
-                    m = (content, surprisal)
+                    m = (frozenset(content), surprisal)
                     self.recognitive.unresolved_mismatches.add(m)
 
-        ## TODO: Print surprisal reports to resolve_mismatch action ##
-        # print("A> However, I was quite surprised to hear that:")
-
-        # for m in mismatches:
-        #     is_positive = m[0]     # 'True' stands for positive statement
-
-        #     if is_positive:
-        #         # Positive statement (fact)
-        #         message = f"{m[2][2][0]} is (a/an) {m[1][0]}"
-        #     else:
-        #         # Negative statement (constraint)
-        #         negated = [
-        #             f"{m2[2][0]} is (a/an) {m1[0]}" for m1, m2 in zip(m[1], m[2])
-        #         ]
-        #         message = f"Not {{{' & '.join(negated)}}}"
-
-        #     print(f"A> {TAB}{message} (surprisal: {round(m[3], 3)})")
-
-    def handle_mismatch(self, m):
+    def handle_mismatch(self, mismatch):
         """
-        Handle recognition gap following some specified strategy.
+        Handle recognition gap following some specified strategy. Note that we now
+        assume the user (teacher) is an infallible oracle, and the agent doesn't
+        question info provided from user.
         """
-        print(m)
+        event, _ = mismatch
+
+        if self.opts.strat_mismatch == "zero_init":
+            # Zero initiative from agent's end; do not ask any further question, simply
+            # perform few-shot vision model updates (if possible) and acknowledge "OK"
+            for rule in event:
+                if rule.is_fact() and rule.is_grounded():
+                    fact = rule.head[0]
+                    cat_type, cat_ind = fact.name.split("_")
+                    cat_ind = int(cat_ind)
+                    args = [a for a, _ in fact.args]
+
+                    # Fetch current score for the asserted fact
+                    if cat_type == "cls":
+                        f_vec = self.vision.f_vecs[0][args[0]]
+                    elif cat_type == "att":
+                        f_vec = self.vision.f_vecs[1][args[0]]
+                    else:
+                        assert cat_type == "rel"
+                        f_vec = self.vision.f_vecs[2][args[0]][args[1]]
+
+                    imperfect_concept = (cat_type, cat_ind)
+
+                    # Add new concept exemplars to memory, as feature vectors at
+                    # the penultimate layer right before category prediction heads
+                    self.lt_mem.exemplars.add(imperfect_concept, f_vec.cpu().numpy())
+
+                    # Update the category code parameter in the vision model's predictor
+                    # head using the new set of exemplars
+                    self.vision.update_concept(
+                        imperfect_concept, self.lt_mem.exemplars[imperfect_concept]
+                    )
+
+            self.lang.dialogue.to_generate.append("OK.")
+
+        elif self.opts.strat_mismatch == "request_exmp":
+            raise NotImplementedError
+
+        else:
+            assert self.opts.strat_mismatch == "request_expl"
+            raise NotImplementedError
 
     def attempt_answer_Q(self, ui):
         """
@@ -543,11 +591,17 @@ class ITLAgent:
                 # Value to replace the designated wh-quantified referent with
                 if is_pred:
                     # Predicate name; fetch from lexicon
-                    ans = ans.split("_")
-                    ans = (int(ans[1]), ans[0])
+                    if ans is None:
+                        # No answer predicate to "What is X" question; let's simply generate
+                        # "I don't know" as answer for these cases
+                        self.lang.dialogue.to_generate.append("I don't know.")
+                        return
+                    else:
+                        ans = ans.split("_")
+                        ans = (int(ans[1]), ans[0])
 
-                    is_named = False
-                    val = self.lt_mem.lexicon.d2s[ans][0][0]
+                        is_named = False
+                        val = self.lt_mem.lexicon.d2s[ans][0][0]
                 else:
                     # Entity by their constant name handle
                     is_named = True

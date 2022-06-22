@@ -1,4 +1,5 @@
 import os
+import re
 from collections import defaultdict
 
 from delphin import ace, predicate, codecs
@@ -27,7 +28,8 @@ class SemanticParser:
                 "by_args": defaultdict(lambda: []),
                 "by_id": {},
                 "by_handle": {}
-            }
+            },
+            "utt_type": {}
         }
 
         # For now use the top result
@@ -112,7 +114,9 @@ class SemanticParser:
         parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
         
         # SF supposedly stands for 'sentential force'
-        parse["utt_type"] = parsed.variables[parsed.index]["SF"]
+        for var, properties in parsed.variables.items():
+            if "SF" in properties:
+                parse["utt_type"][var] = properties["SF"]
 
         # Record index (top variable)
         parse["index"] = parsed.index
@@ -305,73 +309,88 @@ class SemanticParser:
             for i in reversed(range(len(parsed.hcons))):
                 if i in hcons_to_replace: del parsed.hcons[i]
 
+            # Check if string val is camelCased and needs to be split
+            splits = re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", val)
+            splits = [w[0].lower()+w[1:] for w in splits]
+
+            # 'Seed' relations to be added, no matter how long the camelCased
+            # split is
             handle_lbl = f"h{max_var_ind+1}"
             handle_rstr = f"h{max_var_ind+2}"
             handle_body = f"h{max_var_ind+3}"
             handle_n = f"h{max_var_ind+4}"
             max_var_ind += 4
 
+            q_args = {
+                "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
+            }
             if is_named:
-                # Add a named referent quantified by proper_q
-                q_args = {
-                    "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
-                }
-
+                # Named referent quantified by proper_q
                 if val is None:
                     # Nothing is answer
                     q_EP = EP_Class("_no_q", handle_lbl, args=q_args)
-
-                    n_args = {"ARG0": tgt}
-                    n_EP = EP_Class("thing", handle_n, args=n_args)
                 else:
                     # Something is answer
                     q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
-
-                    n_args = {"ARG0": tgt, "CARG": val}
-                    n_EP = EP_Class("named", handle_n, args=n_args)
-
             else:
-                # Add a common noun referent quantified by _a_q
+                # Common noun referent quantified by _a_q
                 # (It will attach the indefinte 'a' to uncountable nouns as well,
                 # let's keep it this way for now)
-                q_args = {
-                    "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
-                }
                 q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
-
-                n_args = {"ARG0": tgt}
-                n_EP = EP_Class(f"_{val}_n_1", handle_n, args=n_args)
+            
+            n_args = {"ARG0": tgt, "CARG": splits[-1]}
+            n_EP = EP_Class("named", handle_n, args=n_args)
 
             hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
 
             parsed.rels.extend([q_EP, n_EP])
             parsed.hcons.append(hcons_add)
 
+            # Handle compound nouns by adding appropriate relations & hcons in order
+            prev_ref_n = tgt; prev_handle_n = handle_n
+            for w in splits[:-1]:
+                ref_c = f"e{max_var_ind+1}"
+                ref_n = f"x{max_var_ind+2}"
+                handle_lbl = f"h{max_var_ind+3}"
+                handle_rstr = f"h{max_var_ind+4}"
+                handle_body = f"h{max_var_ind+5}"
+                handle_n = f"h{max_var_ind+6}"
+                max_var_ind += 6
+
+                q_args = {
+                    "ARG0": ref_n, "RSTR": handle_rstr, "BODY": handle_body
+                }
+                q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
+
+                n_args = {"ARG0": ref_n, "CARG": w}
+                n_EP = EP_Class("named", handle_n, args=n_args)
+
+                c_args = {"ARG0": ref_c, "ARG1": prev_ref_n, "ARG2": ref_n}
+                c_EP = EP_Class("compound", prev_handle_n, args=c_args)
+
+                hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
+
+                parsed.rels.extend([q_EP, n_EP, c_EP])
+                parsed.hcons.append(hcons_add)
+
+                prev_ref_n = ref_n
+                prev_handle_n = handle_n
+
             # Generate with grammar
             generated = ace.generate(
                 self.grammar, codecs.simplemrs.encode(parsed),
                 executable=self.ace_bin, stderr=self.null_sink
             )
-            try:
-                replaced = generated.result(0)["surface"]
-            except IndexError:
-                # In unfortunate cases the predicate is not in ERG lexicon. Fall back
-                # to passing val as named proper noun...
-                n_args = {"ARG0": tgt, "CARG": val}
-                parsed.rels[-1] = EP_Class("named", handle_n, args=n_args)
+            replaced = generated.result(0)["surface"]
 
-                generated = ace.generate(
-                    self.grammar, codecs.simplemrs.encode(parsed),
-                    executable=self.ace_bin, stderr=self.null_sink
-                )
-                replaced = generated.result(0)["surface"]
-
-                # Weird behaviour of ACE ERG generator; for some reason, 'indefinite
-                # named' nouns in a non-trivially manipulated MRS often get surface
-                # form trailing "an" even if it doesn't start with a vowel... Patch
-                # this by manual replacement
-                if val[0] not in 'aeiou':
-                    replaced = replaced.replace(f"an {val}", f"a {val}")
+            # Weird behaviour of ACE ERG generator; for some reason, 'indefinite
+            # named' nouns in a non-trivially manipulated MRS often get surface
+            # form trailing "an" even if it doesn't start with a vowel... Patch
+            # this by manual replacement
+            if splits[0][0] not in 'aeiou':
+                replaced = replaced.replace(f"an {splits[0]}", f"a {splits[0]}")
+            if splits[0][0] in 'aeiou':
+                replaced = replaced.replace(f"a {splits[0]}", f"an {splits[0]}")
 
         return replaced
 
@@ -393,9 +412,16 @@ class SemanticParser:
                     merged = p1["predicate"] + p2["predicate"].capitalize()
                     parse["relations"]["by_id"][chains[x]]["predicate"] = merged
 
-                    del parse["relations"]["by_args"][p1["args"]]
-                    del parse["relations"]["by_id"][p1["id"]]
-                    del parse["relations"]["by_handle"][p1["handle"]]
+                    args_to_del = []
+                    for args, rels in parse["relations"]["by_args"].items():
+                        if x[0] in args:
+                            args_to_del.append(args)
+                            for r in rels:
+                                del parse["relations"]["by_id"][r["id"]]
+                                del parse["relations"]["by_handle"][r["handle"]]
+                    for args in args_to_del:
+                        del parse["relations"]["by_args"][args]
+
                     del chains[x]; break
 
         # Equivalence classes mapping referents to rule variables, while tracking whether
@@ -417,9 +443,10 @@ class SemanticParser:
             r["pos"] == "q" and r["predicate"] == "udef"
             for r in parse["relations"]["by_args"][(rf,)]
         ])
-        index_arg1 = parse["relations"]["by_id"][parse["index"]]["args"][1]
-        if is_bare(index_arg1):
-            ref_map[index_arg1]["is_univ_quantified"] = True
+        for ev_id in translation:
+            ev_arg1 = parse["relations"]["by_id"][ev_id]["args"][1]
+            if is_bare(ev_arg1):
+                ref_map[ev_arg1]["is_univ_quantified"] = True
 
         # Reorganizing ref_map: not entirely necessary, just my OCD
         ref_map_map = defaultdict(lambda: len(ref_map_map))
@@ -441,6 +468,22 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     """
     Recursive pre-order traversal of semantic dependency tree of referents (obtained from MRS)
     """
+    # Handle conjunction
+    if rel_id in parse["relations"]["by_id"]:
+        if parse["relations"]["by_id"][rel_id]["predicate"] == "implicit_conj":
+            # Conjunction arg1 & arg2 id
+            conj_args = parse["relations"]["by_id"][rel_id]["args"]
+
+            # Make sure parts of arg1/arg2 are each processed only by the first/second pass
+            ref_map[conj_args[1]] = None
+            ref_map[conj_args[2]] = None
+            covered.add(rel_id)
+            
+            a1_out = _traverse_dt(parse, conj_args[1], ref_map, covered, negs)
+            a2_out = _traverse_dt(parse, conj_args[2], ref_map, covered, negs)
+
+            return {**a1_out, **a2_out}
+
     # Helper method that checks whether a discourse referent is introduced by a referential
     # expression | universally quantified | wh-quantified
     is_referential = lambda rf: any([
@@ -504,7 +547,9 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
     daughters = {id: _traverse_dt(parse, id, ref_map, covered, negs) for id in daughters}
 
     # Return values of this function are flattened when called recursively
-    daughters = {id: tp+fc for id, (tp, fc) in daughters.items()}
+    daughters = {
+        id: sum([tp+fc for tp, fc in outs.values()], []) for id, outs in daughters.items()
+    }
 
     # Return empty list if key not found; no further predicates found (i.e. leaf node)
     daughters = defaultdict(lambda: [], daughters)
@@ -612,7 +657,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             # complement only.)
 
             if not referential_arg2:
-                if parse["utt_type"]=="ques" and parse["relations"]["by_id"][arg2]["predicate"]=="thing":
+                if parse["utt_type"][rel_id]=="ques" and parse["relations"]["by_id"][arg2]["predicate"]=="thing":
                     # "What is X?" type of question; attach a special reserved predicate
                     # to focus_msgs, which signals that which predicate arg2 belongs to is
                     # under question
@@ -696,4 +741,4 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
             # Other general cases
             continue
 
-    return (topic_msgs, focus_msgs)
+    return {rel_id: (topic_msgs, focus_msgs)}
