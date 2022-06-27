@@ -21,7 +21,11 @@ class LanguageModule:
         self.dialogue = DialogueManager()
 
         self.vis_raw = None
+
         self.unresolved_neologisms = set()
+
+        # New language input buffer
+        self.new_input = None
 
     def situate(self, vis_raw, vis_scene):
         """
@@ -48,7 +52,7 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names = {i: i for i in self.dialogue.referents["env"]}
 
-    def understand(self, usr_in, vis_raw, pointing=None):
+    def understand(self, parse, vis_raw, ui=None, pointing=None):
         """
         Parse language input into MRS, process into ASP-compatible form, and then
         update dialogue state. Also return any new agenda items.
@@ -57,11 +61,11 @@ class LanguageModule:
         utterance, indicating the reference (represented as bbox) made by the n'th
         occurrence of linguistic token. Mostly for programmed experiments.
         """
-        ui = len(self.dialogue.record)  # Utterance index
+        if ui is None:
+            ui = len(self.dialogue.record)  # New utterance index
         agenda = []
 
         # Processing natural language into appropriate logical form
-        parse = self.semantic.nl_parse(usr_in)
         asp_content, ref_map = self.semantic.asp_translate(parse)
 
         # Add to the list of discourse referents
@@ -110,52 +114,85 @@ class LanguageModule:
             if rel["pos"] == "q":
                 # Demonstratives need pointing
                 if "sense" in rel and rel["sense"] == "dem":
-                    print(f"Sys> '{rel['predicate']}' needs pointing")
+                    rels_with_pred = sorted([
+                        r for r in parse["relations"]["by_id"].values()
+                        if r["predicate"]==rel["predicate"]
+                    ], key=lambda r: r["crange"][0])
 
-                    if pointing is None:
+                    point_target_ind = [
+                        r["handle"] for r in rels_with_pred
+                    ].index(rel["handle"])
+
+                    pointing_not_provided = pointing is None \
+                        or (rel["predicate"] not in pointing) \
+                        or (pointing[rel["predicate"]] is None) \
+                        or (pointing[rel["predicate"]][point_target_ind] is None)
+
+                    if pointing_not_provided:
                         dem_bbox = None
                     else:
-                        rels_with_pred = sorted([
-                            r for r in parse["relations"]["by_id"].values()
-                            if r["predicate"]==rel["predicate"]
-                        ], key=lambda r: r["crange"][0])
-
-                        point_target_ind = [
-                            r["handle"] for r in rels_with_pred
-                        ].index(rel["handle"])
-
                         dem_bbox = pointing[rel["predicate"]][point_target_ind]
 
-                    referent = ref_map[rel["args"][0]]["map_id"]
+                    pointed = self.dialogue.dem_point(
+                        vis_raw, rel["predicate"], dem_bbox=dem_bbox
+                    )
 
-                    pointed = self.dialogue.dem_point(vis_raw, dem_bbox=dem_bbox)
+                    if pointing is not None:
+                        # Update token-to-bbox map of pointing if needed
+                        if rel["predicate"] in pointing:
+                            bboxes = pointing[rel["predicate"]]
+                        else:
+                            bboxes = [None] * len(rels_with_pred)
+
+                        bboxes[point_target_ind] = \
+                            self.dialogue.referents["env"][pointed]["bbox"]
+                        pointing[rel["predicate"]] = bboxes
+
+                    referent = ref_map[rel["args"][0]]["map_id"]
                     self.dialogue.assignment_hard[f"x{referent}u{ui}"] = pointed
-            
+
             if rel["predicate"] == "named":
                 # Provided symbolic name
                 if rel["carg"] not in self.dialogue.referent_names:
                     # Couldn't resolve the name; explicitly ask again for name resolution
-                    print(f"A> What were you referring to by '{rel['carg']}'?")
+                    rels_with_pred = sorted([
+                        r for r in parse["relations"]["by_id"].values()
+                        if r["predicate"]=="named" and r["carg"]==rel['carg']
+                    ], key=lambda r: r["crange"][0])
 
-                    if pointing is None:
+                    point_target_ind = [
+                        r["handle"] for r in rels_with_pred
+                    ].index(rel["handle"])
+
+                    pointing_not_provided = pointing is None \
+                        or (rel["predicate"] not in pointing) \
+                        or (pointing[rel["predicate"]] is None) \
+                        or (pointing[rel["predicate"]][point_target_ind] is None)
+
+                    if pointing_not_provided:
                         dem_bbox = None
                     else:
-                        rels_with_pred = sorted([
-                            r for r in parse["relations"]["by_id"].values()
-                            if r["predicate"]=="named" and r["carg"]==rel['carg']
-                        ], key=lambda r: r["crange"][0])
-
-                        point_target_ind = [
-                            r["handle"] for r in rels_with_pred
-                        ].index(rel["handle"])
-
                         dem_bbox = pointing[rel["carg"]][point_target_ind]
 
-                    pointed = self.dialogue.dem_point(vis_raw, dem_bbox=dem_bbox)
+                    pointed = self.dialogue.dem_point(
+                        vis_raw, rel["carg"], dem_bbox=dem_bbox
+                    )
                     self.dialogue.referent_names[rel["carg"]] = pointed
 
+                    if pointing is not None:
+                        # Update token-to-bbox map of pointing if needed
+                        if rel["carg"] in pointing:
+                            bboxes = pointing[rel["carg"]]
+                        else:
+                            bboxes = [None] * len(rels_with_pred)
+
+                        bboxes[point_target_ind] = \
+                            self.dialogue.referents["env"][pointed]["bbox"]
+                        pointing[rel["carg"]] = bboxes
+
                 referent = ref_map[rel["args"][0]]["map_id"]
-                self.dialogue.assignment_hard[f"x{referent}u{ui}"] = self.dialogue.referent_names[rel["carg"]]
+                self.dialogue.assignment_hard[f"x{referent}u{ui}"] = \
+                    self.dialogue.referent_names[rel["carg"]]
 
         # ASP-compatible translation
         for ev_id, (topic_msgs, focus_msgs) in asp_content.items():
@@ -237,7 +274,11 @@ class LanguageModule:
                 info = _map_and_format(info, ref_map, f"u{ui}")
                 info_aux = _map_and_format(info_aux, ref_map, f"u{ui}")
 
-                self.dialogue.record.append(("U", "|", (info+info_aux, None), usr_in))
+                new_record = ("U", "|", (info+info_aux, None), parse["raw"])
+                if ui >= len(self.dialogue.record):
+                    self.dialogue.record.append(new_record)    # Add new record
+                else:
+                    self.dialogue.record[ui] = new_record      # Replace existing record
 
             elif parse["utt_type"][ev_id] == "ques":
                 # Interrogatives
@@ -311,7 +352,11 @@ class LanguageModule:
                     info = None
                 query = _map_and_format(query, ref_map, f"u{ui}")
 
-                self.dialogue.record.append(("U", "?", (info, query), usr_in))
+                new_record = ("U", "?", (info, query), parse["raw"])
+                if ui >= len(self.dialogue.record):
+                    self.dialogue.record.append(new_record)    # Add new record
+                else:
+                    self.dialogue.record[ui] = new_record      # Replace existing record
                 self.dialogue.unanswered_Q.add(ui)
 
             elif parse["utt_type"][ev_id] == "comm":
@@ -335,7 +380,7 @@ class LanguageModule:
 
         self.dialogue.to_generate = []
         
-        return utt
+        return ("generate", utt)
 
 
 def _map_and_format(data, ref_map, tail):

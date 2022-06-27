@@ -17,6 +17,7 @@ import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
+from detectron2.structures import BoxMode
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import convert_image_to_rgb
 from pytorch_lightning.plugins import DDPPlugin
@@ -124,20 +125,26 @@ class VisionModule:
                     predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
                 )
                 setattr(predictor_heads, f"{cat_type}_codes", empty_codes_layer)
+
+                empty_neg_codes_layer = nn.Linear(
+                    predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
+                )
+                setattr(predictor_heads, f"{cat_type}_neg_codes", empty_neg_codes_layer)
             
             self.predicates = {"cls": [], "att": [], "rel": []}
             self.predicates_freq = {"cls": [], "att": [], "rel": []}
 
+        # New visual input buffer
+        self.new_input = None
+
         # Latest raw vision perception, prediction outcomes, feature vectors for RoIs
-        self.raw_input = None
+        self.last_input = None
+        self.last_bboxes = None
         self.scene = None
         self.f_vecs = None
 
         # Visualized prediction summary (pyplot figure)
         self.summ = None
-
-        # Flag: new prediction was made
-        self.updated = False
 
     def train(self, exp_name=None, resume=False, few_shot=None):
         """
@@ -334,6 +341,7 @@ class VisionModule:
         if isinstance(image, str):
             inp = { "file_name": image }
         else:
+            image = image[:, :, [2,1,0]]
             inp = { "image": image }
 
         # With/without boxes provided
@@ -352,10 +360,6 @@ class VisionModule:
         pred_value_fields = output[0].get_fields()
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
-        # Reformat & resize input image
-        img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
-        img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
-
         # Label and reorganize scene graph and feature vectors into a more intelligible
         # format...
         scene = {
@@ -367,6 +371,10 @@ class VisionModule:
                 f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
                 if oi != f"o{j}"
             }
+            obj["pred_relations_neg"] = {
+                f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations_neg"])
+                if oi != f"o{j}"
+            }
 
             f_vecs_org[0][oi] = f_vecs[0][i]
             f_vecs_org[1][oi] = f_vecs[1][i]
@@ -375,18 +383,27 @@ class VisionModule:
                 if oi != f"o{j}"
             }
 
-        if visualize:
-            self.summ = visualize_sg_predictions(img, scene, self.predicates)
+        # Reformat & resize input image
+        img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
+        img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
 
         # Store input arg values in case they are needed later
-        self.raw_input = img
-        self.latest_bboxes = bboxes
+        self.last_input = img
+        self.last_bboxes = [
+            {
+                "bbox": ent["pred_boxes"],
+                "bbox_mode": BoxMode.XYXY_ABS,
+                "objectness_scores": ent["pred_objectness"]
+            }
+            for ent in scene.values()
+        ]
 
         # Store results as state in this vision module
         self.scene = scene
         self.f_vecs = f_vecs_org
 
-        self.updated = True
+        if visualize:
+            self.summ = visualize_sg_predictions(img, scene, self.predicates)
     
     def reshow_pred(self):
         assert self.summ is not None, "No predictions have been made yet"
@@ -409,21 +426,23 @@ class VisionModule:
         Return:
             int index of newly added visual concept
         """
-        # Fetch category predictor head
         predictor_heads = self.model.base_model.roi_heads.box_predictor
-        cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
 
-        D = cat_predictor.in_features       # Code dimension
-        C = cat_predictor.out_features      # Number of categories (concepts)
+        # For standard codes & neg codes
+        for infix in ["", "_neg"]:
+            cat_predictor = getattr(predictor_heads, f"{cat_type}{infix}_codes")
 
-        # Expanded category predictor head with novel concept added
-        new_cat_predictor = nn.Linear(
-            D, C+1, bias=False, device=cat_predictor.weight.device
-        )
-        new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
-        new_cat_predictor.weight.data[C] = 0
+            D = cat_predictor.in_features       # Code dimension
+            C = cat_predictor.out_features      # Number of categories (concepts)
 
-        setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
+            # Expanded category predictor head with novel concept added
+            new_cat_predictor = nn.Linear(
+                D, C+1, bias=False, device=cat_predictor.weight.device
+            )
+            new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
+            new_cat_predictor.weight.data[C] = 0
+
+            setattr(predictor_heads, f"{cat_type}{infix}_codes", new_cat_predictor)
 
         # Keep category count up to date
         if cat_type == "cls":
@@ -456,38 +475,50 @@ class VisionModule:
                 update with new code
         """
         assert ex_vecs is not None
-        cat_type, cat_ind = concept
+        cat_ind, cat_type = concept
 
-        with torch.no_grad():
-            code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
-            ex_vecs = torch.tensor(ex_vecs, device=self.model.base_model.device)
-
-            # Weight average of codes computed from each vector, with heavier weights
-            # placed on more recent records
-            smoothing = len(ex_vecs)           # Additive smoothing parameter
-            weights = torch.arange(1, len(ex_vecs)+1, device=self.model.base_model.device)
-            weights = weights + smoothing
-            new_code = (code_gen(ex_vecs) * weights[:,None]).sum(dim=0) / weights.sum()
-        
-        # Fetch category predictor head
         predictor_heads = self.model.base_model.roi_heads.box_predictor
-        cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
+        code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
 
-        # Take existing code, to be averaged with new code
-        old_code = cat_predictor.weight.data[cat_ind]
-        final_code = mix_ratio*new_code + (1-mix_ratio)*old_code
+        for pol, vecs in ex_vecs.items():
+            if pol == "pos":
+                target_layer = f"{cat_type}_codes"
+            else:
+                assert pol == "neg"
+                target_layer = f"{cat_type}_neg_codes"
 
-        # Update category code vector
-        D = cat_predictor.in_features       # Code dimension
-        C = cat_predictor.out_features      # Number of categories (concepts)
+            if vecs is not None:
+                with torch.no_grad():
+                    vecs = torch.tensor(vecs, device=self.model.base_model.device)
 
-        new_cat_predictor = nn.Linear(
-            D, C, bias=False, device=cat_predictor.weight.device
-        )
-        new_cat_predictor.weight.data = cat_predictor.weight.data
-        new_cat_predictor.weight.data[cat_ind] = final_code
+                    # Weight average of codes computed from each vector, with heavier
+                    # weights placed on more recent records
+                    smoothing = len(vecs)             # Additive smoothing parameter
+                    weights = torch.arange(
+                        1, len(vecs)+1, device=self.model.base_model.device
+                    )
+                    weights = weights + smoothing
+                    new_code = (code_gen(vecs) * weights[:,None]).sum(dim=0)
+                    new_code = new_code / weights.sum()
+        
+                # Fetch category predictor head
+                cat_predictor = getattr(predictor_heads, target_layer)
 
-        setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
+                # Take existing code, to be averaged with new code
+                old_code = cat_predictor.weight.data[cat_ind]
+                final_code = mix_ratio*new_code + (1-mix_ratio)*old_code
+
+                # Update category code vector
+                D = cat_predictor.in_features       # Code dimension
+                C = cat_predictor.out_features      # Number of categories (concepts)
+
+                new_cat_predictor = nn.Linear(
+                    D, C, bias=False, device=cat_predictor.weight.device
+                )
+                new_cat_predictor.weight.data = cat_predictor.weight.data
+                new_cat_predictor.weight.data[cat_ind] = final_code
+
+                setattr(predictor_heads, target_layer, new_cat_predictor)
 
     @has_model
     def save_model(self):

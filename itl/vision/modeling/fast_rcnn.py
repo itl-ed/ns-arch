@@ -59,13 +59,19 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         self.compress_att = nn.Linear(input_size+input_size_cmp, input_size_cmp)
         self.compress_rel = nn.Linear(input_size+22+input_size_cmp*2, input_size_cmp)
 
-        # Split self.cls_score into two nn.Linear layers, each responsible for class prediction
-        # and objectness prediction, for more flexible registration of new classes
-        self.cls_codes = nn.Linear(input_size_cmp, self.num_classes, bias=False)
+        # Split self.cls_score into two nn.Linear layers, each responsible for class
+        # prediction and objectness prediction, for more flexible registration of new
+        # classes
         self.objectness_score = nn.Linear(input_size, 1)
-
+        self.cls_codes = nn.Linear(input_size_cmp, self.num_classes, bias=False)
         self.att_codes = nn.Linear(input_size_cmp, self.num_attributes, bias=False)
         self.rel_codes = nn.Linear(input_size_cmp, self.num_relations, bias=False)
+
+        # Codes for neg-concepts (derived concepts that may appear similar to their
+        # corresponding concepts, but are different in the end)
+        self.cls_neg_codes = nn.Linear(input_size_cmp, self.num_classes, bias=False)
+        self.att_neg_codes = nn.Linear(input_size_cmp, self.num_attributes, bias=False)
+        self.rel_neg_codes = nn.Linear(input_size_cmp, self.num_relations, bias=False)
 
         self.relu = nn.ReLU()
     
@@ -193,6 +199,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
         cls_compressed_f = self.compress_cls(box_features)
         cls_scores = self.cls_codes(self.relu(cls_compressed_f))
+        cls_neg_scores = self.cls_neg_codes(self.relu(cls_compressed_f))
 
         # Aggregated 'semantic' feature for each box for later use, weighted by class probabilities.
         # Per-class features in the class prediction layer are used as semantic features
@@ -216,11 +223,13 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         #   2) Semantic features (i.e. 'taking into account the predicted classes')
         att_compressed_f = self.compress_att(cat([box_features, sem_features], dim=-1))
         att_scores = self.att_codes(self.relu(att_compressed_f))
+        att_neg_scores = self.att_neg_codes(self.relu(att_compressed_f))
 
         # Skip relation prediction if box pair features is not provided
         if box_pair_features is None:
             rel_compressed_f = None
             rel_scores = None
+            rel_seg_scores = None
         else:
             ## Relation prediction, using following features (Consult Plesse et al., 2020 for details):
             #   1) Visual features
@@ -265,6 +274,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
             rel_compressed_f = self.compress_rel(cat([pair_vis_f, pair_spt_f, pair_sem_f], dim=-1))
             rel_scores = self.rel_codes(self.relu(rel_compressed_f))
+            rel_neg_scores = self.rel_neg_codes(self.relu(rel_compressed_f))
 
             # De_normalize box dimensions
             for pos in proposals_objs:
@@ -276,7 +286,12 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 h_I, w_I = pos.image_size
                 bxs.scale(w_I, h_I)
 
-        out = objectness_scores, cls_scores, att_scores, rel_scores, proposal_deltas
+        out = (
+            objectness_scores,
+            cls_scores, att_scores, rel_scores,
+            proposal_deltas,
+            cls_neg_scores, att_neg_scores, rel_neg_scores
+        )
         f_vecs = cls_compressed_f, att_compressed_f, rel_compressed_f
 
         return out, f_vecs
@@ -382,7 +397,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
     def inference(self, predictions, proposals, boxes_provided=False):
         """
-        Extended for a new scene graph generation inference output format; thie method effectively
+        Extended for a new scene graph generation inference output format; the method effectively
         fuses super().inference(), fast_rcnn_inference(), and fast_rcnn_inference_single_image()
         in the original source (detectron2/modeling/roi_heads/fast_rcnn.py) into a single method
 
@@ -412,10 +427,13 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         for boxes_per_image, scores_per_image, proposals_per_image, image_shape \
             in zip(boxes, scores, proposals[0], image_shapes):
 
-            cls_scores_per_image = scores_per_image[0]
-            objectness_scores_per_image = scores_per_image[1]
+            objectness_scores_per_image = scores_per_image[0]
+            cls_scores_per_image = scores_per_image[1]
             att_scores_per_image = scores_per_image[2]
             rel_scores_per_image = scores_per_image[3]
+            cls_neg_scores_per_image = scores_per_image[4]
+            att_neg_scores_per_image = scores_per_image[5]
+            rel_neg_scores_per_image = scores_per_image[6]
 
             valid_mask = torch.isfinite(boxes_per_image).all(dim=1) & \
                 torch.isfinite(cls_scores_per_image).all(dim=1) & \
@@ -423,9 +441,11 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 torch.isfinite(att_scores_per_image).all(dim=1)
             if not valid_mask.all():
                 boxes_per_image = boxes_per_image[valid_mask]
-                cls_scores_per_image = cls_scores_per_image[valid_mask]
                 objectness_scores_per_image = objectness_scores_per_image[valid_mask]
+                cls_scores_per_image = cls_scores_per_image[valid_mask]
                 att_scores_per_image = att_scores_per_image[valid_mask]
+                cls_neg_scores_per_image = cls_neg_scores_per_image[valid_mask]
+                att_neg_scores_per_image = att_neg_scores_per_image[valid_mask]
 
             num_bbox_reg_classes = boxes_per_image.shape[1] // 4
             # Convert to Boxes to use the `clip` function ...
@@ -452,10 +472,13 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                     boxes_per_image = boxes_per_image[filter_mask, 0]
                 else:
                     boxes_per_image = boxes_per_image[filter_mask]
-                cls_scores_per_image = cls_scores_per_image[filter_mask]
                 objectness_scores_per_image = objectness_scores_per_image[filter_mask]
+                cls_scores_per_image = cls_scores_per_image[filter_mask]
                 att_scores_per_image = att_scores_per_image[filter_mask]
                 rel_scores_per_image = rel_scores_per_image[pair_filter_inds]
+                cls_neg_scores_per_image = cls_neg_scores_per_image[filter_mask]
+                att_neg_scores_per_image = att_neg_scores_per_image[filter_mask]
+                rel_neg_scores_per_image = rel_neg_scores_per_image[pair_filter_inds]
 
                 ## 2. Apply NMS to the filtered proposals.
                 keep = batched_nms(
@@ -470,10 +493,13 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 pair_keep = pair_select_indices(len(filter_inds), keep)
 
                 boxes_per_image = boxes_per_image[keep]
-                cls_scores_per_image = cls_scores_per_image[keep]
                 objectness_scores_per_image = objectness_scores_per_image[keep]
+                cls_scores_per_image = cls_scores_per_image[keep]
                 att_scores_per_image = att_scores_per_image[keep]
                 rel_scores_per_image = rel_scores_per_image[pair_keep]
+                cls_neg_scores_per_image = cls_neg_scores_per_image[keep]
+                att_neg_scores_per_image = att_neg_scores_per_image[keep]
+                rel_neg_scores_per_image = rel_neg_scores_per_image[pair_keep]
                 filter_inds = filter_inds[keep]
 
             # Reshape relation prediction outputs from 1-D flattened tensor (without diags;
@@ -487,11 +513,21 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                         rel_scores_per_image[i*(N-1)+i:(i+1)*(N-1)]
                     ], dim=0)
                 for i in range(N)], dim=0)
+                rel_neg_scores_per_image = torch.stack([
+                    torch.cat([
+                        rel_neg_scores_per_image[i*(N-1):i*(N-1)+i],
+                        torch.zeros([1,R], device=rel_neg_scores_per_image.device),
+                        rel_neg_scores_per_image[i*(N-1)+i:(i+1)*(N-1)]
+                    ], dim=0)
+                for i in range(N)], dim=0)
 
             result = Instances(image_shape)
             result.pred_classes = cls_scores_per_image
             result.pred_attributes = att_scores_per_image
             result.pred_relations = rel_scores_per_image
+            result.pred_classes_neg = cls_neg_scores_per_image
+            result.pred_attributes_neg = att_neg_scores_per_image
+            result.pred_relations_neg = rel_neg_scores_per_image
             if boxes_provided:
                 result.pred_boxes = proposals_per_image.proposal_boxes
                 if proposals_per_image.has("pred_objectness"):
@@ -537,22 +573,31 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         cls_scores = predictions[1]
         att_scores = predictions[2]
         rel_scores = predictions[3]
+        cls_neg_scores = predictions[5]
+        att_neg_scores = predictions[6]
+        rel_neg_scores = predictions[7]
 
         proposals_objs, proposals_rels = proposals
 
         num_inst_per_image = [len(p) for p in proposals_objs]
         num_inst_pair_per_image = [len(p) for p in proposals_rels]
 
-        probs_cls = torch.sigmoid(cls_scores)
         probs_objectness = torch.sigmoid(objectness_scores)
+        probs_cls = torch.sigmoid(cls_scores)
         probs_att = torch.sigmoid(att_scores)
         probs_rel = torch.sigmoid(rel_scores)
+        probs_cls_neg = torch.sigmoid(cls_neg_scores)
+        probs_att_neg = torch.sigmoid(att_neg_scores)
+        probs_rel_neg = torch.sigmoid(rel_neg_scores)
 
         return list(zip(
-            probs_cls.split(num_inst_per_image, dim=0),
             probs_objectness.split(num_inst_per_image, dim=0),
+            probs_cls.split(num_inst_per_image, dim=0),
             probs_att.split(num_inst_per_image, dim=0),
-            probs_rel.split(num_inst_pair_per_image, dim=0)
+            probs_rel.split(num_inst_pair_per_image, dim=0),
+            probs_cls_neg.split(num_inst_per_image, dim=0),
+            probs_att_neg.split(num_inst_per_image, dim=0),
+            probs_rel_neg.split(num_inst_pair_per_image, dim=0)
         ))
 
 

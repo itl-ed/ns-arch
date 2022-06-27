@@ -9,19 +9,26 @@ class Exemplars:
     """
     def __init__(self):
         # Dict from visual concept to list of vectors (matrix)
-        self.entries = {}
+        self.pos_exs = {}        # Positive exemplars
+        self.neg_exs = {}        # Negative (but close?) exemplars
 
     def __len__(self):
-        return len(self.entries)
+        return len(self.pos_exs)
 
     def __repr__(self):
         return f"Exemplars(len={len(self)})"
     
-    def __getitem__(self, concept):
-        return self.entries.get(concept)
+    def __getitem__(self, item):
+        return { "pos": self.pos_exs.get(item), "neg": self.neg_exs.get(item) }
 
-    def add(self, concept, f_vec):
-        if concept in self.entries:
-            self.entries[concept] = np.concatenate((self.entries[concept], f_vec[None]))
+    def add_pos(self, concept, f_vec):
+        if concept in self.pos_exs:
+            self.pos_exs[concept] = np.concatenate((self.pos_exs[concept], f_vec[None]))
         else:
-            self.entries[concept] = f_vec[None]
+            self.pos_exs[concept] = f_vec[None]
+
+    def add_neg(self, concept, f_vec):
+        if concept in self.neg_exs:
+            self.neg_exs[concept] = np.concatenate((self.neg_exs[concept], f_vec[None]))
+        else:
+            self.neg_exs[concept] = f_vec[None]

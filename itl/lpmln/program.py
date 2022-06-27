@@ -247,7 +247,7 @@ class Program:
 
         indep_trees = []; memoized_models = {}
         for ci, comp in enumerate(comps):
-            print(f"A> Let me see... ({ci+1}/{len(comps)})", end="\r")
+            # print(f"A> Let me see... ({ci+1}/{len(comps)})", end="\r")
 
             # Find possibly relevant rules for each component, ignoring grounded rules that
             # do not overlap at all
@@ -420,7 +420,7 @@ class Program:
                 outcomes = []
                 atom_diffs = [a-atom_commons for a in atom_sets]
                 for bi, ((pos_atoms, _, pr), atoms) in enumerate(zip(bottom_models, atom_diffs)):
-                    print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
+                    # print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
 
                     pos_atoms_diff = {atm for atm, pos in atoms if pos}
                     neg_atoms_diff = {atm for atm, pos in atoms if not pos}
@@ -438,7 +438,7 @@ class Program:
                 tree = Models(outcomes=outcomes)
 
             indep_trees.append(tree)
-            print("A>" + (" "*50), end="\r")
+            # print("A>" + (" "*50), end="\r")
         
         models = Models(factors=indep_trees)
 

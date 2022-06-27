@@ -5,6 +5,7 @@ import math
 import readline
 import rlcompleter
 
+import numpy as np
 from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
@@ -13,6 +14,8 @@ from .vision.utils.completer import DatasetImgsCompleter
 from .lang import LanguageModule
 from .recognitive_reasoning import RecognitiveReasonerModule
 from .practical_reasoning import PracticalReasonerModule
+from .lpmln import Rule, Literal
+from .lpmln.utils import wrap_args
 
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
@@ -38,6 +41,9 @@ class ITLAgent:
             self.vision.predicates, self.vision.predicates_freq
         )
 
+        # Show visual UI and plots
+        self.vis_ui_on = True
+
         # Image file selection CUI
         self.dcompleter = DatasetImgsCompleter()
         readline.parse_and_bind("tab: complete")
@@ -55,14 +61,15 @@ class ITLAgent:
         prompt user input on command line REPL
         """
         self._vis_inp(usr_in=v_usr_in)
-        self._lang_inp(usr_in=l_usr_in, pointing=pointing)
-        self._update_belief()
+        self._lang_inp(usr_in=l_usr_in)
+        self._update_belief(pointing=pointing)
         act_out = self._act()
 
         return act_out
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
+        self.vision.new_input = None
         input_provided = usr_in is not None
 
         # Register autocompleter for REPL
@@ -83,17 +90,18 @@ class ITLAgent:
             try:
                 if usr_in == "n":
                     print(f"Sys> Skipped image selection")
-                    img_f = None
                     break
                 elif usr_in == "r":
-                    img_f = self.dcompleter.sample()
+                    self.vision.new_input = self.dcompleter.sample()
+                    self.vision.last_bboxes = None
                 elif usr_in == "exit":
                     print(f"Sys> Terminating...")
                     quit()
                 else:
                     if usr_in not in self.dcompleter:
                         raise ValueError(f"Image file {usr_in} does not exist")
-                    img_f = usr_in
+                    self.vision.new_input = usr_in
+                    self.vision.last_bboxes = None
 
             except ValueError as e:
                 if input_provided:
@@ -102,39 +110,28 @@ class ITLAgent:
                     print(f"Sys> {e}, try again")
 
             else:
-                print(f"Sys> Selected image file: {img_f}")
+                self.vision.last_input = self.vision.new_input
+                print(f"Sys> Selected image file: {self.vision.new_input}")
                 break
 
-        if img_f is not None:
-            # Run visual inference on designated image, and store raw image & generated
-            # scene graph
-            self.vision.predict(img_f, visualize=(not input_provided))
-        
         # Restore default completer
         readline.set_completer(rlcompleter.Completer().complete)
     
-    def _lang_inp(self, usr_in=None, pointing=None):
+    def _lang_inp(self, usr_in=None):
         """Language input prompt (from user)"""
+        self.lang.new_input = None
         input_provided = usr_in is not None
-
-        if self.vision.updated:
-            # Inform the language module of the visual context
-            self.lang.situate(self.vision.raw_input, self.vision.scene)
-            self.recognitive.refresh()
-            self.vision.updated = False
 
         print("Sys> Awaiting user input...")
         print("Sys> Enter 'n' for skipping language input")
 
-        valid_input = False
-        while not valid_input:
+        while True:
             if input_provided:
                 print(f"U> {usr_in}")
             else:
                 usr_in = input("U> ")
                 print("")
 
-            # Understand the user input in the context of the dialogue
             try:
                 if usr_in == "n":
                     print(f"Sys> Skipped language input")
@@ -146,9 +143,8 @@ class ITLAgent:
                     # Positive feedback provided
                     break
                 else:
-                    self.lang.understand(
-                        usr_in, self.vision.raw_input, pointing=pointing
-                    )
+                    self.lang.new_input = self.lang.semantic.nl_parse(usr_in)
+                    break
 
             except IndexError as e:
                 if input_provided:
@@ -160,65 +156,219 @@ class ITLAgent:
                     raise e
                 else:
                     print(f"Sys> {e.args[0]}")
-            except NotImplementedError as e:
-                if input_provided:
-                    raise e
-                else:
-                    print("Sys> Sorry, can't handle the input sentence (yet)")
 
-            else:
-                valid_input = True
-                break
-
-        if self.vision.scene is not None:
-            # If a new entity is registered as a result of understanding the latest
-            # input, re-run vision module to update with new predictions for it
-            if len(self.lang.dialogue.referents["env"]) > len(self.vision.scene):
-                bboxes = [
-                    {
-                        "bbox": ent["bbox"],
-                        "bbox_mode": BoxMode.XYXY_ABS,
-                        "objectness_scores": self.vision.scene[name]["pred_objectness"]
-                            if name in self.vision.scene else None
-                    }
-                    for name, ent in self.lang.dialogue.referents["env"].items()
-                ]
-
-                # Predict on latest raw data stored
-                raw_input_bgr = self.vision.raw_input[:, :, [2,1,0]]
-                self.vision.predict(raw_input_bgr, bboxes=bboxes)
-    
-    def _update_belief(self):
+    def _update_belief(self, pointing=None):
         """ Form beliefs based on visual and/or language input """
 
-        dialogue_state = self.lang.dialogue.export_as_dict()
-        kb_prog = self.lt_mem.kb.export_as_program()
-
-        if self.vision.raw_input is None and len(dialogue_state["record"]) == 0:
-            # No information whatsoever to form any sort of beliefs
+        if not (self.vision.new_input or self.lang.new_input):
+            # No information whatsoever to make any belief updates
             print("A> (Idling the moment away...)")
             return
 
-        # Handle resolvable/unresolvable neologisms, if any
-        self._handle_neologisms()
+        # Lasting storage of pointing info
+        if pointing is None:
+            pointing = {}
+        
+        # For showing visual UI on only the first time
+        vis_ui_on = self.vis_ui_on
 
-        # Sensemaking from vision input only
-        if self.vision.updated:
-            self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
+        # No need to treat these facts as 'mismatches'
+        doubt_no_more = set()
 
-        # Reference & word sense resolution to connect vision & discourse
-        self.recognitive.resolve_symbol_semantics(dialogue_state, self.lt_mem.lexicon)
+        # Keep updating beliefs until there's no more immediately exploitable learning
+        # opportunities
+        vision_model_updated = False    # Whether learning happened at neural-level
+        kb_updated = False              # Whether learning happened at symbolic-level
+        concept_set_updated = False     # Whether new concept is acquired
+        while True:
+            ###################################################################
+            ##                  Processing perceived inputs                  ##
+            ###################################################################
 
-        # Learning from user language input at neural level (incremental few-shot visual
-        # concept registration) & symbolic level (knowledge base expansion)
-        self._learn()
+            if self.vision.new_input is not None or vision_model_updated:
+                # Ground raw visual perception with scene graph generation module
+                self.vision.predict(
+                    self.vision.last_input,
+                    bboxes=self.vision.last_bboxes, visualize=vis_ui_on
+                )
+                vis_ui_on = False
 
-        # Sensemaking from vision & language input
-        self.recognitive.sensemake_vis_lang(dialogue_state)
+            if self.vision.new_input is not None:
+                # Inform the language module of the visual context
+                self.lang.situate(self.vision.last_input, self.vision.scene)
+                self.recognitive.refresh()
+            
+            # New index of utterance to be added to discourse record, if ever
+            ui = len(self.lang.dialogue.record)
 
-        # Identify any mismatch between vision-only sensemaking result vs. info conveyed
-        # by user utterance inputs
-        self._identify_mismatch()
+            # Understand the user input in the context of the dialogue
+            if self.lang.new_input is not None:
+                self.lang.understand(
+                    self.lang.new_input, self.vision.last_input, ui=ui, pointing=pointing
+                )
+
+            if self.vision.scene is not None:
+                # If some discourse referent is hard-assigned to some entity, boost its
+                # objectness score so that it's captured during sensemaking
+                for ent in self.lang.dialogue.assignment_hard.values():
+                    if ent in self.vision.scene:
+                        self.vision.scene[ent]["pred_objectness"] = np.array([1.0])
+
+                # If a new entity is registered as a result of understanding the latest
+                # input, re-run vision module to update with new predictions for it
+                if len(self.lang.dialogue.referents["env"]) > len(self.vision.scene):
+                    bboxes = [
+                        {
+                            "bbox": ent["bbox"],
+                            "bbox_mode": BoxMode.XYXY_ABS,
+                            "objectness_scores": self.vision.scene[name]["pred_objectness"]
+                                if name in self.vision.scene else None
+                        }
+                        for name, ent in self.lang.dialogue.referents["env"].items()
+                    ]
+
+                    # Predict on latest raw data stored
+                    self.vision.predict(self.vision.last_input, bboxes=bboxes)
+
+            ###################################################################
+            ##       Sensemaking via synthesis of perception+knowledge       ##
+            ###################################################################
+
+            dialogue_state = self.lang.dialogue.export_as_dict()
+            kb_prog = self.lt_mem.kb.export_as_program()
+
+            if self.vision.new_input is not None or vision_model_updated:
+                # Sensemaking from vision input only
+                self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
+
+            if self.lang.new_input is not None:
+                # Reference & word sense resolution to connect vision & discourse
+                self.recognitive.resolve_symbol_semantics(
+                    dialogue_state, self.lt_mem.lexicon
+                )
+
+                if self.vision.scene is not None:
+                    # Sensemaking from vision & language input
+                    self.recognitive.sensemake_vis_lang(dialogue_state)
+
+            ###################################################################
+            ##           Identify & exploit learning opportunities           ##
+            ###################################################################
+
+            # Resetting flags
+            vision_model_updated = False
+            kb_updated = False
+            concept_set_updated = False
+
+            # Process translated dialogue record to do the following:
+            #   - Integrate newly provided generic rules into KB
+            #   - Identify recognition mismatch btw. user provided vs. agent
+            translated = self.recognitive.translate_dialogue_content(dialogue_state)
+            for ui, (rules, _) in enumerate(translated):
+                if rules is not None:
+                    for r in rules:
+                        # Symbolic knowledge base expansion; for generic rules without
+                        # constant terms
+                        if all(is_var for _, is_var in r.terms()):
+                            # Integrate the rule into KB by adding (for now we won't
+                            # worry about intra-KB consistency, etc.)
+                            provenance = dialogue_state["record"][ui][3]
+                            kb_updated |= self.lt_mem.kb.add(r, U_W_PR, provenance)
+
+                        # Test against vision-only sensemaking result to identify any
+                        # recognitive mismatch
+                        if all(not is_var for _, is_var in r.terms()) \
+                            and self.recognitive.concl_vis is not None:
+                            if r in doubt_no_more:
+                                # May skip testing this one
+                                continue
+
+                            # Make a yes/no query to obtain the likelihood of content
+                            models_v, _, _ = self.recognitive.concl_vis
+                            q_response, _ = models_v.query(None, r)
+                            ev_prob = q_response[()][1]
+
+                            surprisal = -math.log(ev_prob + EPS)
+                            if surprisal > SR_THRES:
+                                m = (r, surprisal)
+                                self.recognitive.mismatches.add(m)
+
+            # Handle neologisms
+            neologisms = {
+                tok: sym for tok, (sym, den) in self.recognitive.word_senses.items()
+                if den is None
+            }
+            for tok, sym in neologisms.items():
+                neo_in_rule_head = tok[1].startswith("r") and tok[2].startswith("h")
+                neos_in_same_rule_body = [
+                    n for n in neologisms if tok[:2]==n[:2] and n[2].startswith("b")
+                ]
+                if neo_in_rule_head and len(neos_in_same_rule_body)==0:
+                    # Occurrence in rule head implies either definition or exemplar is
+                    # provided by the utterance containing this token... Register new
+                    # visual concept, and perform few-shot learning if appropriate
+                    pos, name = sym
+                    if pos == "n":
+                        cat_type = "cls"
+                    elif pos == "a":
+                        cat_type = "att"
+                    else:
+                        assert pos == "v" or pos == "r"
+                        cat_type = "rel"
+
+                    # Expand corresponding visual concept inventory
+                    concept_ind = self.vision.add_concept(cat_type)
+                    novel_concept = (concept_ind, cat_type)
+
+                    # Acquire novel concept by updating lexicon (and vision.predicates)
+                    self.lt_mem.lexicon.add((name, pos), novel_concept)
+                    self.vision.predicates[cat_type].append(
+                        f"{name}.{pos}.0{len(self.lt_mem.lexicon.s2d[(name, pos)])}"
+                    )
+
+                    ui = int(tok[0].strip("u"))
+                    ri = int(tok[1].strip("r"))
+                    rule_head, rule_body, _ = dialogue_state["record"][ui][2][0][ri]
+
+                    if rule_body is None:
+                        # Labelled exemplar provided; add new concept exemplars to
+                        # memory, as feature vectors at the penultimate layer right
+                        # before category prediction heads
+                        args = [
+                            self.recognitive.value_assignment[arg] for arg in rule_head[0][2]
+                        ]
+                        if cat_type == "cls":
+                            f_vec = self.vision.f_vecs[0][args[0]]
+                        elif cat_type == "att":
+                            f_vec = self.vision.f_vecs[1][args[0]]
+                        else:
+                            assert cat_type == "rel"
+                            f_vec = self.vision.f_vecs[2][args[0]][args[1]]
+
+                        self.lt_mem.exemplars.add_pos(novel_concept, f_vec.cpu().numpy())
+
+                        # Update the category code parameter in the vision model's predictor
+                        # head using the new set of exemplars
+                        self.vision.update_concept(
+                            novel_concept, self.lt_mem.exemplars[novel_concept], mix_ratio=1.0
+                        )
+                        vision_model_updated = True
+
+                        # This fact now shouldn't strike the agent as surprise, at least in
+                        # this loop (Ideally this doesn't need to be enforced this way, if
+                        # the few-shot learning capability is perfect)
+                        doubt_no_more.add(Rule(
+                            head=Literal(f"{cat_type}_{concept_ind}", wrap_args(*args))
+                        ))
+
+                    concept_set_updated = True
+                else:
+                    # Otherwise not immediately resolvable
+                    self.lang.unresolved_neologisms.add((sym, tok))
+
+            # Terminate the loop when 'equilibrium' is reached
+            if not (vision_model_updated or kb_updated or concept_set_updated):
+                break
 
         # self.vision.reshow_pred()
 
@@ -230,24 +380,28 @@ class ITLAgent:
         method for a good while?
         """
         ## Generate agenda items from maintenance goals
-        # (Currently, the maintenance goal is not to leave any unaddressed neologism which
-        # is unresolvable, unaddressed recognition inconsistency btw. agent and user, or 
-        # unanswered question that is answerable. In principle this is to be accomplished
-        # declaratively by properly setting up formal maintenance goals and then performing
-        # automated planning or something to come up with right sequence of actions to be added
-        # to agenda. However, the ad-hoc code below (+ plan library in practical/plans/library.py)
-        # will do for our purpose right now; we will see later if we'll ever need to generalize
-        # and implement the said procedure.)
+        # Currently, the maintenance goals are not to leave:
+        #   - any unaddressed neologism which is unresolvable
+        #   - any unaddressed recognition inconsistency btw. agent and user
+        #   - any unanswered question that is answerable
+        #
+        # Ideally, this is to be accomplished declaratively by properly setting up formal
+        # maintenance goals and then performing automated planning or something to come
+        # up with right sequence of actions to be added to agenda. However, the ad-hoc code
+        # below (+ plan library in practical/plans/library.py) will do for our purpose right
+        # now; we will see later if we'll ever need to generalize and implement the said
+        # procedure.)
+
         for n in self.lang.unresolved_neologisms:
             self.practical.agenda.append(("address_neologism", n))
-        for m in self.recognitive.unresolved_mismatches:
+        for m in self.recognitive.mismatches:
             self.practical.agenda.append(("address_mismatch", m))
         for ui in self.lang.dialogue.unanswered_Q:
             self.practical.agenda.append(("address_unanswered_Q", ui))
 
         return_val = []
 
-        if len(self.practical.agenda) == 0:
+        if self.lang.new_input is not None and len(self.practical.agenda) == 0:
             # Everything seems okay, acknowledge user input
             self.practical.agenda.append(("acknowledge", None))
 
@@ -288,214 +442,43 @@ class ITLAgent:
 
         return return_val
 
-    ##################################################################################
-    ##  Below implements agent capabilities that require interplay between modules  ##
-    ##################################################################################
-
-    def _handle_neologisms(self):
-        """
-        Identify any neologisms that can(not) be resolved without interacting further
-        with user (definition/exemplar already provided)
-        """
-        neologisms = set()
-        resolvable_neologisms = set()
-        for _, _, (rules, query), _ in self.lang.dialogue.record:
-            if rules is not None:
-                for head, body, _ in rules:
-                    if head is not None:
-                        for h in head:
-                            if h[:2] not in self.lt_mem.lexicon.s2d:
-                                # Occurrence in rule head implies either definition or
-                                # exemplar is provided by this utterance
-                                resolvable_neologisms.add(h[:2])
-                                neologisms.add(h[:2])
-                    if body is not None:
-                        for b in body:
-                            if b[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(b[:2])
-            if query is not None:
-                _, q_fmls = query
-                for head, body, _ in q_fmls:
-                    if head is not None:
-                        for h in head:
-                            if h[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(h[:2])
-                    if body is not None:
-                        for b in body:
-                            if b[:2] not in self.lt_mem.lexicon.s2d: neologisms.add(b[:2])
-
-        unresolvable_neologisms = neologisms - resolvable_neologisms
-
-        if len(resolvable_neologisms) > 0:
-            # Assign each novel concept a new index, while initializing the class code for
-            # the index as a NaN vector
-            for n in resolvable_neologisms:
-                symbol, pos = n
-                if pos == "n":
-                    cat_type = "cls"
-                elif pos == "a":
-                    cat_type = "att"
-                else:
-                    assert pos == "v" or pos == "r"
-                    cat_type = "rel"
-
-                # Expand corresponding visual concept inventory
-                concept_ind = self.vision.add_concept(cat_type)
-
-                # Update lexicon (and vision.predicates)
-                self.lt_mem.lexicon.add(n, (concept_ind, cat_type))
-                self.vision.predicates[cat_type].append(
-                    f"{symbol}.{pos}.0{len(self.lt_mem.lexicon.s2d[n])}"
-                )
-
-        if len(unresolvable_neologisms) > 0:
-            self.lang.unresolved_neologisms |= unresolvable_neologisms
-
-    def _learn(self):
-        """
-        Neural (low-level) learning: Happens when 'reflex'-perception from neural
-        sensor module doesn't agree with provided info
-
-        Symbolic (high-level) learning: Add any novel generic rules to knowledge
-        base; rule shouldn't contain any constant term to be considered generic
-        """
-        dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.recognitive.translate_dialogue_content(dialogue_state)
-
-        learned = False
-        for ui, (rules, _) in enumerate(translated):
-            speaker, _, _, orig_utt = self.lang.dialogue.record[ui]
-            if rules is not None and speaker == "U":
-                for r in rules:
-                    if len(r.body) == 0:
-                        ## Neural incremental few-shot concept registration
-                        if len(r.head) > 1:
-                            raise NotImplementedError      # This shouldn't happen
-
-                        fact = r.head[0]
-                        cat_type, cat_ind = fact.name.split("_")
-                        cat_ind = int(cat_ind)
-                        args = [a for a, _ in fact.args]
-
-                        # Fetch current score for the asserted fact (if exists)
-                        if cat_type == "cls":
-                            cat_scores = self.vision.scene[args[0]]["pred_classes"]
-                            f_vec = self.vision.f_vecs[0][args[0]]
-                        elif cat_type == "att":
-                            cat_scores = self.vision.scene[args[0]]["pred_attributes"]
-                            f_vec = self.vision.f_vecs[1][args[0]]
-                        else:
-                            assert cat_type == "rel"
-                            cat_scores = self.vision.scene[args[0]]["pred_relations"][args[1]]
-                            f_vec = self.vision.f_vecs[2][args[0]][args[1]]
-                        
-                        # If score doesn't exist (due to being novel concept), trigger few-shot
-                        # learning
-                        # (TODO: How about already possessed concept? Should we set some interval
-                        # of score? I.e. blatant mismatch should be addressed, not silently performing
-                        # few-shot learning here?)
-                        # if cat_ind >= len(cat_scores) or cat_scores[cat_ind] < FT_THRES:
-                        if cat_ind >= len(cat_scores):
-                            novel_concept = (cat_type, cat_ind)
-
-                            # Add new concept exemplars to memory, as feature vectors at
-                            # the penultimate layer right before category prediction heads
-                            self.lt_mem.exemplars.add(novel_concept, f_vec.cpu().numpy())
-
-                            # Update the category code parameter in the vision model's predictor
-                            # head using the new set of exemplars
-                            self.vision.update_concept(
-                                novel_concept, self.lt_mem.exemplars[novel_concept], mix_ratio=1.0
-                            )
-
-                            learned = True
-
-                            # Re-run vision prediction with updated model
-                            raw_input_bgr = self.vision.raw_input[:, :, [2,1,0]]
-                            self.vision.predict(raw_input_bgr, bboxes=self.vision.latest_bboxes)
-                    else:
-                        ## Symbolic knowledge base expansion
-                        head_args = set(sum([h.args for h in r.head], []))
-                        body_args = set(sum([b.args for b in r.body], []))
-                        occurring_args = head_args | body_args
-
-                        if any(not is_var for _, is_var in occurring_args):
-                            # Ignore non-generic rules with any non-var arg
-                            continue
-                        
-                        # Integrate the rule into KB by adding (for now we won't worry about
-                        # intra-KB consistency, etc.)
-                        self.lt_mem.kb.add(r, U_W_PR, orig_utt)
-                        learned = True
-        
-        # Sensemake again if any learning happened (only if has sensemade already before)
-        if learned and self.recognitive.concl_vis is not None:
-            kb_prog = self.lt_mem.kb.export_as_program()
-            self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
-
-    def _identify_mismatch(self):
-        """
-        Recognize any mismatch between sensemaking results obtained from vision-only
-        vs. info provided in discourse utterances, and add to agenda if any is found
-        """
-        if self.recognitive.concl_vis is None or len(self.lang.dialogue.record) == 0:
-            # Don't bother if lacking either vision or language input
-            return
-
-        models_v, _, _ = self.recognitive.concl_vis
-
-        dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.recognitive.translate_dialogue_content(dialogue_state)
-
-        for rules, _ in translated:
-            if rules is not None:
-                content = set(rules)
-
-                # Make a yes/no query to obtain the likelihood of content
-                q_response, _ = models_v.query(None, content)
-                ev_prob = q_response[()][1]
-
-                surprisal = -math.log(ev_prob + EPS)
-                if surprisal > SR_THRES:
-                    m = (frozenset(content), surprisal)
-                    self.recognitive.unresolved_mismatches.add(m)
-
     def handle_mismatch(self, mismatch):
         """
         Handle recognition gap following some specified strategy. Note that we now
         assume the user (teacher) is an infallible oracle, and the agent doesn't
         question info provided from user.
         """
-        event, _ = mismatch
+        rule, _ = mismatch
 
         if self.opts.strat_mismatch == "zero_init":
             # Zero initiative from agent's end; do not ask any further question, simply
             # perform few-shot vision model updates (if possible) and acknowledge "OK"
-            for rule in event:
-                if rule.is_fact() and rule.is_grounded():
-                    fact = rule.head[0]
-                    cat_type, cat_ind = fact.name.split("_")
-                    cat_ind = int(cat_ind)
-                    args = [a for a, _ in fact.args]
+            if rule.is_fact() and rule.is_grounded():
+                fact = rule.head[0]
+                cat_type, cat_ind = fact.name.split("_")
+                cat_ind = int(cat_ind)
+                args = [a for a, _ in fact.args]
 
-                    # Fetch current score for the asserted fact
-                    if cat_type == "cls":
-                        f_vec = self.vision.f_vecs[0][args[0]]
-                    elif cat_type == "att":
-                        f_vec = self.vision.f_vecs[1][args[0]]
-                    else:
-                        assert cat_type == "rel"
-                        f_vec = self.vision.f_vecs[2][args[0]][args[1]]
+                # Fetch current score for the asserted fact
+                if cat_type == "cls":
+                    f_vec = self.vision.f_vecs[0][args[0]]
+                elif cat_type == "att":
+                    f_vec = self.vision.f_vecs[1][args[0]]
+                else:
+                    assert cat_type == "rel"
+                    f_vec = self.vision.f_vecs[2][args[0]][args[1]]
 
-                    imperfect_concept = (cat_type, cat_ind)
+                imperfect_concept = (cat_type, cat_ind)
 
-                    # Add new concept exemplars to memory, as feature vectors at
-                    # the penultimate layer right before category prediction heads
-                    self.lt_mem.exemplars.add(imperfect_concept, f_vec.cpu().numpy())
+                # Add new concept exemplars to memory, as feature vectors at the
+                # penultimate layer right before category prediction heads
+                self.lt_mem.exemplars.add(imperfect_concept, f_vec.cpu().numpy())
 
-                    # Update the category code parameter in the vision model's predictor
-                    # head using the new set of exemplars
-                    self.vision.update_concept(
-                        imperfect_concept, self.lt_mem.exemplars[imperfect_concept]
-                    )
+                # Update the category code parameter in the vision model's predictor
+                # head using the new set of exemplars
+                self.vision.update_concept(
+                    imperfect_concept, self.lt_mem.exemplars[imperfect_concept]
+                )
 
             self.lang.dialogue.to_generate.append("OK.")
 
@@ -537,6 +520,9 @@ class ITLAgent:
         among the candidates, then translating the answer into natural language form to be
         uttered
         """
+        # The question is about to be answered
+        self.lang.dialogue.unanswered_Q.remove(ui)
+
         dialogue_state = self.lang.dialogue.export_as_dict()
         _, _, _, orig_utt = dialogue_state["record"][ui]
 
@@ -588,13 +574,15 @@ class ITLAgent:
                 tgt = dialogue_state["referents"]["dis"][qv]["provenance"]
                 replace_targets.append(tgt)
 
+                low_confidence = ev_prob is not None and ev_prob < 0.5
+
                 # Value to replace the designated wh-quantified referent with
                 if is_pred:
                     # Predicate name; fetch from lexicon
-                    if ans is None:
+                    if ans is None or low_confidence:
                         # No answer predicate to "What is X" question; let's simply generate
-                        # "I don't know" as answer for these cases
-                        self.lang.dialogue.to_generate.append("I don't know.")
+                        # "I am not sure" as answer for these cases
+                        self.lang.dialogue.to_generate.append("I am not sure.")
                         return
                     else:
                         ans = ans.split("_")
@@ -605,7 +593,10 @@ class ITLAgent:
                 else:
                     # Entity by their constant name handle
                     is_named = True
-                    val = ans
+                    if low_confidence:
+                        val = None
+                    else:
+                        val = ans
 
                 replace_values.append((val, is_named))
 

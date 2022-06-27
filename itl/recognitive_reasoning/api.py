@@ -40,7 +40,7 @@ class RecognitiveReasonerModule:
         self.value_assignment = {}    # Store best assignments (tentative) obtained by reasoning
         self.word_senses = {}         # Store current estimate of symbol denotations
 
-        self.unresolved_mismatches = set()
+        self.mismatches = set()
 
     def refresh(self):
         self.concl_vis = None
@@ -50,7 +50,7 @@ class RecognitiveReasonerModule:
         self.value_assignment = {}
         self.word_senses = {}
 
-        self.unresolved_mismatches = set()
+        self.mismatches = set()
 
     def sensemake_vis(self, vis_scene, kb_prog, objectness_thresh=0.75, category_thresh=0.75):
         """
@@ -160,10 +160,6 @@ class RecognitiveReasonerModule:
             lexicon: Agent's lexicon, required for matching between environment entities
                 vs. discourse referents for variable assignment
         """
-        if len(dialogue_state["record"]) == 0:
-            # Don't bother
-            return
-
         # Find the best estimate of referent value assignment
         aprog = Program()
 
@@ -208,19 +204,19 @@ class RecognitiveReasonerModule:
 
                     head_preds = [] if head is None else [h[:2] for h in head]
                     body_preds = [] if body is None else [b[:2] for b in body]
-                    preds = head_preds+body_preds
-                    occurring_preds |= set(preds)
+                    occurring_preds |= set(head_preds+body_preds)
 
                     # Symbol token occurrence locations
-                    for pi, p in enumerate(preds):
-                        # Skip special reserved predicates
-                        if p[1] == "*": continue
+                    for c, preds in [("h", head_preds), ("b", body_preds)]:
+                        for pi, p in enumerate(preds):
+                            # Skip special reserved predicates
+                            if p[1] == "*": continue
 
-                        sym = f"{p[1]}_{p[0]}"
-                        tok_loc = f"u{ui}_r{ri}_p{pi}"
-                        aprog.add_hard_rule(
-                            Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
-                        )
+                            sym = f"{p[1]}_{p[0]}"
+                            tok_loc = f"u{ui}_r{ri}_{c}{pi}"
+                            aprog.add_hard_rule(
+                                Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
+                            )
 
                     head_args = set() if head is None else set(sum([h[2] for h in head], ()))
                     body_args = set() if body is None else set(sum([b[2] for b in body], ()))
@@ -235,7 +231,7 @@ class RecognitiveReasonerModule:
                     is_grounded = all(not a[0].isupper() for a in occurring_args)
                     if self.concl_vis is not None and is_grounded:
                         # Rule instances by possible word sense selections
-                        wsd_cands = [lexicon.s2d[sym[:2]] for sym in preds]
+                        wsd_cands = [lexicon.s2d[sym[:2]] for sym in head_preds+body_preds]
 
                         for vcs in product(*wsd_cands):
                             if head is not None:
@@ -280,19 +276,19 @@ class RecognitiveReasonerModule:
 
                     head_preds = [] if head is None else [h[:2] for h in head]
                     body_preds = [] if body is None else [b[:2] for b in body]
-                    preds = head_preds+body_preds
-                    occurring_preds |= set(preds)
+                    occurring_preds |= set(head_preds+body_preds)
 
                     # Symbol token occurrence locations
-                    for pi, p in enumerate(preds):
-                        # Skip special reserved predicates
-                        if p[1] == "*": continue
+                    for c, preds in [("h", head_preds), ("b", body_preds)]:
+                        for pi, p in enumerate(preds):
+                            # Skip special reserved predicates
+                            if p[1] == "*": continue
 
-                        sym = f"{p[1]}_{p[0]}"
-                        tok_loc = f"u{ui}_q{qi}_p{pi}"
-                        aprog.add_hard_rule(
-                            Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
-                        )
+                            sym = f"{p[1]}_{p[0]}"
+                            tok_loc = f"u{ui}_q{qi}_{c}{pi}"
+                            aprog.add_hard_rule(
+                                Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
+                            )
 
         # Predicate info needed for word sense selection
         for p in occurring_preds:
@@ -390,13 +386,21 @@ class RecognitiveReasonerModule:
         best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
         best_assignment = {args[0][0]: args[1][0] for args in best_assignment}
 
+        tok2sym_map = [atom.args[:2] for atom in opt_models[0] if atom.name == "pred_token"]
+        tok2sym_map = {
+            tuple(token[0].split("_")): tuple(symbol[0].split("_"))
+            for token, symbol in tok2sym_map
+        }
+
         word_senses = [atom.args[:2] for atom in opt_models[0] if atom.name == "denote"]
         word_senses = {
             tuple(token[0].split("_")): tuple(denotation[0].split("_"))
             for token, denotation in word_senses
         }
         word_senses = {
-            token: (denotation[0], int(denotation[1])) if len(denotation[0])>0 else None
+            token: (tok2sym_map[token], (denotation[0], int(denotation[1])))
+                if len(denotation[0])>0
+                else (tok2sym_map[token], None)
             for token, denotation in word_senses.items()
         }
 
@@ -417,7 +421,7 @@ class RecognitiveReasonerModule:
             # If the utterance contains an unresolved neologism, give up translation
             # for the time being
             contains_unresolved_neologism = any([
-                den is None for tok, den in self.word_senses.items() if tok[0]==f"u{ui}"
+                den[1] is None for tok, den in self.word_senses.items() if tok[0]==f"u{ui}"
             ])
             if contains_unresolved_neologism:
                 result.append((None, None))
@@ -431,7 +435,7 @@ class RecognitiveReasonerModule:
 
                     if head is not None:
                         rule_head = [
-                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{hi}")]
+                            self.word_senses[(f"u{ui}",f"r{ri}",f"h{hi}")][1]
                             for hi in range(len(head))
                         ]
                         rule_head = [
@@ -445,9 +449,8 @@ class RecognitiveReasonerModule:
                         rule_head = None
 
                     if body is not None:
-                        id_shift = len(head) if head is not None else 0
                         rule_body = [
-                            self.word_senses[(f"u{ui}",f"r{ri}",f"p{bi+id_shift}")]
+                            self.word_senses[(f"u{ui}",f"r{ri}",f"b{bi}")][1]
                             for bi in range(len(body))
                         ]
                         rule_body = [
@@ -474,7 +477,9 @@ class RecognitiveReasonerModule:
                         rule_head = [
                             # If head literal predicate is not found in self.word_senses,
                             # it means the predicate is a special reserved one
-                            self.word_senses.get((f"u{ui}",f"q{qi}",f"p{hi}"), head[hi][1::-1])
+                            self.word_senses.get(
+                                (f"u{ui}",f"q{qi}",f"h{hi}"), (None, head[hi][1::-1])
+                            )[1]
                             for hi in range(len(head))
                         ]
                         rule_head = [
@@ -489,7 +494,7 @@ class RecognitiveReasonerModule:
 
                     if body is not None:
                         rule_body = [
-                            self.word_senses[(f"u{ui}",f"q{qi}",f"p{bi+len(head)}")]
+                            self.word_senses[(f"u{ui}",f"q{qi}",f"b{bi}")][1]
                             for bi in range(len(body))
                         ]
                         rule_body = [
@@ -522,10 +527,6 @@ class RecognitiveReasonerModule:
             dialogue_state: Current dialogue information state exported from the dialogue
                 manager
         """
-        if self.concl_vis is None or len(dialogue_state["record"]) == 0:
-            # Don't bother if lacking either vision or language input
-            return
-
         dprog = Program()
         models_v, memoized_v, prog = self.concl_vis
 

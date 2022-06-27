@@ -23,7 +23,9 @@ if __name__ == "__main__":
     agent = ITLAgent(opts)
     user = SimulatedTeacher(opts, target_concepts=["brandy_glass.n.*", "burgundy_glass.n.*"])
 
-    for i in tqdm.tqdm(range(100), total=100):
+    agent.vis_ui_on = False
+
+    for i in tqdm.tqdm(range(20), total=20):
         print("")
         print(f"Sys> ITL episode {i+1}")
         # Each single ITL episode is initiated by the teacher, aiming to test and confer

@@ -7,6 +7,8 @@ import re
 import json
 import random
 
+import numpy as np
+
 
 class SimulatedTeacher:
     
@@ -79,7 +81,7 @@ class SimulatedTeacher:
         sampled_instance = random.sample(instances, 1)[0]
 
         img_f = sampled_img["file_name"]
-        instance_bbox = sampled_img["annotations"][sampled_instance]["bbox"]
+        instance_bbox = np.array(sampled_img["annotations"][sampled_instance]["bbox"])
 
         self.current_focus = (img_f, instance_bbox)
 
@@ -92,7 +94,7 @@ class SimulatedTeacher:
     def react(self, agent_reaction):
         """ Rule-based pattern matching for handling agent responses """
 
-        if "I don't know." in agent_reaction:
+        if "I am not sure." in agent_reaction:
             # Agent answered it doesn't have any clue what the concept instance is;
             # provide correct label, even if taking minimalist strategy (after all,
             # learning cannot take place if we don't provide any!)

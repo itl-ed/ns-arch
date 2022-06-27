@@ -7,5 +7,6 @@ output/
 wandb/
 
 .env
+*.csv
 *.txt
 !requirements.txt

@@ -39,7 +39,7 @@ class DialogueManager:
         """ Export the current dialogue information state as a dict """
         return vars(self)
 
-    def dem_point(self, vis_raw, dem_bbox=None):
+    def dem_point(self, vis_raw, label_target, dem_bbox=None):
         """
         Simple pointing interface for entities quantified by demonstratives.
 
@@ -48,12 +48,15 @@ class DialogueManager:
         experiments.
         """
         if dem_bbox is not None:
-            drawn_bbox = np.array(dem_bbox)
+            drawn_bbox = dem_bbox
         else:
             ax = plt.gca()
             ax.axes.xaxis.set_visible(False)
             ax.axes.yaxis.set_visible(False)
-            ax.set_title("Press 't' to toggle bounding box selector")
+            ax.set_title(
+                f"'{label_target}' needs pointing\n"
+                "(Press 't' to toggle bounding box selector)"
+            )
             ax.imshow(vis_raw)
 
             # Bounding boxes for recognized entities
@@ -203,9 +206,10 @@ class DialogueManager:
             else:
                 drawn_bbox = None
 
-        # If the choice is a newly drawn bounding box and doesn't overlap with 
-        # any other box with high IoU, register this as new entity and return
         if drawn_bbox is not None:
+            # If the choice is a newly drawn bounding box and doesn't overlap with 
+            # any other box with high IoU, register this as new entity and return
+
             # First check if there's any existing high-IoU bounding box; by 'high'
             # we refer to some arbitrary threshold -- let's use 0.8 here
             env_ref_bboxes = torch.stack(
@@ -220,7 +224,8 @@ class DialogueManager:
 
             if best_match.values.item() > iou_thresh:
                 # Assume the 'pointed' entity is actually this one
-                pointed = list(self.referents["env"].keys())[2]
+                max_ind = best_match.indices.item()
+                pointed = list(self.referents["env"].keys())[max_ind]
             else:
                 # Register the entity as a novel environment referent
                 pointed = f"o{len(env_ref_bboxes)}"
@@ -230,7 +235,10 @@ class DialogueManager:
                     "area": (drawn_bbox[2]-drawn_bbox[0]) * (drawn_bbox[3]-drawn_bbox[1])
                 }
                 self.referent_names[pointed] = pointed
+        else:
+            # Clicked on one of the options
+            pointed = ui_status["choice"]
 
-                pointed = pointed
+        assert pointed is not None
 
         return pointed

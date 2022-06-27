@@ -29,7 +29,8 @@ class SemanticParser:
                 "by_id": {},
                 "by_handle": {}
             },
-            "utt_type": {}
+            "utt_type": {},
+            "raw": usr_in
         }
 
         # For now use the top result
@@ -309,12 +310,7 @@ class SemanticParser:
             for i in reversed(range(len(parsed.hcons))):
                 if i in hcons_to_replace: del parsed.hcons[i]
 
-            # Check if string val is camelCased and needs to be split
-            splits = re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", val)
-            splits = [w[0].lower()+w[1:] for w in splits]
-
-            # 'Seed' relations to be added, no matter how long the camelCased
-            # split is
+            # 'Seed' relations to be added, no matter how long the camelCased split is
             handle_lbl = f"h{max_var_ind+1}"
             handle_rstr = f"h{max_var_ind+2}"
             handle_body = f"h{max_var_ind+3}"
@@ -324,22 +320,31 @@ class SemanticParser:
             q_args = {
                 "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
             }
-            if is_named:
-                # Named referent quantified by proper_q
-                if val is None:
-                    # Nothing is answer
-                    q_EP = EP_Class("_no_q", handle_lbl, args=q_args)
-                else:
-                    # Something is answer
-                    q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
+            if val is None:
+                # Nothing is answer
+                q_EP = EP_Class("_no_q", handle_lbl, args=q_args)
+                n_EP = EP_Class("thing", handle_n, args={"ARG0": tgt})
+
+                splits = []
             else:
-                # Common noun referent quantified by _a_q
-                # (It will attach the indefinte 'a' to uncountable nouns as well,
-                # let's keep it this way for now)
-                q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
-            
-            n_args = {"ARG0": tgt, "CARG": splits[-1]}
-            n_EP = EP_Class("named", handle_n, args=n_args)
+                if is_named:
+                    # Named referent quantified by proper_q
+                    q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
+
+                    # Short name, no camelCase splits
+                    splits = [val]
+                else:
+                    # Common noun referent quantified by _a_q
+                    # (It will attach the indefinte 'a' to uncountable nouns as well,
+                    # let's keep it this way for now)
+                    q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
+
+                    # Check if string val is camelCased and needs to be split
+                    splits = re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", val)
+                    splits = [w[0].lower()+w[1:] for w in splits]
+                
+                n_args = {"ARG0": tgt, "CARG": splits[-1]}
+                n_EP = EP_Class("named", handle_n, args=n_args)
 
             hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
 
@@ -387,10 +392,11 @@ class SemanticParser:
             # named' nouns in a non-trivially manipulated MRS often get surface
             # form trailing "an" even if it doesn't start with a vowel... Patch
             # this by manual replacement
-            if splits[0][0] not in 'aeiou':
-                replaced = replaced.replace(f"an {splits[0]}", f"a {splits[0]}")
-            if splits[0][0] in 'aeiou':
-                replaced = replaced.replace(f"a {splits[0]}", f"an {splits[0]}")
+            if len(splits) > 0:
+                if splits[0][0] not in 'aeiou':
+                    replaced = replaced.replace(f"an {splits[0]}", f"a {splits[0]}")
+                if splits[0][0] in 'aeiou':
+                    replaced = replaced.replace(f"a {splits[0]}", f"an {splits[0]}")
 
         return replaced
 
