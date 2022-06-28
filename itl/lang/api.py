@@ -375,12 +375,15 @@ class LanguageModule:
 
     def generate(self):
         """ Flush the buffer of utterances prepared """
-        utt = " ".join(self.dialogue.to_generate)
-        print(f"A> {utt}")
+        if len(self.dialogue.to_generate) > 0:
+            utt = " ".join(self.dialogue.to_generate)
+            print(f"A> {utt}")
 
-        self.dialogue.to_generate = []
-        
-        return ("generate", utt)
+            self.dialogue.to_generate = []
+            
+            return ("generate", utt)
+        else:
+            return
 
 
 def _map_and_format(data, ref_map, tail):

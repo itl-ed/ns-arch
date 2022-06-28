@@ -417,7 +417,7 @@ class Models:
             bottom_pr, bottom_model, top_models = o
 
             # Set of atoms actually covered by the outcome
-            top_atoms = top_models.atoms()
+            top_atoms = top_models.atoms() if top_models is not None else set()
             o_atoms = bottom_model | top_atoms
 
             # Disjunction to satisfy; making a copy that we can manipulate within this

@@ -172,14 +172,10 @@ class ITLAgent:
         # For showing visual UI on only the first time
         vis_ui_on = self.vis_ui_on
 
-        # No need to treat these facts as 'mismatches'
-        doubt_no_more = set()
-
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
         vision_model_updated = False    # Whether learning happened at neural-level
         kb_updated = False              # Whether learning happened at symbolic-level
-        concept_set_updated = False     # Whether new concept is acquired
         while True:
             ###################################################################
             ##                  Processing perceived inputs                  ##
@@ -197,7 +193,12 @@ class ITLAgent:
                 # Inform the language module of the visual context
                 self.lang.situate(self.vision.last_input, self.vision.scene)
                 self.recognitive.refresh()
-            
+
+                # No need to treat these facts as 'mismatches'
+                # (In a sense, this kinda overlaps with the notion of 'common ground'?
+                # May consider fulfilling this later)
+                self.doubt_no_more = set()
+
             # New index of utterance to be added to discourse record, if ever
             ui = len(self.lang.dialogue.record)
 
@@ -237,7 +238,7 @@ class ITLAgent:
             dialogue_state = self.lang.dialogue.export_as_dict()
             kb_prog = self.lt_mem.kb.export_as_program()
 
-            if self.vision.new_input is not None or vision_model_updated:
+            if self.vision.new_input is not None or vision_model_updated or kb_updated:
                 # Sensemaking from vision input only
                 self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
 
@@ -258,7 +259,6 @@ class ITLAgent:
             # Resetting flags
             vision_model_updated = False
             kb_updated = False
-            concept_set_updated = False
 
             # Process translated dialogue record to do the following:
             #   - Integrate newly provided generic rules into KB
@@ -279,7 +279,7 @@ class ITLAgent:
                         # recognitive mismatch
                         if all(not is_var for _, is_var in r.terms()) \
                             and self.recognitive.concl_vis is not None:
-                            if r in doubt_no_more:
+                            if r in self.doubt_no_more:
                                 # May skip testing this one
                                 continue
 
@@ -318,7 +318,7 @@ class ITLAgent:
 
                     # Expand corresponding visual concept inventory
                     concept_ind = self.vision.add_concept(cat_type)
-                    novel_concept = (concept_ind, cat_type)
+                    novel_concept = (cat_type, concept_ind)
 
                     # Acquire novel concept by updating lexicon (and vision.predicates)
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
@@ -354,20 +354,18 @@ class ITLAgent:
                         )
                         vision_model_updated = True
 
-                        # This fact now shouldn't strike the agent as surprise, at least in
-                        # this loop (Ideally this doesn't need to be enforced this way, if
-                        # the few-shot learning capability is perfect)
-                        doubt_no_more.add(Rule(
+                        # This now shouldn't strike the agent as surprise, at least in this
+                        # loop (Ideally this doesn't need to be enforced this way, if the
+                        # few-shot learning capability is perfect)
+                        self.doubt_no_more.add(Rule(
                             head=Literal(f"{cat_type}_{concept_ind}", wrap_args(*args))
                         ))
-
-                    concept_set_updated = True
                 else:
                     # Otherwise not immediately resolvable
                     self.lang.unresolved_neologisms.add((sym, tok))
 
             # Terminate the loop when 'equilibrium' is reached
-            if not (vision_model_updated or kb_updated or concept_set_updated):
+            if not (vision_model_updated or kb_updated):
                 break
 
         # self.vision.reshow_pred()
@@ -448,16 +446,27 @@ class ITLAgent:
         assume the user (teacher) is an infallible oracle, and the agent doesn't
         question info provided from user.
         """
+        # This mismatch is about to be handled
+        self.recognitive.mismatches.remove(mismatch)
+
         rule, _ = mismatch
 
         if self.opts.strat_mismatch == "zero_init":
             # Zero initiative from agent's end; do not ask any further question, simply
             # perform few-shot vision model updates (if possible) and acknowledge "OK"
-            if rule.is_fact() and rule.is_grounded():
-                fact = rule.head[0]
-                cat_type, cat_ind = fact.name.split("_")
+            if rule.is_grounded() and len(rule.literals())==1:
+                if rule.is_fact():
+                    # Positive grounded fact
+                    atom = rule.head[0]
+                    exemplar_add_func = self.lt_mem.exemplars.add_pos
+                else:
+                    # Negative grounded fact
+                    atom = rule.body[0]
+                    exemplar_add_func = self.lt_mem.exemplars.add_neg
+
+                cat_type, cat_ind = atom.name.split("_")
                 cat_ind = int(cat_ind)
-                args = [a for a, _ in fact.args]
+                args = [a for a, _ in atom.args]
 
                 # Fetch current score for the asserted fact
                 if cat_type == "cls":
@@ -472,7 +481,7 @@ class ITLAgent:
 
                 # Add new concept exemplars to memory, as feature vectors at the
                 # penultimate layer right before category prediction heads
-                self.lt_mem.exemplars.add(imperfect_concept, f_vec.cpu().numpy())
+                exemplar_add_func(imperfect_concept, f_vec.cpu().numpy())
 
                 # Update the category code parameter in the vision model's predictor
                 # head using the new set of exemplars
@@ -480,7 +489,12 @@ class ITLAgent:
                     imperfect_concept, self.lt_mem.exemplars[imperfect_concept]
                 )
 
-            self.lang.dialogue.to_generate.append("OK.")
+                # This now shouldn't strike the agent as surprise, at least in this
+                # loop (Ideally this doesn't need to be enforced this way, if the
+                # few-shot learning capability is perfect)
+                self.doubt_no_more.add(rule)
+
+            self.practical.agenda.append(("acknowledge", None))
 
         elif self.opts.strat_mismatch == "request_exmp":
             raise NotImplementedError

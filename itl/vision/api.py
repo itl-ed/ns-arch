@@ -474,8 +474,7 @@ class VisionModule:
             mix_ratio: Mixing ratio between old code vs. new code; 1.0 corresponds to total
                 update with new code
         """
-        assert ex_vecs is not None
-        cat_ind, cat_type = concept
+        cat_type, cat_ind = concept
 
         predictor_heads = self.model.base_model.roi_heads.box_predictor
         code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")

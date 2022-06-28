@@ -82,6 +82,18 @@ class Literal:
     def flip(self):
         """ Return new Literal instance with flipped naf but otherwise identical """
         return Literal(self.name, self.args, not self.naf)
+    
+    def flip_classical(self):
+        """
+        Return new Literal instance with strong-negated predicate name but otherwise
+        identical
+        """
+        if self.name.startswith("-"):
+            # Already strong-negated; cancel negation
+            return Literal(self.name[1:], self.args, self.naf)
+        else:
+            # Strong negation by attaching "-" (clingo style)
+            return Literal("-"+self.name, self.args, self.naf)
 
     def as_atom(self):
         """ Return the naf-free atom version with same signature as new Literal instance """

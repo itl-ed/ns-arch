@@ -73,6 +73,9 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         self.att_neg_codes = nn.Linear(input_size_cmp, self.num_attributes, bias=False)
         self.rel_neg_codes = nn.Linear(input_size_cmp, self.num_relations, bias=False)
 
+        for neg_layer in [self.cls_neg_codes, self.att_neg_codes, self.rel_neg_codes]:
+            nn.init.zeros_(neg_layer.weight)
+
         self.relu = nn.ReLU()
     
     @classmethod

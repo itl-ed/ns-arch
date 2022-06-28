@@ -82,7 +82,6 @@ class RecognitiveReasonerModule:
 
         # Build ASP program for processing perception outputs
         pprog = Program()
-        classes_all = set(); attributes_all = set(); relations_all = set()
 
         for oi, obj in vis_scene.items():
             # Objectness
@@ -95,7 +94,6 @@ class RecognitiveReasonerModule:
             if len(obj["pred_classes"]) > 0:
                 # Also add the max category even if score is below threshold
                 classes.add(obj["pred_classes"].argmax())
-            classes_all |= classes
             for c in classes:
                 rule = Rule(
                     head=Literal(f"cls_{c}", [(oi,False)]),
@@ -103,18 +101,37 @@ class RecognitiveReasonerModule:
                 )
                 w_pr = float(obj["pred_classes"][c])
                 pprog.add_rule(rule, w_pr)
+            
+            # Object classes - negative (yet similar)
+            classes_neg = set(np.where(obj["pred_classes_neg"] > category_thresh)[0])
+            for cn in classes_neg:
+                rule = Rule(
+                    head=Literal(f"-cls_{cn}", [(oi,False)]),
+                    body=[Literal("object", [(oi,False)])]
+                )
+                w_pr = float(obj["pred_classes_neg"][cn])
+                pprog.add_rule(rule, w_pr)
 
             # Object attributes
             attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
             if len(obj["pred_attributes"]) > 0:
                 attributes.add(obj["pred_attributes"].argmax())
-            attributes_all |= attributes
             for a in attributes:
                 rule = Rule(
                     head=Literal(f"att_{a}", [(oi,False)]),
                     body=[Literal("object", [(oi,False)])]
                 )
                 w_pr = float(obj["pred_attributes"][a])
+                pprog.add_rule(rule, w_pr)
+            
+            # Object attributes - negative (yet similar)
+            attributes_neg = set(np.where(obj["pred_attributes_neg"] > category_thresh)[0])
+            for an in attributes_neg:
+                rule = Rule(
+                    head=Literal(f"-att_{an}", [(oi,False)]),
+                    body=[Literal("object", [(oi,False)])]
+                )
+                w_pr = float(obj["pred_attributes_neg"][an])
                 pprog.add_rule(rule, w_pr)
             
             # Object relations
@@ -125,7 +142,6 @@ class RecognitiveReasonerModule:
             for oj, per_obj in relations.items():
                 if len(obj["pred_relations"][oj]) > 0:
                     per_obj.add(obj["pred_relations"][oj].argmax())
-                relations_all |= per_obj
                 for r in per_obj:
                     rule = Rule(
                         head=Literal(f"rel_{r}", [(oi,False),(oj,False)]),
@@ -135,6 +151,23 @@ class RecognitiveReasonerModule:
                         ]
                     )
                     w_pr = float(obj["pred_relations"][oj][r])
+                    pprog.add_rule(rule, w_pr)
+            
+            # Object relations - negative (yet similar)
+            relations_neg = {
+                oj: set(np.where(per_obj > category_thresh)[0])
+                for oj, per_obj in obj["pred_relations_neg"].items()
+            }
+            for oj, per_obj in relations_neg.items():
+                for rn in per_obj:
+                    rule = Rule(
+                        head=Literal(f"-rel_{rn}", [(oi,False),(oj,False)]),
+                        body=[
+                            Literal("object", [(oi,False)]),
+                            Literal("object", [(oj,False)])
+                        ]
+                    )
+                    w_pr = float(obj["pred_relations_neg"][oj][r])
                     pprog.add_rule(rule, w_pr)
 
         # Solve with clingo to find the best K_M models of the program
@@ -254,17 +287,24 @@ class RecognitiveReasonerModule:
 
                             # Rule to query models_v with
                             q_rule = Rule(head=rule_head, body=rule_body)
-                            q_vars = tuple(occurring_args)
+                            q_vars = tuple((a, False) for a in occurring_args)
                             query_result, _ = models_v.query(q_vars, q_rule)
 
                             for ans, (_, score) in query_result.items():
                                 c_head = Literal("cons", wrap_args(f"r{ri}", int(score*100)))
                                 c_body = [
-                                    Literal("assign", wrap_args(x, e)) for x, e in zip(q_vars, ans)
-                                ] + [
-                                    Literal("denote", wrap_args(f"u{ui}_r{ri}_p{pi}", f"{d[1]}_{d[0]}"))
-                                    for pi, d in enumerate(vcs)
+                                    Literal("assign", wrap_args(x[0], e)) for x, e in zip(q_vars, ans)
                                 ]
+                                if head is not None:
+                                    c_body += [
+                                        Literal("denote", wrap_args(f"u{ui}_r{ri}_h{hi}", f"{d[1]}_{d[0]}"))
+                                        for hi, d in enumerate(head_vcs)
+                                    ]
+                                if body is not None:
+                                    c_body += [
+                                        Literal("denote", wrap_args(f"u{ui}_r{ri}_b{bi}", f"{d[1]}_{d[0]}"))
+                                        for bi, d in enumerate(body_vcs)
+                                    ]
 
                                 aprog.add_hard_rule(Rule(head=c_head, body=c_body))
             
@@ -299,6 +339,12 @@ class RecognitiveReasonerModule:
             sym = f"{p[1]}_{p[0]}"
             if p in lexicon.s2d:
                 for vc in lexicon.s2d[p]:
+                    pos_match = (p[1], vc[1]) == ("n", "cls") \
+                        or (p[1], vc[1]) == ("a", "att") \
+                        or (p[1], vc[1]) == ("r", "rel") \
+                        or (p[1], vc[1]) == ("v", "rel")
+                    if not pos_match: continue
+
                     den = f"{vc[1]}_{vc[0]}"
                     aprog.add_hard_rule(
                         Rule(head=Literal("may_denote", wrap_args(sym, den)))
