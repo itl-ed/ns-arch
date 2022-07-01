@@ -47,14 +47,15 @@ class SimulatedTeacher:
             for conc, imgs in self.img_candidates.items()
         }
 
+        random.seed(seed)
+        for imgs in self.img_candidates.values():
+            random.shuffle(imgs)
+
         # Exemplars for training
         self.training_exemplars = {
             conc: copy.deepcopy(imgs[:-test_set_size])
             for conc, imgs in self.img_candidates.items()
         }
-        random.seed(seed)
-        for imgs in self.training_exemplars.values():
-            random.shuffle(imgs)
 
         # Exemplars for testing
         self.test_exemplars = {
