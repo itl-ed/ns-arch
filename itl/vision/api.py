@@ -401,24 +401,14 @@ class VisionModule:
                     neg_exs = torch.zeros(0, D, device=dev)
 
                 if concept in exemplars.pos_exs:
-                    if len(exemplars.pos_exs[concept][0]) > 1:
-                        pos_proto = pos_exs.mean(dim=0)
-                        pos_inv_cov = torch.inverse(torch.cov(pos_exs.T))
-                    else:
-                        pos_proto = pos_exs[0]
-                        pos_inv_cov = None
+                    pos_proto = pos_exs.mean(dim=0)
                 else:
-                    pos_proto = pos_inv_cov = None
+                    pos_proto = None
                 
                 if concept in exemplars.neg_exs:
-                    if len(exemplars.neg_exs[concept][0]) > 1:
-                        neg_proto = neg_exs.mean(dim=0)
-                        neg_inv_cov = torch.inverse(torch.cov(neg_exs.T))
-                    else:
-                        neg_proto = neg_exs[0]
-                        neg_inv_cov = None
+                    neg_proto = neg_exs.mean(dim=0)
                 else:
-                    neg_proto = neg_inv_cov = None
+                    neg_proto = None
 
                 for oi in scene:
                     if cat_type == "cls":
