@@ -87,11 +87,11 @@ conda activate ${CONDA_ENV_NAME}
 echo "Moving input data to the compute node's scratch space: $SCRATCH_DISK"
 
 # input data directory path on the DFS
-proj_home=/home/${USER}/git/xitl
+proj_home=/home/${USER}/git/ns-arch
 src_path=${proj_home}/datasets
 
 # input data directory path on the scratch disk of the node
-dest_path=${SCRATCH_HOME}/xitl/datasets
+dest_path=${SCRATCH_HOME}/ns-arch/datasets
 mkdir -p ${dest_path}  # make it if required
 
 # Important notes about rsync:
@@ -128,7 +128,7 @@ echo "Command ran successfully!"
 # ======================================
 echo "Moving output data back to DFS"
 
-src_path=${SCRATCH_HOME}/xitl/output
+src_path=${SCRATCH_HOME}/ns-arch/output
 dest_path=${proj_home}/output
 mkdir -p ${dest_path}
 rsync --archive --update --compress --info=progress2 ${src_path}/ ${dest_path}

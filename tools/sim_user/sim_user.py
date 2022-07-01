@@ -5,14 +5,16 @@ rule-based pattern matching -- no cognitive architecture ongoing within the user
 import os
 import re
 import json
+import copy
 import random
 
 import numpy as np
+from detectron2.structures import BoxMode
 
 
 class SimulatedTeacher:
     
-    def __init__(self, opts, target_concepts, strat_feedback="min"):
+    def __init__(self, target_concepts, strat_feedback, test_set_size, seed):
         with open("datasets/tabletop/annotations.json") as data_file:
             self.data_annotation = json.load(data_file)
         with open("datasets/tabletop/metadata.json") as md_file:
@@ -42,6 +44,21 @@ class SimulatedTeacher:
                 (img, [oi for oi, is_inst in enumerate(is_insts) if is_inst])
                 for (img, is_insts) in imgs if any(is_insts)
             ]
+            for conc, imgs in self.img_candidates.items()
+        }
+
+        # Exemplars for training
+        self.training_exemplars = {
+            conc: copy.deepcopy(imgs[:-test_set_size])
+            for conc, imgs in self.img_candidates.items()
+        }
+        random.seed(seed)
+        for imgs in self.training_exemplars.values():
+            random.shuffle(imgs)
+
+        # Exemplars for testing
+        self.test_exemplars = {
+            conc: copy.deepcopy(imgs[-test_set_size:])
             for conc, imgs in self.img_candidates.items()
         }
 
@@ -76,12 +93,15 @@ class SimulatedTeacher:
         # exemplar of the target concept in front of the agent's vision sensor...
         # In this experiment, let's load an image containing an instance of the target
         # concept, and then present to the agent along with the question.
-        img_cands = self.img_candidates[self.current_target_concept]
-        sampled_img, instances = random.sample(img_cands, 1)[0]
+        img_cands = self.training_exemplars[self.current_target_concept]
+        sampled_img, instances = img_cands.pop()
         sampled_instance = random.sample(instances, 1)[0]
 
         img_f = sampled_img["file_name"]
         instance_bbox = np.array(sampled_img["annotations"][sampled_instance]["bbox"])
+        instance_bbox = BoxMode.convert(
+            instance_bbox[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
+        )[0]
 
         self.current_focus = (img_f, instance_bbox)
 
@@ -93,14 +113,18 @@ class SimulatedTeacher:
 
     def react(self, agent_reaction):
         """ Rule-based pattern matching for handling agent responses """
+        concept_string = self.current_target_concept.split(".")[0]
+        concept_string = concept_string.replace("_", " ")
 
-        if "I am not sure." in agent_reaction:
+        agent_utterances = [
+            content for act_type, content in agent_reaction
+            if act_type == "generate"
+        ]
+
+        if "I am not sure." in agent_utterances:
             # Agent answered it doesn't have any clue what the concept instance is;
             # provide correct label, even if taking minimalist strategy (after all,
             # learning cannot take place if we don't provide any!)
-            concept_string = self.current_target_concept.split(".")[0]
-            concept_string = concept_string.replace("_", " ")
-
             self.current_record["answered_concept"] = "N/A"
             self.current_record["answer_correct"] = False
             self.current_record["number_of_exemplars"] += 1
@@ -111,15 +135,12 @@ class SimulatedTeacher:
                 "pointing": { "this": [self.current_focus[1]] }
             }
 
-        elif any(utt.startswith("This is") for utt in agent_reaction):
+        elif any(utt.startswith("This is") for utt in agent_utterances):
             # Agent provided an answer what the instance is
-            agent_reaction = [
-                utt for utt in agent_reaction if utt.startswith("This is")
+            answer_utt = [
+                utt for utt in agent_utterances if utt.startswith("This is")
             ][0]
-            answer_content = re.findall(r"This is a (.*)\.$", agent_reaction)[0]
-
-            concept_string = self.current_target_concept.split(".")[0]
-            concept_string = concept_string.replace("_", " ")
+            answer_content = re.findall(r"This is a (.*)\.$", answer_utt)[0]
 
             self.current_record["answered_concept"] = answer_content
 
@@ -148,7 +169,8 @@ class SimulatedTeacher:
                 # Additional labelling provided if teacher strategy is 'greater' than [minimal
                 # feedback] or the concept hasn't ever been taught
                 taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
-                if self.current_target_concept not in taught_concepts:
+                is_novel_concept = concept_string not in taught_concepts
+                if self.strat_feedback != "min" or is_novel_concept:
                     response["l_usr_in"] += f" This is a {concept_string}."
                     response["pointing"]["this"].append(self.current_focus[1])
 

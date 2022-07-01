@@ -8,5 +8,6 @@ wandb/
 
 .env
 *.csv
+*.png
 *.txt
 !requirements.txt

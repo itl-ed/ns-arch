@@ -75,10 +75,11 @@ class RecognitiveReasonerModule:
         })
         # Accordingly exclude per-object relation predictions
         for obj in vis_scene.values():
-            obj["pred_relations"] = {
-                oi: per_obj for oi, per_obj in obj["pred_relations"].items()
-                if oi in vis_scene
-            }
+            if "pred_relations" in obj:
+                obj["pred_relations"] = {
+                    oi: per_obj for oi, per_obj in obj["pred_relations"].items()
+                    if oi in vis_scene
+                }
 
         # Build ASP program for processing perception outputs
         pprog = Program()
@@ -90,85 +91,51 @@ class RecognitiveReasonerModule:
             pprog.add_rule(rule, w_pr)
 
             # Object classes
-            classes = set(np.where(obj["pred_classes"] > category_thresh)[0])
-            if len(obj["pred_classes"]) > 0:
-                # Also add the max category even if score is below threshold
-                classes.add(obj["pred_classes"].argmax())
-            for c in classes:
-                rule = Rule(
-                    head=Literal(f"cls_{c}", [(oi,False)]),
-                    body=[Literal("object", [(oi,False)])]
-                )
-                w_pr = float(obj["pred_classes"][c])
-                pprog.add_rule(rule, w_pr)
-            
-            # Object classes - negative (yet similar)
-            classes_neg = set(np.where(obj["pred_classes_neg"] > category_thresh)[0])
-            for cn in classes_neg:
-                rule = Rule(
-                    head=Literal(f"-cls_{cn}", [(oi,False)]),
-                    body=[Literal("object", [(oi,False)])]
-                )
-                w_pr = float(obj["pred_classes_neg"][cn])
-                pprog.add_rule(rule, w_pr)
+            if "pred_classes" in obj:
+                classes = set(np.where(obj["pred_classes"] > category_thresh)[0])
+                if len(obj["pred_classes"]) > 0:
+                    # Also add the max category even if score is below threshold
+                    classes.add(obj["pred_classes"].argmax())
+                for c in classes:
+                    rule = Rule(
+                        head=Literal(f"cls_{c}", [(oi,False)]),
+                        body=[Literal("object", [(oi,False)])]
+                    )
+                    w_pr = float(obj["pred_classes"][c])
+                    pprog.add_rule(rule, w_pr)
 
             # Object attributes
-            attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
-            if len(obj["pred_attributes"]) > 0:
-                attributes.add(obj["pred_attributes"].argmax())
-            for a in attributes:
-                rule = Rule(
-                    head=Literal(f"att_{a}", [(oi,False)]),
-                    body=[Literal("object", [(oi,False)])]
-                )
-                w_pr = float(obj["pred_attributes"][a])
-                pprog.add_rule(rule, w_pr)
-            
-            # Object attributes - negative (yet similar)
-            attributes_neg = set(np.where(obj["pred_attributes_neg"] > category_thresh)[0])
-            for an in attributes_neg:
-                rule = Rule(
-                    head=Literal(f"-att_{an}", [(oi,False)]),
-                    body=[Literal("object", [(oi,False)])]
-                )
-                w_pr = float(obj["pred_attributes_neg"][an])
-                pprog.add_rule(rule, w_pr)
-            
+            if "pred_attributes" in obj:
+                attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
+                if len(obj["pred_attributes"]) > 0:
+                    attributes.add(obj["pred_attributes"].argmax())
+                for a in attributes:
+                    rule = Rule(
+                        head=Literal(f"att_{a}", [(oi,False)]),
+                        body=[Literal("object", [(oi,False)])]
+                    )
+                    w_pr = float(obj["pred_attributes"][a])
+                    pprog.add_rule(rule, w_pr)
+
             # Object relations
-            relations = {
-                oj: set(np.where(per_obj > category_thresh)[0])
-                for oj, per_obj in obj["pred_relations"].items()
-            }
-            for oj, per_obj in relations.items():
-                if len(obj["pred_relations"][oj]) > 0:
-                    per_obj.add(obj["pred_relations"][oj].argmax())
-                for r in per_obj:
-                    rule = Rule(
-                        head=Literal(f"rel_{r}", [(oi,False),(oj,False)]),
-                        body=[
-                            Literal("object", [(oi,False)]),
-                            Literal("object", [(oj,False)])
-                        ]
-                    )
-                    w_pr = float(obj["pred_relations"][oj][r])
-                    pprog.add_rule(rule, w_pr)
-            
-            # Object relations - negative (yet similar)
-            relations_neg = {
-                oj: set(np.where(per_obj > category_thresh)[0])
-                for oj, per_obj in obj["pred_relations_neg"].items()
-            }
-            for oj, per_obj in relations_neg.items():
-                for rn in per_obj:
-                    rule = Rule(
-                        head=Literal(f"-rel_{rn}", [(oi,False),(oj,False)]),
-                        body=[
-                            Literal("object", [(oi,False)]),
-                            Literal("object", [(oj,False)])
-                        ]
-                    )
-                    w_pr = float(obj["pred_relations_neg"][oj][r])
-                    pprog.add_rule(rule, w_pr)
+            if "pred_relations" in obj:
+                relations = {
+                    oj: set(np.where(per_obj > category_thresh)[0])
+                    for oj, per_obj in obj["pred_relations"].items()
+                }
+                for oj, per_obj in relations.items():
+                    if len(obj["pred_relations"][oj]) > 0:
+                        per_obj.add(obj["pred_relations"][oj].argmax())
+                    for r in per_obj:
+                        rule = Rule(
+                            head=Literal(f"rel_{r}", [(oi,False),(oj,False)]),
+                            body=[
+                                Literal("object", [(oi,False)]),
+                                Literal("object", [(oj,False)])
+                            ]
+                        )
+                        w_pr = float(obj["pred_relations"][oj][r])
+                        pprog.add_rule(rule, w_pr)
 
         # Solve with clingo to find the best K_M models of the program
         prog += pprog
@@ -230,7 +197,7 @@ class RecognitiveReasonerModule:
 
         # Understood dialogue record contents
         occurring_preds = set()
-        for ui, (_, _, (rules, query), _) in enumerate(dialogue_state["record"]):
+        for ui, (_, (rules, query), _) in enumerate(dialogue_state["record"]):
             if rules is not None:
                 for ri, rule in enumerate(rules):
                     head, body, _ = rule
@@ -463,7 +430,7 @@ class RecognitiveReasonerModule:
         result = []
         a_map = lambda args: [self.value_assignment.get(a, a) for a in args]
 
-        for ui, (_, _, (rules, query), _) in enumerate(dialogue_state["record"]):
+        for ui, (_, (rules, query), _) in enumerate(dialogue_state["record"]):
             # If the utterance contains an unresolved neologism, give up translation
             # for the time being
             contains_unresolved_neologism = any([

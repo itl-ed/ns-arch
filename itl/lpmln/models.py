@@ -215,12 +215,13 @@ class Models:
                             factors_enums.append({lit_p})
                         else:
                             factors_enums.append({lit_n})
-            
-            for model_choices in product(*factors_enums):
-                yield (
-                    frozenset.union(*[mc[0] for mc in model_choices]),
-                    reduce(lambda p1,p2: p1*p2, [mc[1] for mc in model_choices])
-                )
+
+            if len(factors_enums) > 0:
+                for model_choices in product(*factors_enums):
+                    yield (
+                        frozenset.union(*[mc[0] for mc in model_choices]),
+                        reduce(lambda p1,p2: p1*p2, [mc[1] for mc in model_choices])
+                    )
 
         if self.outcomes is not None:
             for o in self.outcomes:

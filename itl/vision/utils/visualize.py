@@ -55,7 +55,7 @@ def visualize_sg_predictions(img, scene, predicates):
         }
     else:
         rel_labels = {
-            oi: { obj2: ("n/a", float("nan")) for obj2 in scene[oi]["pred_relations"] }
+            oi: { obj2: ("n/a", float("nan")) for obj2 in scene if oi != obj2 }
             for oi in scene
         }
 

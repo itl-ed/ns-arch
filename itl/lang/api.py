@@ -52,7 +52,7 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names = {i: i for i in self.dialogue.referents["env"]}
 
-    def understand(self, parse, vis_raw, ui=None, pointing=None):
+    def understand(self, parse, vis_raw, pointing=None):
         """
         Parse language input into MRS, process into ASP-compatible form, and then
         update dialogue state. Also return any new agenda items.
@@ -61,8 +61,7 @@ class LanguageModule:
         utterance, indicating the reference (represented as bbox) made by the n'th
         occurrence of linguistic token. Mostly for programmed experiments.
         """
-        if ui is None:
-            ui = len(self.dialogue.record)  # New utterance index
+        ui = len(self.dialogue.record)  # Utterance index
         agenda = []
 
         # Processing natural language into appropriate logical form
@@ -274,11 +273,8 @@ class LanguageModule:
                 info = _map_and_format(info, ref_map, f"u{ui}")
                 info_aux = _map_and_format(info_aux, ref_map, f"u{ui}")
 
-                new_record = ("U", "|", (info+info_aux, None), parse["raw"])
-                if ui >= len(self.dialogue.record):
-                    self.dialogue.record.append(new_record)    # Add new record
-                else:
-                    self.dialogue.record[ui] = new_record      # Replace existing record
+                new_record = ("U", (info+info_aux, None), parse["raw"])
+                self.dialogue.record.append(new_record)    # Add new record
 
             elif parse["utt_type"][ev_id] == "ques":
                 # Interrogatives
@@ -352,11 +348,8 @@ class LanguageModule:
                     info = None
                 query = _map_and_format(query, ref_map, f"u{ui}")
 
-                new_record = ("U", "?", (info, query), parse["raw"])
-                if ui >= len(self.dialogue.record):
-                    self.dialogue.record.append(new_record)    # Add new record
-                else:
-                    self.dialogue.record[ui] = new_record      # Replace existing record
+                new_record = ("U", (info, query), parse["raw"])
+                self.dialogue.record.append(new_record)    # Add new record
                 self.dialogue.unanswered_Q.add(ui)
 
             elif parse["utt_type"][ev_id] == "comm":

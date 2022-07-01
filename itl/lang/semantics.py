@@ -63,6 +63,9 @@ class SemanticParser:
                     # Predicate not covered by parser lexicon
                     lemma, pos = lemma.split("/")
 
+                    # Multi-clause input occasionally includes '.' after unknown nouns
+                    lemma = lemma.strip(".")
+
                     # Translate the tag obtained from the POS tagger to corresponding
                     # MRS POS code
                     if pos.startswith("n"):
@@ -115,9 +118,14 @@ class SemanticParser:
         parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
         
         # SF supposedly stands for 'sentential force'
-        for var, properties in parsed.variables.items():
-            if "SF" in properties:
-                parse["utt_type"][var] = properties["SF"]
+        index_rel = parse["relations"]["by_id"][parsed.index]
+        if index_rel["predicate"] == "implicit_conj":
+            arg1 = index_rel["args"][1]
+            arg2 = index_rel["args"][2]
+            parse["utt_type"][arg1] = parsed.variables[arg1]["SF"]
+            parse["utt_type"][arg2] = parsed.variables[arg2]["SF"]
+        else:
+            parse["utt_type"][parsed.index] = parsed.variables[parsed.index]["SF"]
 
         # Record index (top variable)
         parse["index"] = parsed.index

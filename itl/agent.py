@@ -5,6 +5,7 @@ import math
 import readline
 import rlcompleter
 
+import cv2
 import numpy as np
 from detectron2.structures import BoxMode
 
@@ -139,9 +140,6 @@ class ITLAgent:
                 elif usr_in == "exit":
                     print(f"Sys> Terminating...")
                     quit()
-                elif usr_in == "Correct.":
-                    # Positive feedback provided
-                    break
                 else:
                     self.lang.new_input = self.lang.semantic.nl_parse(usr_in)
                     break
@@ -172,6 +170,9 @@ class ITLAgent:
         # For showing visual UI on only the first time
         vis_ui_on = self.vis_ui_on
 
+        # Index of latest utterance
+        ui_last = len(self.lang.dialogue.record)
+
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
         vision_model_updated = False    # Whether learning happened at neural-level
@@ -184,7 +185,7 @@ class ITLAgent:
             if self.vision.new_input is not None or vision_model_updated:
                 # Ground raw visual perception with scene graph generation module
                 self.vision.predict(
-                    self.vision.last_input,
+                    self.vision.last_input, exemplars=self.lt_mem.exemplars,
                     bboxes=self.vision.last_bboxes, visualize=vis_ui_on
                 )
                 vis_ui_on = False
@@ -199,19 +200,17 @@ class ITLAgent:
                 # May consider fulfilling this later)
                 self.doubt_no_more = set()
 
-            # New index of utterance to be added to discourse record, if ever
-            ui = len(self.lang.dialogue.record)
-
             # Understand the user input in the context of the dialogue
-            if self.lang.new_input is not None:
+            if self.lang.new_input is not None and self.lang.new_input["raw"] != "Correct.":
+                self.lang.dialogue.record = self.lang.dialogue.record[:ui_last]
                 self.lang.understand(
-                    self.lang.new_input, self.vision.last_input, ui=ui, pointing=pointing
+                    self.lang.new_input, self.vision.last_input, pointing=pointing
                 )
 
             if self.vision.scene is not None:
                 # If some discourse referent is hard-assigned to some entity, boost its
                 # objectness score so that it's captured during sensemaking
-                for ent in self.lang.dialogue.assignment_hard.values():
+                for ent in set(self.lang.dialogue.assignment_hard.values()):
                     if ent in self.vision.scene:
                         self.vision.scene[ent]["pred_objectness"] = np.array([1.0])
 
@@ -229,7 +228,10 @@ class ITLAgent:
                     ]
 
                     # Predict on latest raw data stored
-                    self.vision.predict(self.vision.last_input, bboxes=bboxes)
+                    self.vision.predict(
+                        self.vision.last_input, exemplars=self.lt_mem.exemplars,
+                        bboxes=bboxes
+                    )
 
             ###################################################################
             ##       Sensemaking via synthesis of perception+knowledge       ##
@@ -272,7 +274,7 @@ class ITLAgent:
                         if all(is_var for _, is_var in r.terms()):
                             # Integrate the rule into KB by adding (for now we won't
                             # worry about intra-KB consistency, etc.)
-                            provenance = dialogue_state["record"][ui][3]
+                            provenance = dialogue_state["record"][ui][2]
                             kb_updated |= self.lt_mem.kb.add(r, U_W_PR, provenance)
 
                         # Test against vision-only sensemaking result to identify any
@@ -318,7 +320,7 @@ class ITLAgent:
 
                     # Expand corresponding visual concept inventory
                     concept_ind = self.vision.add_concept(cat_type)
-                    novel_concept = (cat_type, concept_ind)
+                    novel_concept = (concept_ind, cat_type)
 
                     # Acquire novel concept by updating lexicon (and vision.predicates)
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
@@ -328,7 +330,7 @@ class ITLAgent:
 
                     ui = int(tok[0].strip("u"))
                     ri = int(tok[1].strip("r"))
-                    rule_head, rule_body, _ = dialogue_state["record"][ui][2][0][ri]
+                    rule_head, rule_body, _ = dialogue_state["record"][ui][1][0][ri]
 
                     if rule_body is None:
                         # Labelled exemplar provided; add new concept exemplars to
@@ -337,6 +339,18 @@ class ITLAgent:
                         args = [
                             self.recognitive.value_assignment[arg] for arg in rule_head[0][2]
                         ]
+
+                        # Image patch
+                        ex_bbox = (float("inf"), float("inf"), -float("inf"), -float("inf"))
+                        for a in args:
+                            a_bbox = self.lang.dialogue.referents["env"][a]["bbox"]
+                            ex_bbox = (
+                                int(min(ex_bbox[0], a_bbox[0])), int(min(ex_bbox[1], a_bbox[1])),
+                                int(max(ex_bbox[2], a_bbox[2])), int(max(ex_bbox[3], a_bbox[3]))
+                            )
+                        ex_img = self.vision.last_raw[ex_bbox[1]:ex_bbox[3], ex_bbox[0]:ex_bbox[2]]
+                        ex_img = cv2.resize(ex_img, dsize=(128,128))
+
                         if cat_type == "cls":
                             f_vec = self.vision.f_vecs[0][args[0]]
                         elif cat_type == "att":
@@ -345,7 +359,9 @@ class ITLAgent:
                             assert cat_type == "rel"
                             f_vec = self.vision.f_vecs[2][args[0]][args[1]]
 
-                        self.lt_mem.exemplars.add_pos(novel_concept, f_vec.cpu().numpy())
+                        self.lt_mem.exemplars.add_pos(
+                            novel_concept, f_vec.cpu().numpy(), ex_img
+                        )
 
                         # Update the category code parameter in the vision model's predictor
                         # head using the new set of exemplars
@@ -451,7 +467,7 @@ class ITLAgent:
 
         rule, _ = mismatch
 
-        if self.opts.strat_mismatch == "zero_init":
+        if self.opts.strat_mismatch == "zeroInit":
             # Zero initiative from agent's end; do not ask any further question, simply
             # perform few-shot vision model updates (if possible) and acknowledge "OK"
             if rule.is_grounded() and len(rule.literals())==1:
@@ -468,6 +484,17 @@ class ITLAgent:
                 cat_ind = int(cat_ind)
                 args = [a for a, _ in atom.args]
 
+                # Image patch
+                ex_bbox = (float("inf"), float("inf"), -float("inf"), -float("inf"))
+                for a in args:
+                    a_bbox = self.lang.dialogue.referents["env"][a]["bbox"]
+                    ex_bbox = (
+                        int(min(ex_bbox[0], a_bbox[0])), int(min(ex_bbox[1], a_bbox[1])),
+                        int(max(ex_bbox[2], a_bbox[2])), int(max(ex_bbox[3], a_bbox[3]))
+                    )
+                ex_img = self.vision.last_raw[ex_bbox[1]:ex_bbox[3], ex_bbox[0]:ex_bbox[2]]
+                ex_img = cv2.resize(ex_img, dsize=(128,128))
+
                 # Fetch current score for the asserted fact
                 if cat_type == "cls":
                     f_vec = self.vision.f_vecs[0][args[0]]
@@ -477,11 +504,13 @@ class ITLAgent:
                     assert cat_type == "rel"
                     f_vec = self.vision.f_vecs[2][args[0]][args[1]]
 
-                imperfect_concept = (cat_type, cat_ind)
+                imperfect_concept = (cat_ind, cat_type)
 
                 # Add new concept exemplars to memory, as feature vectors at the
                 # penultimate layer right before category prediction heads
-                exemplar_add_func(imperfect_concept, f_vec.cpu().numpy())
+                exemplar_add_func(
+                    imperfect_concept, f_vec.cpu().numpy(), ex_img
+                )
 
                 # Update the category code parameter in the vision model's predictor
                 # head using the new set of exemplars
@@ -494,7 +523,8 @@ class ITLAgent:
                 # few-shot learning capability is perfect)
                 self.doubt_no_more.add(rule)
 
-            self.practical.agenda.append(("acknowledge", None))
+            if ("acknowledge", None) not in self.practical.agenda:
+                self.practical.agenda.append(("acknowledge", None))
 
         elif self.opts.strat_mismatch == "request_exmp":
             raise NotImplementedError
@@ -538,7 +568,7 @@ class ITLAgent:
         self.lang.dialogue.unanswered_Q.remove(ui)
 
         dialogue_state = self.lang.dialogue.export_as_dict()
-        _, _, _, orig_utt = dialogue_state["record"][ui]
+        _, _, orig_utt = dialogue_state["record"][ui]
 
         translated = self.recognitive.translate_dialogue_content(dialogue_state)
 

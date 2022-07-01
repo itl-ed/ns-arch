@@ -21,14 +21,20 @@ class Exemplars:
     def __getitem__(self, item):
         return { "pos": self.pos_exs.get(item), "neg": self.neg_exs.get(item) }
 
-    def add_pos(self, concept, f_vec):
+    def add_pos(self, concept, f_vec, provenance):
         if concept in self.pos_exs:
-            self.pos_exs[concept] = np.concatenate((self.pos_exs[concept], f_vec[None]))
+            self.pos_exs[concept] = (
+                np.concatenate((self.pos_exs[concept][0], f_vec[None])),
+                np.concatenate((self.pos_exs[concept][1], provenance[None])),
+            )
         else:
-            self.pos_exs[concept] = f_vec[None]
+            self.pos_exs[concept] = (f_vec[None], provenance[None])
 
-    def add_neg(self, concept, f_vec):
+    def add_neg(self, concept, f_vec, provenance):
         if concept in self.neg_exs:
-            self.neg_exs[concept] = np.concatenate((self.neg_exs[concept], f_vec[None]))
+            self.neg_exs[concept] = (
+                np.concatenate((self.neg_exs[concept][0], f_vec[None])),
+                np.concatenate((self.neg_exs[concept][1], provenance[None])),
+            )
         else:
-            self.neg_exs[concept] = f_vec[None]
+            self.neg_exs[concept] = (f_vec[None], provenance[None])

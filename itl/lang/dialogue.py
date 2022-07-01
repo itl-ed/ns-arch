@@ -19,11 +19,10 @@ class DialogueManager:
         self.assignment_hard = {}  # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}   # Store mapping from symbolic name to entity
 
-        # Each record is a 4-tuple of:
-        #   1) speaker: user ("U") or agent ("A"),
-        #   2) utterance type: proposition ("|"), question ("?") or command ("!")
-        #   3) logical form of utterance content
-        #   4) original user input string
+        # Each record is a 3-tuple of:
+        #   1) speaker: user ("U") or agent ("A")
+        #   2) logical form of utterance content
+        #   3) original user input string
         self.record = []
 
         self.unanswered_Q = set()

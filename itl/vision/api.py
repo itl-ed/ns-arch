@@ -12,6 +12,8 @@ from itertools import chain
 import cv2
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
 import detectron2.data.transforms as T
 import pytorch_lightning as pl
 import matplotlib.pyplot as plt
@@ -126,11 +128,6 @@ class VisionModule:
                 )
                 setattr(predictor_heads, f"{cat_type}_codes", empty_codes_layer)
 
-                empty_neg_codes_layer = nn.Linear(
-                    predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
-                )
-                setattr(predictor_heads, f"{cat_type}_neg_codes", empty_neg_codes_layer)
-            
             self.predicates = {"cls": [], "att": [], "rel": []}
             self.predicates_freq = {"cls": [], "att": [], "rel": []}
 
@@ -139,6 +136,7 @@ class VisionModule:
 
         # Latest raw vision perception, prediction outcomes, feature vectors for RoIs
         self.last_input = None
+        self.last_raw = None
         self.last_bboxes = None
         self.scene = None
         self.f_vecs = None
@@ -317,7 +315,7 @@ class VisionModule:
         trainer.predict(self.model, self.dm)
 
     @has_model
-    def predict(self, image, bboxes=None, visualize=False):
+    def predict(self, image, exemplars=None, bboxes=None, visualize=False):
         """
         Model inference in either one of two modes: 1) full scene graph generation mode,
         where the module is only given an image and needs to return its estimation of
@@ -340,9 +338,11 @@ class VisionModule:
         # Image data
         if isinstance(image, str):
             inp = { "file_name": image }
+            self.last_input = image
         else:
             image = image[:, :, [2,1,0]]
             inp = { "image": image }
+            self.last_input = image
 
         # With/without boxes provided
         if bboxes is None:
@@ -357,7 +357,8 @@ class VisionModule:
 
         f_vecs_org = ({}, {}, {})
 
-        pred_value_fields = output[0].get_fields()
+        # pred_value_fields = output[0].get_fields()
+        pred_value_fields = ["pred_objectness", "pred_boxes"]
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
         # Label and reorganize scene graph and feature vectors into a more intelligible
@@ -367,28 +368,98 @@ class VisionModule:
             for i, obj in enumerate(pred_values)
         }
         for i, (oi, obj) in enumerate(scene.items()):
-            obj["pred_relations"] = {
-                f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
-                if oi != f"o{j}"
-            }
-            obj["pred_relations_neg"] = {
-                f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations_neg"])
-                if oi != f"o{j}"
-            }
-
             f_vecs_org[0][oi] = f_vecs[0][i]
             f_vecs_org[1][oi] = f_vecs[1][i]
             f_vecs_org[2][oi] = {
                 f"o{j}": f_vecs[2][i][j] for j in range(len(scene))
                 if oi != f"o{j}"
             }
+        #     obj["pred_relations"] = {
+        #         f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
+        #         if oi != f"o{j}"
+        #     }
+        
+        if exemplars is not None:
+            # Computing few shot exemplar-based scores
+            dev = self.model.base_model.device
+            predictor_heads = self.model.base_model.roi_heads.box_predictor
+            D = predictor_heads.compress_cls.out_features
+
+            for concept in set(exemplars.pos_exs) | set(exemplars.neg_exs):
+                # Prepare values needed to compute distance to pos/neg prototypes (if
+                # exemplars are present)
+                cat_ind, cat_type = concept
+
+                if concept in exemplars.pos_exs:
+                    pos_exs = torch.tensor(exemplars.pos_exs[concept][0], device=dev)
+                else:
+                    pos_exs = torch.zeros(0, D, device=dev)
+
+                if concept in exemplars.neg_exs:
+                    neg_exs = torch.tensor(exemplars.neg_exs[concept][0], device=dev)
+                else:
+                    neg_exs = torch.zeros(0, D, device=dev)
+
+                if concept in exemplars.pos_exs:
+                    if len(exemplars.pos_exs[concept][0]) > 1:
+                        pos_proto = pos_exs.mean(dim=0)
+                        pos_inv_cov = torch.inverse(torch.cov(pos_exs.T))
+                    else:
+                        pos_proto = pos_exs[0]
+                        pos_inv_cov = None
+                else:
+                    pos_proto = pos_inv_cov = None
+                
+                if concept in exemplars.neg_exs:
+                    if len(exemplars.neg_exs[concept][0]) > 1:
+                        neg_proto = neg_exs.mean(dim=0)
+                        neg_inv_cov = torch.inverse(torch.cov(neg_exs.T))
+                    else:
+                        neg_proto = neg_exs[0]
+                        neg_inv_cov = None
+                else:
+                    neg_proto = neg_inv_cov = None
+
+                for oi in scene:
+                    if cat_type == "cls":
+                        f_vec_cat = f_vecs_org[0][oi]
+                    else:
+                        pass
+
+                    # Use squared Euclidean distance (L2 norm)
+                    if pos_proto is not None:
+                        pos_dist = torch.linalg.norm(f_vec_cat-pos_proto).item()
+                    else:
+                        pos_dist = float("inf")
+                    
+                    if neg_proto is not None:
+                        neg_dist = torch.linalg.norm(f_vec_cat-neg_proto).item()
+                    else:
+                        neg_dist = float("inf")
+                    
+                    fs_score = F.softmax(torch.tensor([-pos_dist,-neg_dist]), dim=0)
+                    fs_score = fs_score[0].item()
+
+                    if cat_type == "cls":
+                        if "pred_classes" in scene[oi]:
+                            C = len(scene[oi]["pred_classes"])
+                            if cat_ind >= C:
+                                scene[oi]["pred_classes"] = np.concatenate((
+                                    scene[oi]["pred_classes"], np.zeros(cat_ind+1-C)
+                                ))
+                        else:
+                            scene[oi]["pred_classes"] = np.zeros(cat_ind+1)
+                        
+                        scene[oi]["pred_classes"][cat_ind] = fs_score
+                    else:
+                        pass
 
         # Reformat & resize input image
         img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
         img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
 
-        # Store input arg values in case they are needed later
-        self.last_input = img
+        # Store in case they are needed later
+        self.last_raw = img
         self.last_bboxes = [
             {
                 "bbox": ent["pred_boxes"],
@@ -428,21 +499,19 @@ class VisionModule:
         """
         predictor_heads = self.model.base_model.roi_heads.box_predictor
 
-        # For standard codes & neg codes
-        for infix in ["", "_neg"]:
-            cat_predictor = getattr(predictor_heads, f"{cat_type}{infix}_codes")
+        cat_predictor = getattr(predictor_heads, f"{cat_type}_codes")
 
-            D = cat_predictor.in_features       # Code dimension
-            C = cat_predictor.out_features      # Number of categories (concepts)
+        D = cat_predictor.in_features       # Code dimension
+        C = cat_predictor.out_features      # Number of categories (concepts)
 
-            # Expanded category predictor head with novel concept added
-            new_cat_predictor = nn.Linear(
-                D, C+1, bias=False, device=cat_predictor.weight.device
-            )
-            new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
-            new_cat_predictor.weight.data[C] = 0
+        # Expanded category predictor head with novel concept added
+        new_cat_predictor = nn.Linear(
+            D, C+1, bias=False, device=cat_predictor.weight.device
+        )
+        new_cat_predictor.weight.data[:C] = cat_predictor.weight.data
+        new_cat_predictor.weight.data[C] = 0
 
-            setattr(predictor_heads, f"{cat_type}{infix}_codes", new_cat_predictor)
+        setattr(predictor_heads, f"{cat_type}_codes", new_cat_predictor)
 
         # Keep category count up to date
         if cat_type == "cls":
@@ -474,7 +543,7 @@ class VisionModule:
             mix_ratio: Mixing ratio between old code vs. new code; 1.0 corresponds to total
                 update with new code
         """
-        cat_type, cat_ind = concept
+        cat_ind, cat_type = concept
 
         predictor_heads = self.model.base_model.roi_heads.box_predictor
         code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
@@ -483,11 +552,11 @@ class VisionModule:
             if pol == "pos":
                 target_layer = f"{cat_type}_codes"
             else:
-                assert pol == "neg"
-                target_layer = f"{cat_type}_neg_codes"
+                continue
 
             if vecs is not None:
                 with torch.no_grad():
+                    vecs = vecs[0]
                     vecs = torch.tensor(vecs, device=self.model.base_model.device)
 
                     # Weight average of codes computed from each vector, with heavier

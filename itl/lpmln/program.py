@@ -243,6 +243,10 @@ class Program:
                 aux_i += 1
                 grounded_rules_by_head[aux_i].add((gr_rule, w_pr, ri))
 
+                aux_lit = Literal("con_aux", args=[(ri, False)])
+                atoms_map[aux_lit] = aux_i
+                atoms_inv_map[aux_i] = aux_lit
+
                 for gb in gr_rule.body:
                     gb_i = atoms_map[gb]
                     dep_graph.add_node(gb_i)
@@ -272,15 +276,16 @@ class Program:
             set.union(*[grounded_rules_by_head[a] for a in comp.nodes()])
             for comp in comps
         ]
-        grounded_rules_per_comp = [
-            FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grs_c])
-            for grs_c in grounded_rules_per_comp
-        ]
 
         # Try exploiting memoized solutions by assembling from provided_mem
         if len(provided_mem) > 0:
+            gr_rules_comp_frozen = [
+                FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grs_c])
+                for grs_c in grounded_rules_per_comp
+            ]
+
             retrieved = []
-            for gr_c in grounded_rules_per_comp:
+            for gr_c in gr_rules_comp_frozen:
                 if gr_c not in provided_mem: break
                 retrieved.append(provided_mem[gr_c])
             
@@ -288,7 +293,7 @@ class Program:
                 # Successfully recovered
                 models = Models(retrieved)
                 memoized_models = {
-                    sum(grounded_rules_per_comp, FrozenMultiset()): models,
+                    sum(gr_rules_comp_frozen, FrozenMultiset()): models,
                     **provided_mem
                 }
                 return models, memoized_models
@@ -303,7 +308,9 @@ class Program:
 
             if len(provided_mem) > 0:
                 # Check if memoized solution exists for the component
-                gr_rules_fms = FrozenMultiset(grounded_rules_relevant)
+                gr_rules_fms = FrozenMultiset([
+                    (gr_rule, w_pr) for gr_rule, w_pr, _ in grounded_rules_relevant
+                ])
                 if gr_rules_fms in provided_mem:
                     # Model found
                     indep_trees.append(provided_mem[gr_rules_fms])
@@ -311,7 +318,9 @@ class Program:
                     continue
 
             # Try splitting the program component
-            bottom, top = self._split(comp, atoms_map, grounded_rules_relevant)
+            bottom, top, found_split = self._split(
+                comp, atoms_map, grounded_rules_relevant
+            )
             is_trivial_split = top is None
 
             # Check whether the split bottom only consists of body-less grounded rules
@@ -358,7 +367,7 @@ class Program:
                     models = [
                         (
                             [Literal.from_clingo_symbol(a) for a in atoms],
-                            sum([a.arguments[1].number / SCALE_PREC for a in unsats])
+                            sum([-a.arguments[1].number / SCALE_PREC for a in unsats])
                         )
                         for atoms, unsats in models
                     ]
@@ -432,8 +441,8 @@ class Program:
                         (
                             {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in ss},
                             {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in ss},
-                            lp
-                        ) for ss, lp in subsets
+                            pr
+                        ) for ss, pr in subsets
                     ]
 
                     # Combine the results with hard-weighted facts
@@ -441,15 +450,47 @@ class Program:
                         (
                             pos_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==1.0},
                             neg_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==0.0},
-                            lp
+                            pr
                         )
-                        for pos_atoms, neg_atoms, lp in bottom_models
+                        for pos_atoms, neg_atoms, pr in bottom_models
                     ]
 
                 else:
                     # Solve the bottom (== comp) with clingo and return answer sets (with
                     # associated probabilities)
-                    raise NotImplementedError
+                    bottom_atoms = {atoms_inv_map[n] for n in found_split}
+
+                    ctl = clingo.Control(["--warn=none"])
+                    ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
+                    ctl.ground([("base", [])])
+                    ctl.configuration.solve.models = 0
+
+                    bottom_models = []
+                    with ctl.solve(yield_=True) as solve_gen:
+                        for m in solve_gen:
+                            bottom_models.append(m.symbols(atoms=True))
+                            if solve_gen.get().unsatisfiable: break
+
+                    # Process models to extract true atoms along with model weights
+                    bottom_models = [
+                        ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
+                        for m in bottom_models
+                    ]
+                    bottom_models = [
+                        (
+                            [Literal.from_clingo_symbol(a) for a in atoms],
+                            sum([-a.arguments[1].number / SCALE_PREC for a in unsats])
+                        )
+                        for atoms, unsats in bottom_models
+                    ]
+                    logZ = reduce(np.logaddexp, [weight for _, weight in bottom_models])
+                    bottom_models = [
+                        (set(atoms), np.exp(weight-logZ)) for atoms, weight in bottom_models
+                    ]
+                    bottom_models = [
+                        # Positive atoms, negative atoms, probability
+                        (model, bottom_atoms-model, pr) for model, pr in bottom_models
+                    ]
 
                 # Solve reduced program top for each discovered model; first compute program
                 # reduction by the common atoms
@@ -613,7 +654,7 @@ class Program:
                 # Find the lowest rule (i.e. first find) that needs to be included in splitting
                 # bottom; i.e. rule with a head in current state, and any of the other atoms
                 # not in current state
-                for r, _ in grounded_rules_rel:
+                for r, _, _ in grounded_rules_rel:
                     # Auxiliary heads of integrity constraints are never sources, and don't 
                     # need to be included minimal splitting sets.
                     if len(r.head) == 0:
@@ -659,12 +700,17 @@ class Program:
         bottom_rules = []; top_rules = []
 
         # Add each grounded rule to either top or bottom
-        for gr_rule, w_pr in grounded_rules_rel:
+        for gr_rule, w_pr, ri in grounded_rules_rel:
 
             # Check if this grounded rule should enter bottom or top
             add_to_top = False
             if not is_trivial_split:
-                for l in gr_rule.literals():
+                literals = gr_rule.literals()
+                if len(gr_rule.head) == 0:
+                    # Integrity constraint, account for auxiliary literal
+                    literals.add(Literal("con_aux", args=[(ri, False)]))
+
+                for l in literals:
                     if atoms_map[l.as_atom()] not in found_split:
                         add_to_top = True
                         break
@@ -680,7 +726,7 @@ class Program:
         bottom_program = Program(bottom_rules)
         top_program = Program(top_rules) if len(top_rules) > 0 else None
 
-        return bottom_program, top_program
+        return bottom_program, top_program, found_split
         
     def _reduce(self, pos_atoms, neg_atoms):
         """ Return the program obtained by reducing self with given values of atoms """
