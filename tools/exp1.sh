@@ -1,7 +1,7 @@
 #!/bin/bash
 declare -a Difficulty=("base" "easy")
 declare -a TeacherStrat=("min" "med")
-mkdir -p output
+mkdir -p "$3/ns-arch/output"
 
 for diff in ${Difficulty[@]}
 do
