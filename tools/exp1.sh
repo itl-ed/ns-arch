@@ -9,7 +9,7 @@ do
     do
         for ((i=$1;i<=$2;i++))
         do
-            COMM="python tools/exp1.py -ic -lp wandb://jpstyle/vision_vg_scenegraph/1eg0ctph/checkpoints/epoch\=9-distro.ckpt -x1df $diff -x1tf $tstrat -x1rs $i > output/log_${diff}_${tstrat}_zeroInit_${i}.txt -op 'SCRATCHHOME/ns-arch/output'"
+            COMM="python tools/exp1.py -ic -lp wandb://jpstyle/vision_vg_scenegraph/1eg0ctph/checkpoints/epoch\=9-distro.ckpt -x1df $diff -x1tf $tstrat -x1rs $i -op 'SCRATCHHOME/ns-arch/output' > SCRATCHHOME/ns-arch/log_${diff}_${tstrat}_zeroInit_${i}.txt"
             eval $COMM
         done
     done
