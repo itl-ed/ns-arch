@@ -106,7 +106,7 @@ if __name__ == "__main__":
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 
-    with open(f"output/curve_{tail}.csv", "w") as out_csv:
+    with open(os.join(opts.output_dir_path, f"curve_{tail}.csv"), "w") as out_csv:
         # Summarize ITL interaction records stored in the simulated user object
         print("")
         print("Sys> Experiment finished. Result:")
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     data = np.zeros([C,C])
     concepts_ordered = list(exam_result)
 
-    with open(f"output/conf_mat_{tail}.csv", "w") as out_csv:
+    with open(os.join(opts.output_dir_path, f"conf_mat_{tail}.csv"), "w") as out_csv:
         out_csv.write(",".join(concepts_ordered)+"\n")
         for i in range(C):
             for j in range(C):
@@ -253,7 +253,7 @@ if __name__ == "__main__":
                 [imgs_ordered, torch.ones(imgs_ordered.shape[1:])[None]]
             )
 
-    writer = SummaryWriter(f"output/analysis_{tail}")
+    writer = SummaryWriter(os.join(opts.output_dir_path, f"analysis_{tail}"))
 
     # Instance feature vectors
     writer.add_embedding(
