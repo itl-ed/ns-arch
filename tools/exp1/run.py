@@ -6,7 +6,7 @@ import os
 import sys
 sys.path.insert(
     0,
-    os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
 from collections import defaultdict
 import warnings
@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore")
 import tqdm
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 from detectron2.structures import BoxMode
 
 from itl import ITLAgent
@@ -24,32 +23,6 @@ from tools.sim_user import SimulatedTeacher
 
 
 TAB = "\t"
-
-## Plot matrix
-def draw_matrix(data, row_labs, col_labs, ax):
-    
-    # Draw matrix
-    ax.matshow(data, cmap="Wistia")
-
-    # Show all ticks
-    ax.set_xticks(np.arange(len(col_labs)))
-    ax.set_yticks(np.arange(len(row_labs)))
-
-    # Label with provided predicate names
-    ax.set_xticklabels(col_labs)
-    ax.set_yticklabels(row_labs)
-
-    # Horizontal axis on top
-    ax.tick_params(top=True, bottom=False, labeltop=True, labelbottom=False)
-
-    # Rotate xtick labels and set alignment
-    plt.setp(ax.get_xticklabels(), rotation=-30, ha="right", rotation_mode="anchor")
-
-    # Annotate with data entries
-    for i in range(data.shape[1]):
-        for j in range(data.shape[0]):
-            ax.text(i, j, round(data[j, i].item(), 1), ha="center", va="center")
-
 
 if __name__ == "__main__":
     opts = parse_arguments()
@@ -106,7 +79,9 @@ if __name__ == "__main__":
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 
-    with open(os.path.join(opts.output_dir_path, f"curve_{tail}.csv"), "w") as out_csv:
+    res_dir = os.path.join(opts.output_dir_path, "exp1_res")
+
+    with open(os.path.join(res_dir, f"curve_{tail}.csv"), "w") as out_csv:
         # Summarize ITL interaction records stored in the simulated user object
         print("")
         print("Sys> Experiment finished. Result:")
@@ -174,7 +149,8 @@ if __name__ == "__main__":
     data = np.zeros([C,C])
     concepts_ordered = list(exam_result)
 
-    with open(os.path.join(opts.output_dir_path, f"conf_mat_{tail}.csv"), "w") as out_csv:
+    with open(os.path.join(res_dir, f"confMat_{tail}.csv"), "w") as out_csv:
+        out_csv.write(str(opts.exp1_test_set_size)+"\n")
         out_csv.write(",".join(concepts_ordered)+"\n")
         for i in range(C):
             for j in range(C):
@@ -183,11 +159,6 @@ if __name__ == "__main__":
 
                 data[i,j] = exam_result[conc_i][conc_j] / opts.exp1_test_set_size
             out_csv.write(",".join([str(d) for d in data[i]])+"\n")
-
-    # fig = plt.figure()
-    # draw_matrix(data, concepts_ordered, concepts_ordered, fig.gca())
-    # plt.title({tail})
-    # plt.savefig(f"conf_mat_{tail}.png")
 
     # Cluster analysis of positive/negative exemplars
     from torch.utils.tensorboard import SummaryWriter
@@ -253,7 +224,7 @@ if __name__ == "__main__":
                 [imgs_ordered, torch.ones(imgs_ordered.shape[1:])[None]]
             )
 
-    writer = SummaryWriter(os.path.join(opts.output_dir_path, f"analysis_{tail}"))
+    writer = SummaryWriter(os.path.join(res_dir, f"analysis_{tail}"))
 
     # Instance feature vectors
     writer.add_embedding(
