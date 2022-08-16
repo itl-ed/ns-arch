@@ -7,7 +7,7 @@ concepts
 import os
 import pickle
 import logging
-from itertools import chain
+from itertools import chain, permutations, product
 
 import cv2
 import torch
@@ -19,7 +19,6 @@ import pytorch_lightning as pl
 import matplotlib.pyplot as plt
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
-from detectron2.structures import BoxMode
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import convert_image_to_rgb
 from pytorch_lightning.plugins import DDPPlugin
@@ -134,10 +133,9 @@ class VisionModule:
         # New visual input buffer
         self.new_input = None
 
-        # Latest raw vision perception, prediction outcomes, feature vectors for RoIs
+        # Latest raw vision perception, prediction outcomes, cached feature vectors
         self.last_input = None
         self.last_raw = None
-        self.last_bboxes = None
         self.scene = None
         self.f_vecs = None
 
@@ -315,22 +313,30 @@ class VisionModule:
         trainer.predict(self.model, self.dm)
 
     @has_model
-    def predict(self, image, exemplars=None, bboxes=None, visualize=False):
+    def predict(self, image, exemplars=None, bboxes=None, specs=None, visualize=False):
         """
-        Model inference in either one of two modes: 1) full scene graph generation mode,
-        where the module is only given an image and needs to return its estimation of
-        the full scene graph for the input, or 2) instance classification mode, where
-        a number of bboxes are given along with the image and category predictions are
-        made for only those instances.
+        Model inference in either one of three modes:
+            1) full scene graph generation mode, where the module is only given an image
+                and needs to return its estimation of the full scene graph for the input
+            2) instance classification mode, where a number of bboxes are given along
+                with the image and category predictions are made for only those instances
+            3) instance search mode, where a specification is provided in the form of FOL
+                formula with a variable and best fitting instance(s) should be searched
+
+        2) and 3) are 'incremental' in the sense that they should add to an existing scene
+        graph which is already generated with some previous execution of this method. Provide
+        bboxes arg to run in 2) mode, or spec arg to run in 3) mode.
 
         Args:
             image: str; input image, passed as path to image file
+            exemplars: Exemplars (optional); set of positive & negative concept exemplars
             bboxes: N*4 array-like (optional); set of bounding boxes provided
+            specs: list[(set[(str, int, list[str])], int)] (optional); set of FOL search
+                specifications
             visualize: bool (optional); whether to show visualization of inference result
                 on a pop-up window
         Returns:
             raw input image array (C*H*W) processed by the vision module
-
         """
         self.dm.setup("test")
         self.model.eval()
@@ -344,41 +350,128 @@ class VisionModule:
             inp = { "image": image }
             self.last_input = image
 
-        # With/without boxes provided
-        if bboxes is None:
+        # Prediction modes
+        if bboxes is None and specs is None:
+            # Full prediction
             inp = [self.dm.mapper_batch["test"](inp)]
+            exs_cached = exs_idx_map = inc_idx_map = None
         else:
-            inp["annotations"] = bboxes
-            inp = [self.dm.mapper_batch["test_props"](inp)]
+            # Incremental prediction; fetch bboxes and box f_vecs for existing detections
+            exs_cached = {
+                "backbone_output": self.f_vecs[5],
+                "detections": [
+                    {
+                        "bbox": self.scene[ent]["pred_boxes"],
+                        "box_f_vec": self.f_vecs[3][ent],
+                        "sem_f_vec": self.f_vecs[4][ent],
+                    }
+                    for ent in self.scene
+                ]
+            }
+            exs_idx_map = { i: ent for i, ent in enumerate(self.scene) }
+
+            if bboxes is not None:
+                # Instance classification mode
+                inp["annotations"] = list(bboxes.values())
+                inp = [self.dm.mapper_batch["test_props"](inp)]
+
+                inc_idx_map = { i: ent for i, ent in enumerate(bboxes) }
+            else:
+                assert specs is not None
+                # Instance search mode
+                inc_idx_map = { i: ent for i, ent in enumerate(specs) }
 
         with torch.no_grad():
-            output, f_vecs = self.model.base_model.inference(inp)
+            output, f_vecs, inc_out = self.model.base_model.inference(
+                inp, exs_cached=exs_cached
+            )
             output = [out["instances"] for out in output]
-
-        f_vecs_org = ({}, {}, {})
 
         # pred_value_fields = output[0].get_fields()
         pred_value_fields = ["pred_objectness", "pred_boxes"]
         pred_values = zip(*[output[0].get(f) for f in pred_value_fields])
 
-        # Label and reorganize scene graph and feature vectors into a more intelligible
-        # format...
-        scene = {
-            f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
-            for i, obj in enumerate(pred_values)
-        }
-        for i, (oi, obj) in enumerate(scene.items()):
-            f_vecs_org[0][oi] = f_vecs[0][i]
-            f_vecs_org[1][oi] = f_vecs[1][i]
-            f_vecs_org[2][oi] = {
-                f"o{j}": f_vecs[2][i][j] for j in range(len(scene))
-                if oi != f"o{j}"
+        if inc_out is None:
+            ## Newly generate a scene graph with the output
+
+            self.f_vecs = ({}, {}, {}, {}, {}, f_vecs[5])    # f_vecs[5]: backbone output
+
+            # Label and reorganize scene graph and feature vectors into a more intelligible
+            # format...
+            self.scene = {
+                f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
+                for i, obj in enumerate(pred_values)
             }
-        #     obj["pred_relations"] = {
-        #         f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
-        #         if oi != f"o{j}"
-        #     }
-        
+            for i, (oi, obj) in enumerate(self.scene.items()):
+                self.f_vecs[0][oi] = f_vecs[0][i]       # cls_f_vecs
+                self.f_vecs[1][oi] = f_vecs[1][i]       # att_f_vecs
+
+                self.f_vecs[2][oi] = {                  # rel_f_vecs
+                    f"o{j}": f_vecs[2][i][j] for j in range(len(self.scene))
+                    if oi != f"o{j}"
+                }
+
+                self.f_vecs[3][oi] = f_vecs[3][i]       # box_f_vecs
+                self.f_vecs[4][oi] = f_vecs[4][i]       # sem_f_vecs
+            
+            #     obj["pred_relations"] = {
+            #         f"o{j}": per_obj for j, per_obj in enumerate(obj["pred_relations"])
+            #         if oi != f"o{j}"
+            #     }
+
+            # Nodes and edges in scene graphs for which few-shot predictions should be made
+            fs_pred_nodes = self.scene.keys()
+            fs_pred_edges = permutations(self.scene, 2)
+
+            # Reformat & resize input image
+            img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
+            img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
+
+            # Store in case they are needed later
+            self.last_raw = img
+
+        else:
+            ## Incrementally update the existing scene graph with the output
+
+            # Recover incrementally obtained relation feature vectors, i.e. top right and
+            # bottom left parts of 2-by-2 partitioning
+            N_E = len(exs_idx_map); N_N = len(inc_idx_map)
+            D = inc_out[1].shape[-1]
+            inc_rel_f_vecs = inc_out[1].view(-1, 2, D)
+            rel_f_vecs_top_right = inc_rel_f_vecs[:,0,:].view(N_E, N_N, -1)
+            rel_f_vecs_bottom_left = inc_rel_f_vecs[:,1,:].view(N_N, N_E, -1)
+
+            # Update cached scene graph and feature vectors
+            for i, obj in enumerate(pred_values):
+                oi = inc_idx_map[i]
+                self.scene[oi] = { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
+
+                self.f_vecs[0][oi] = f_vecs[0][i]       # cls_f_vecs
+                self.f_vecs[1][oi] = f_vecs[1][i]       # att_f_vecs
+
+                self.f_vecs[2][oi] = {                  # rel_f_vecs
+                    exs_idx_map[j]: rfv
+                    for j, rfv in enumerate(rel_f_vecs_bottom_left[i])
+                }
+                for j, rfv in enumerate(rel_f_vecs_top_right[:,i,:]):
+                    oj = exs_idx_map[j]
+                    self.f_vecs[2][oj][oi] = rfv
+                for j in range(N_N):
+                    if i != j:
+                        oj = inc_idx_map[j]
+                        self.f_vecs[2][oi][oj] = f_vecs[2][i][j]
+
+                self.f_vecs[3][oi] = f_vecs[3][i]       # box_f_vecs
+                self.f_vecs[4][oi] = f_vecs[4][i]       # sem_f_vecs
+
+            # Nodes and edges in scene graphs for which few-shot predictions should be made
+            fs_pred_nodes = inc_idx_map.values()
+            fs_pred_edges = chain(
+                permutations(bboxes, 2),
+                product(exs_idx_map.values(), inc_idx_map.values()),
+                product(inc_idx_map.values(), exs_idx_map.values()),
+            )
+
         if exemplars is not None:
             # Computing few shot exemplar-based scores
             dev = self.model.base_model.device
@@ -410,11 +503,14 @@ class VisionModule:
                 else:
                     neg_proto = None
 
-                for oi in scene:
+                # Class and attribute predictions for scene graph nodes
+                for oi in fs_pred_nodes:
                     if cat_type == "cls":
-                        f_vec_cat = f_vecs_org[0][oi]
+                        f_vec_cat = self.f_vecs[0][oi]
+                    elif cat_type == "att":
+                        raise NotImplementedError
                     else:
-                        pass
+                        continue
 
                     # Use squared Euclidean distance (L2 norm)
                     if pos_proto is not None:
@@ -431,40 +527,30 @@ class VisionModule:
                     fs_score = fs_score[0].item()
 
                     if cat_type == "cls":
-                        if "pred_classes" in scene[oi]:
-                            C = len(scene[oi]["pred_classes"])
+                        if "pred_classes" in self.scene[oi]:
+                            C = len(self.scene[oi]["pred_classes"])
                             if cat_ind >= C:
-                                scene[oi]["pred_classes"] = np.concatenate((
-                                    scene[oi]["pred_classes"], np.zeros(cat_ind+1-C)
+                                self.scene[oi]["pred_classes"] = np.concatenate((
+                                    self.scene[oi]["pred_classes"], np.zeros(cat_ind+1-C)
                                 ))
                         else:
-                            scene[oi]["pred_classes"] = np.zeros(cat_ind+1)
+                            self.scene[oi]["pred_classes"] = np.zeros(cat_ind+1)
                         
-                        scene[oi]["pred_classes"][cat_ind] = fs_score
+                        self.scene[oi]["pred_classes"][cat_ind] = fs_score
                     else:
                         pass
 
-        # Reformat & resize input image
-        img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
-        img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
+                # Relation predictions for scene graph edges
+                for oi, oj in fs_pred_edges:
+                    if cat_type != "rel":
+                        continue
 
-        # Store in case they are needed later
-        self.last_raw = img
-        self.last_bboxes = [
-            {
-                "bbox": ent["pred_boxes"],
-                "bbox_mode": BoxMode.XYXY_ABS,
-                "objectness_scores": ent["pred_objectness"]
-            }
-            for ent in scene.values()
-        ]
-
-        # Store results as state in this vision module
-        self.scene = scene
-        self.f_vecs = f_vecs_org
+                    pass
 
         if visualize:
-            self.summ = visualize_sg_predictions(img, scene, self.predicates)
+            self.summ = visualize_sg_predictions(
+                self.last_raw, self.scene, self.predicates
+            )
     
     def reshow_pred(self):
         assert self.summ is not None, "No predictions have been made yet"
@@ -530,8 +616,8 @@ class VisionModule:
             concept: Concept for which category code vector will be updated
             ex_vecs: numpy.array; set of vector representations of concept exemplars, used
                 to update the code vector
-            mix_ratio: Mixing ratio between old code vs. new code; 1.0 corresponds to total
-                update with new code
+            mix_ratio: float; Mixing ratio between old code vs. new code - 1.0 corresponds to
+                total update with new code
         """
         cat_ind, cat_type = concept
 

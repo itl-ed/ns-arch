@@ -349,12 +349,14 @@ class SceneGraphROIHeads(StandardROIHeads):
 
         return (proposals, proposal_pairs)
 
-    def _forward_box(self, features, proposals, boxes_provided=False):
+    def _forward_box(self, features, proposals, boxes_provided=False, exs_cached=None):
         """
         Forward logic extended to pass RoI-pooled features extracted from pair-enclosing
         boxes to the output layer as well
         """
         proposals_objs, proposals_rels = proposals
+
+        img_f_vecs = features       # Caching backbone output
 
         features = [features[f] for f in self.box_in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals_objs])
@@ -364,9 +366,9 @@ class SceneGraphROIHeads(StandardROIHeads):
         box_pair_features = self.box_head(box_pair_features)
 
         predictions, f_vecs = self.box_predictor(box_features, box_pair_features, proposals)
-        del box_features, box_pair_features
 
         if self.training:
+            del box_features, box_pair_features
             losses = self.box_predictor.losses(predictions, proposals)
             # proposals is modified in-place below, so losses must be computed first.
             if self.train_on_pred_boxes:
@@ -396,24 +398,132 @@ class SceneGraphROIHeads(StandardROIHeads):
                 dim=0)
             for i in range(N)], dim=0)
 
-            f_vecs = (cls_f_vecs, att_f_vecs, rel_f_vecs)
+            box_f_vecs = box_features[kept_indices[0]]
+            sem_f_vecs = f_vecs[3][kept_indices[0]]
+            f_vecs = (cls_f_vecs, att_f_vecs, rel_f_vecs, box_f_vecs, sem_f_vecs, img_f_vecs)
 
-            return pred_instances, f_vecs
+            if exs_cached is None:
+                inc_out = None
+            else:
+                inc_out = self._forward_box_inc_rels(
+                    features, box_features, proposals_objs, f_vecs, exs_cached
+                )[0]
 
-    def forward(self, images, features, proposals, targets=None, boxes_provided=False):
+            return pred_instances, f_vecs, inc_out
+
+    def _forward_box_inc_rels(self, features, box_features, proposals_objs, f_vecs, exs_cached):
         """
-        Minimally extended to add proposal pair preparation logic in inference mode
+        Incremental predictions of relations between pairs of added detections and
+        existing detections (i.e. top right and bottom left parts of the 2-by-2
+        partitioning of the incrementally updated scene graph matrix)
+        """
+        exs_dets = exs_cached["detections"]
+
+        # Preparing box features needed
+        inc_box_features = torch.cat([
+            torch.stack([d["box_f_vec"] for d in exs_dets]), box_features
+        ])
+
+        outputs = []
+        for pos in proposals_objs:
+            # Preparing indiv proposals
+            inc_proposal_objs = Instances(pos.image_size)
+            inc_proposal_objs.proposal_boxes = Boxes.cat([
+                Boxes([d["bbox"] for d in exs_dets]).to(box_features.device),
+                pos.proposal_boxes
+            ])
+            inc_proposal_objs.sem_f_vecs = torch.cat([
+                torch.stack([d["sem_f_vec"] for d in exs_dets]), f_vecs[4]
+            ])
+
+            # Preparing index pairs
+            N_E = len(exs_dets); N_N = len(pos)
+            idx_range_exs = torch.arange(N_E)
+            idx_range_new = torch.arange(N_E, N_E+N_N)
+            pair_idxs_top_right = torch.stack(
+                [
+                    idx_range_exs[:,None].expand([N_E,N_N]),
+                    idx_range_new[None,:].expand([N_E,N_N])
+                ]
+            , dim=2).view([-1, 2])
+            pair_idxs_bottom_left = torch.stack(
+                [
+                    idx_range_new[:,None].expand([N_N,N_E]),
+                    idx_range_exs[None,:].expand([N_N,N_E])
+                ]
+            , dim=2).view([-1, 2])
+            inc_pair_idxs = torch.cat([pair_idxs_top_right, pair_idxs_bottom_left])
+            inc_pair_idxs = inc_pair_idxs.to(box_features.device)
+
+            # Preparing bounding box pairs
+            boxes_exs = torch.tensor([d["bbox"] for d in exs_dets]).to(box_features.device)
+            boxes_new = pos.proposal_boxes.tensor
+            boxes_exs_mins = boxes_exs[:,:2]; boxes_new_mins = boxes_new[:,:2]
+            boxes_exs_maxs = boxes_exs[:,2:]; boxes_new_maxs = boxes_new[:,2:]
+
+            pair_mins_top_right = torch.min(
+                boxes_exs_mins[:,None,:].expand([N_E,N_N,2]),
+                boxes_new_mins[None,:,:].expand([N_E,N_N,2])
+            ).view([-1, 2])
+            pair_maxs_top_right = torch.max(
+                boxes_exs_maxs[:,None,:].expand([N_E,N_N,2]),
+                boxes_new_maxs[None,:,:].expand([N_E,N_N,2])
+            ).view([-1, 2])
+            pair_boxes_top_right = cat([pair_mins_top_right, pair_maxs_top_right], dim=-1)
+
+            pair_mins_bottom_left = torch.min(
+                boxes_new_mins[:,None,:].expand([N_N,N_E,2]),
+                boxes_exs_mins[None,:,:].expand([N_N,N_E,2])
+            ).view([-1, 2])
+            pair_maxs_bottom_left = torch.max(
+                boxes_new_maxs[:,None,:].expand([N_N,N_E,2]),
+                boxes_exs_maxs[None,:,:].expand([N_N,N_E,2])
+            ).view([-1, 2])
+            pair_boxes_bottom_left = cat([pair_mins_bottom_left, pair_maxs_bottom_left], dim=-1)
+
+            inc_pair_boxes = torch.cat([pair_boxes_top_right, pair_boxes_bottom_left])
+            inc_pair_boxes = Boxes(inc_pair_boxes)
+
+            # Preparing pair proposals
+            inc_proposal_rels = Instances(pos.image_size)
+            inc_proposal_rels.proposal_pair_idxs = inc_pair_idxs
+            inc_proposal_rels.proposal_pair_boxes = inc_pair_boxes
+
+            # Preparing proposals tuple
+            inc_proposals = (inc_proposal_objs, inc_proposal_rels)
+
+            # Preparing box features needed
+            inc_box_pair_features = self.box_pooler(features, [inc_pair_boxes])
+            inc_box_pair_features = self.box_head(inc_box_pair_features)
+
+            # Finally make predictions
+            inc_predictions = self.box_predictor.forward_inc_rels(
+                inc_box_features, inc_box_pair_features, inc_proposals
+            )
+            outputs.append(inc_predictions)
+        
+        return outputs
+
+    def forward(
+        self, images, features, proposals,
+        targets=None, boxes_provided=False, exs_cached=None
+    ):
+        """
+        Extended to add proposal pair preparation logic in inference mode + incremental prediction
         """
         del images
         if self.training:
             assert targets, "'targets' argument is required during training"
+            assert exs_cached is None, "Incremental prediction shouldn't fire during training"
             proposals = self.label_and_sample_proposals(proposals, targets)
         else:
             proposals = self.add_proposal_pairs(proposals)
         del targets
 
         if self.training:
-            losses = self._forward_box(features, proposals, boxes_provided=boxes_provided)
+            losses = self._forward_box(
+                features, proposals, boxes_provided=boxes_provided
+            )
             # Usually the original proposals used by the box head are used by the mask, keypoint
             # heads. But when `self.train_on_pred_boxes is True`, proposals will contain boxes
             # predicted by the box head.
@@ -421,8 +531,10 @@ class SceneGraphROIHeads(StandardROIHeads):
             losses.update(self._forward_keypoint(features, proposals))
             return proposals, losses
         else:
-            pred_instances, f_vecs = self._forward_box(features, proposals, boxes_provided=boxes_provided)
+            pred_instances, f_vecs, inc_out = self._forward_box(
+                features, proposals, boxes_provided=boxes_provided, exs_cached=exs_cached
+            )
             # During inference cascaded prediction is used: the mask and keypoints heads are only
             # applied to the top scoring box detections.
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
-            return pred_instances, f_vecs
+            return pred_instances, f_vecs, inc_out

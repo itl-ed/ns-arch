@@ -13,7 +13,7 @@ from .memory import LongTermMemoryModule
 from .vision import VisionModule
 from .vision.utils.completer import DatasetImgsCompleter
 from .lang import LanguageModule
-from .recognitive_reasoning import RecognitiveReasonerModule
+from .theoretical_reasoning import TheoreticalReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
@@ -31,11 +31,11 @@ class ITLAgent:
         self.opts = opts
 
         # Initialize component modules
-        self.lt_mem = LongTermMemoryModule()
         self.vision = VisionModule(opts)
         self.lang = LanguageModule(opts)
-        self.recognitive = RecognitiveReasonerModule()
+        self.theoretical = TheoreticalReasonerModule()
         self.practical = PracticalReasonerModule()
+        self.lt_mem = LongTermMemoryModule()
 
         # Initialize empty lexicon with concepts in visual module
         self.lt_mem.lexicon.fill_from_dicts(
@@ -94,7 +94,6 @@ class ITLAgent:
                     break
                 elif usr_in == "r":
                     self.vision.new_input = self.dcompleter.sample()
-                    self.vision.last_bboxes = None
                 elif usr_in == "exit":
                     print(f"Sys> Terminating...")
                     quit()
@@ -102,7 +101,6 @@ class ITLAgent:
                     if usr_in not in self.dcompleter:
                         raise ValueError(f"Image file {usr_in} does not exist")
                     self.vision.new_input = usr_in
-                    self.vision.last_bboxes = None
 
             except ValueError as e:
                 if input_provided:
@@ -186,14 +184,14 @@ class ITLAgent:
                 # Ground raw visual perception with scene graph generation module
                 self.vision.predict(
                     self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                    bboxes=self.vision.last_bboxes, visualize=vis_ui_on
+                    visualize=vis_ui_on
                 )
                 vis_ui_on = False
 
             if self.vision.new_input is not None:
                 # Inform the language module of the visual context
                 self.lang.situate(self.vision.last_input, self.vision.scene)
-                self.recognitive.refresh()
+                self.theoretical.refresh()
 
                 # No need to treat these facts as 'mismatches'
                 # (In a sense, this kinda overlaps with the notion of 'common ground'?
@@ -216,18 +214,18 @@ class ITLAgent:
 
                 # If a new entity is registered as a result of understanding the latest
                 # input, re-run vision module to update with new predictions for it
-                if len(self.lang.dialogue.referents["env"]) > len(self.vision.scene):
-                    bboxes = [
-                        {
-                            "bbox": ent["bbox"],
+                new_ents = set(self.lang.dialogue.referents["env"]) - set(self.vision.scene)
+                if len(new_ents) > 0:
+                    bboxes = {
+                        ent: {
+                            "bbox": self.lang.dialogue.referents["env"][ent]["bbox"],
                             "bbox_mode": BoxMode.XYXY_ABS,
-                            "objectness_scores": self.vision.scene[name]["pred_objectness"]
-                                if name in self.vision.scene else None
+                            "objectness_scores": None
                         }
-                        for name, ent in self.lang.dialogue.referents["env"].items()
-                    ]
+                        for ent in new_ents
+                    }
 
-                    # Predict on latest raw data stored
+                    # Incrementally predict on the designated bbox
                     self.vision.predict(
                         self.vision.last_input, exemplars=self.lt_mem.exemplars,
                         bboxes=bboxes
@@ -242,17 +240,17 @@ class ITLAgent:
 
             if self.vision.new_input is not None or vision_model_updated or kb_updated:
                 # Sensemaking from vision input only
-                self.recognitive.sensemake_vis(self.vision.scene, kb_prog)
+                self.theoretical.sensemake_vis(self.vision.scene, kb_prog)
 
             if self.lang.new_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
-                self.recognitive.resolve_symbol_semantics(
+                self.theoretical.resolve_symbol_semantics(
                     dialogue_state, self.lt_mem.lexicon
                 )
 
                 if self.vision.scene is not None:
                     # Sensemaking from vision & language input
-                    self.recognitive.sensemake_vis_lang(dialogue_state)
+                    self.theoretical.sensemake_vis_lang(dialogue_state)
 
             ###################################################################
             ##           Identify & exploit learning opportunities           ##
@@ -265,7 +263,7 @@ class ITLAgent:
             # Process translated dialogue record to do the following:
             #   - Integrate newly provided generic rules into KB
             #   - Identify recognition mismatch btw. user provided vs. agent
-            translated = self.recognitive.translate_dialogue_content(dialogue_state)
+            translated = self.theoretical.translate_dialogue_content(dialogue_state)
             for ui, (rules, _) in enumerate(translated):
                 if rules is not None:
                     for r in rules:
@@ -278,26 +276,26 @@ class ITLAgent:
                             kb_updated |= self.lt_mem.kb.add(r, U_W_PR, provenance)
 
                         # Test against vision-only sensemaking result to identify any
-                        # recognitive mismatch
+                        # theoretical mismatch
                         if all(not is_var for _, is_var in r.terms()) \
-                            and self.recognitive.concl_vis is not None:
+                            and self.theoretical.concl_vis is not None:
                             if r in self.doubt_no_more:
                                 # May skip testing this one
                                 continue
 
                             # Make a yes/no query to obtain the likelihood of content
-                            models_v, _, _ = self.recognitive.concl_vis
+                            models_v, _, _ = self.theoretical.concl_vis
                             q_response, _ = models_v.query(None, r)
                             ev_prob = q_response[()][1]
 
                             surprisal = -math.log(ev_prob + EPS)
                             if surprisal > SR_THRES:
                                 m = (r, surprisal)
-                                self.recognitive.mismatches.add(m)
+                                self.theoretical.mismatches.add(m)
 
             # Handle neologisms
             neologisms = {
-                tok: sym for tok, (sym, den) in self.recognitive.word_senses.items()
+                tok: sym for tok, (sym, den) in self.theoretical.word_senses.items()
                 if den is None
             }
             for tok, sym in neologisms.items():
@@ -337,7 +335,7 @@ class ITLAgent:
                         # memory, as feature vectors at the penultimate layer right
                         # before category prediction heads
                         args = [
-                            self.recognitive.value_assignment[arg] for arg in rule_head[0][2]
+                            self.theoretical.value_assignment[arg] for arg in rule_head[0][2]
                         ]
 
                         # Image patch
@@ -408,7 +406,7 @@ class ITLAgent:
 
         for n in self.lang.unresolved_neologisms:
             self.practical.agenda.append(("address_neologism", n))
-        for m in self.recognitive.mismatches:
+        for m in self.theoretical.mismatches:
             self.practical.agenda.append(("address_mismatch", m))
         for ui in self.lang.dialogue.unanswered_Q:
             self.practical.agenda.append(("address_unanswered_Q", ui))
@@ -463,7 +461,7 @@ class ITLAgent:
         question info provided from user.
         """
         # This mismatch is about to be handled
-        self.recognitive.mismatches.remove(mismatch)
+        self.theoretical.mismatches.remove(mismatch)
 
         rule, _ = mismatch
 
@@ -545,7 +543,7 @@ class ITLAgent:
         to actually answer it by adding a new agenda item.
         """
         dialogue_state = self.lang.dialogue.export_as_dict()
-        translated = self.recognitive.translate_dialogue_content(dialogue_state)
+        translated = self.theoretical.translate_dialogue_content(dialogue_state)
 
         _, query = translated[ui]
 
@@ -570,7 +568,7 @@ class ITLAgent:
         dialogue_state = self.lang.dialogue.export_as_dict()
         _, _, orig_utt = dialogue_state["record"][ui]
 
-        translated = self.recognitive.translate_dialogue_content(dialogue_state)
+        translated = self.theoretical.translate_dialogue_content(dialogue_state)
 
         _, query = translated[ui]
         assert query is not None
@@ -578,7 +576,7 @@ class ITLAgent:
         q_vars, _ = query
 
         # Compute raw answer candidates by appropriately querying current world models
-        models_vl, _, _ = self.recognitive.concl_vis_lang
+        models_vl, _, _ = self.theoretical.concl_vis_lang
         answers_raw, _ = models_vl.query(*query)
 
         if q_vars is not None:

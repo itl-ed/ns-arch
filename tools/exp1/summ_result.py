@@ -105,10 +105,10 @@ if __name__ == "__main__":
     config_ord = [
         "zeroInit_semOnly_minHelp", "zeroInit_semOnly_medHelp", "zeroInit_semOnly_maxHelp",
         "zeroInit_semWithImpl_minHelp", "zeroInit_semWithImpl_medHelp", "zeroInit_semWithImpl_maxHelp",
-        "mixedInitVis_semOnly_minHelp", "mixedInitVis_semOnly_medHelp", "mixedInitVis_semOnly_maxHelp",
-        "mixedInitVis_semWithImpl_minHelp", "mixedInitVis_semWithImpl_medHelp", "mixedInitVis_semWithImpl_maxHelp",
-        "mixedInitLang_semOnly_minHelp", "mixedInitLang_semOnly_medHelp", "mixedInitLang_semOnly_maxHelp",
-        "mixedInitLang_semWithImpl_minHelp", "mixedInitLang_semWithImpl_medHelp", "mixedInitLang_semWithImpl_maxHelp",
+        "mixInitV_semOnly_minHelp", "mixInitV_semOnly_medHelp", "mixInitV_semOnly_maxHelp",
+        "mixInitV_semWithImpl_minHelp", "mixInitV_semWithImpl_medHelp", "mixInitV_semWithImpl_maxHelp",
+        "mixInitVL_semOnly_minHelp", "mixInitVL_semOnly_medHelp", "mixInitVL_semOnly_maxHelp",
+        "mixInitVL_semWithImpl_minHelp", "mixInitVL_semWithImpl_medHelp", "mixInitVL_semWithImpl_maxHelp",
     ]
 
     # Aggregate and visualize: curve

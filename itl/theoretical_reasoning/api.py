@@ -1,5 +1,5 @@
 """
-Recognitive reasoning module API that exposes only the high-level functionalities
+theoretical reasoning module API that exposes only the high-level functionalities
 required by the ITL agent: make sense out of the current visual & language inputs
 plus existing knowledge stored in knowledge base.
 
@@ -8,7 +8,7 @@ perceived information from various modalities to establish a set of judgements s
 in such a manner that they can later be exploited for other symbolic reasoning tasks --
 in light of the existing general knowledge held by the perceiving agent.
 
-(I borrow the term 'sensemaking' from the discipline of recognitive science & psychology.
+(I borrow the term 'sensemaking' from the discipline of theoretical science & psychology.
 According to Klein (2006), sensemaking is "the process of creating situational awareness
 and understanding in situations of high complexity or uncertainty in order to make decisions".)
 
@@ -30,7 +30,7 @@ EPS = 1e-10          # Value used for numerical stabilization
 U_W_PR = 1.0         # How much the agent values information provided by the user
 TAB = "\t"           # For use in format strings
 
-class RecognitiveReasonerModule:
+class TheoreticalReasonerModule:
 
     def __init__(self):
         self.concl_vis = None

@@ -80,6 +80,7 @@ if __name__ == "__main__":
         user.episode_records.append(user.current_record)
 
     res_dir = os.path.join(opts.output_dir_path, "exp1_res")
+    os.makedirs(res_dir, exist_ok=True)
 
     with open(os.path.join(res_dir, f"curve_{tail}.csv"), "w") as out_csv:
         # Summarize ITL interaction records stored in the simulated user object

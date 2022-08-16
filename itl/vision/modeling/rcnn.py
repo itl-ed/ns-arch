@@ -20,30 +20,33 @@ class DualModeRCNN(GeneralizedRCNN):
     on the provided proposals only, in effect solving classification problem
     """
     def inference(
-        self, batched_inputs, detected_instances=None, do_postprocess=True,
+        self, batched_inputs,
+        detected_instances=None, do_postprocess=True, exs_cached=None
     ):
         assert not self.training
 
-        box_provided = "proposals" in batched_inputs[0]
-
         images = self.preprocess_image(batched_inputs)
-        features = self.backbone(images.tensor)
+        if exs_cached is None:
+            features = self.backbone(images.tensor)
+        else:
+            # Use cached backbone output
+            features = exs_cached["backbone_output"]
 
         if detected_instances is None:
-            if box_provided:
+            if "proposals" in batched_inputs[0]:
                 # When "proposals" already present in input, treat them as ground-truth;
                 # run roi_heads on the boxes with boxes_provided=True to prevent any of them
                 # getting filtered out
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
-                results, f_vecs = self.roi_heads(
-                    images, features, proposals, None, boxes_provided=True
+                results, f_vecs, inc_out = self.roi_heads(
+                    images, features, proposals, None, boxes_provided=True, exs_cached=exs_cached
                 )
             else:
                 # Otherwise, default behavior of the parent class
                 assert self.proposal_generator is not None
                 proposals, _ = self.proposal_generator(images, features, None)
-                results, f_vecs = self.roi_heads(
-                    images, features, proposals, None, boxes_provided=False
+                results, f_vecs, inc_out = self.roi_heads(
+                    images, features, proposals, None, boxes_provided=False, exs_cached=exs_cached
                 )
         else:
             # No use case handled by this snippet yet...
@@ -54,9 +57,9 @@ class DualModeRCNN(GeneralizedRCNN):
 
         if do_postprocess:
             assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
-            return self._postprocess(results, batched_inputs, images.image_sizes), f_vecs
+            return self._postprocess(results, batched_inputs, images.image_sizes), f_vecs, inc_out
         else:
-            return results, f_vecs
+            return results, f_vecs, inc_out
 
     def visualize_training(self, batched_inputs, proposals):
         """

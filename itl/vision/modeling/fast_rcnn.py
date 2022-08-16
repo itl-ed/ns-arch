@@ -177,8 +177,9 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                 Fifth tensor: shape (N_P, K_R), scores for each of the N_P box pairs. Each row contains
                 the scores for K_R object pair relations.
             
-            (Tensor, Tensor, Tensor):
+            (Tensor, Tensor, Tensor, Tensor, Tensor):
                 shape (N_R/N_R/N_P, D), feature vectors before object class/attribute/relation prediction
+                shape (N_R, D), semantic feature vectors
         """
         if box_features.dim() > 2:
             box_features = torch.flatten(box_features, start_dim=1)
@@ -221,7 +222,6 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         if box_pair_features is None:
             rel_compressed_f = None
             rel_scores = None
-            rel_seg_scores = None
         else:
             ## Relation prediction, using following features (Consult Plesse et al., 2020 for details):
             #   1) Visual features
@@ -233,6 +233,8 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
             shifts = torch.tensor(shifts, device=box_features.device).cumsum(dim=0)
             pair_idxs_shifted = [prs.proposal_pair_idxs + s for prs, s in zip(proposals_rels, shifts)]
             pair_idxs_shifted = cat(pair_idxs_shifted, dim=0)
+
+            # arg1 & arg2 indices to be used by torch.gather in pair feature computations
             arg1_idxs_shifted = pair_idxs_shifted[:, 0, None]
             arg2_idxs_shifted = pair_idxs_shifted[:, 1, None]
 
@@ -282,9 +284,83 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
             cls_scores, att_scores, rel_scores,
             proposal_deltas
         )
-        f_vecs = cls_compressed_f, att_compressed_f, rel_compressed_f
+        f_vecs = cls_compressed_f, att_compressed_f, rel_compressed_f, sem_features
 
         return out, f_vecs
+
+    def forward_inc_rels(self, box_features, box_pair_features, proposals):
+        """
+        Variant of self.forward(), called for incremental prediction of relations between pairs
+        of newly added detections and existing detections (i.e. top right and bottom left parts
+        of the 2-by-2 partitioning of the incrementally updated scene graph matrix)
+
+        Args:
+            box_features: Tensor; per-region features of shape (N_R, ...) for N_R bounding boxes
+                to predict
+            box_pair_features: Tensor; per-region features of shape (N_P, ...) for N_P pair-enclosing
+                boxes to predict -- if None, skip relation prediction
+            proposals: (Instances, Instances), passed from super().forward(); needed for spatial
+                feature extraction
+
+        Returns:
+            Tensor:
+                shape (N_P, K_R), scores for each of the N_P box pairs. Each row contains
+                the scores for K_R object pair relations.
+            
+            Tensor:
+                shape (N_P, D), feature vectors before object relation prediction
+        """
+        if box_features.dim() > 2:
+            box_features = torch.flatten(box_features, start_dim=1)
+        if (box_pair_features is not None) and (box_pair_features.dim() > 2):
+            box_pair_features = torch.flatten(box_pair_features, start_dim=1)
+
+        proposals_objs, proposals_rels = proposals
+
+        ## Relation prediction
+
+        # arg1 & arg2 indices to be used by torch.gather in pair feature computations
+        arg1_idxs = proposals_rels.proposal_pair_idxs[:, 0, None]
+        arg2_idxs = proposals_rels.proposal_pair_idxs[:, 1, None]
+
+        # Normalize box dimensions by image width/heights
+        bxs = proposals_objs.proposal_boxes
+        h_I, w_I = proposals_objs.image_size
+        bxs.scale(1 / w_I, 1 / h_I)
+
+        bxs = proposals_rels.proposal_pair_boxes
+        h_I, w_I = proposals_rels.image_size
+        bxs.scale(1 / w_I, 1 / h_I)
+
+        # 1) Visual features
+        pair_vis_f = self._pair_visual_features(
+            box_features, box_pair_features, arg1_idxs, arg2_idxs
+        )
+
+        # 2) Spatial features
+        pair_spt_f = self._pair_spatial_features(
+            proposals_objs.proposal_boxes, proposals_rels.proposal_pair_boxes,
+            arg1_idxs, arg2_idxs
+        )
+
+        # 3) Semantic features
+        pair_sem_f = self._pair_semantic_features(
+            proposals_objs.sem_f_vecs, arg1_idxs, arg2_idxs
+        )
+
+        rel_compressed_f = self.compress_rel(cat([pair_vis_f, pair_spt_f, pair_sem_f], dim=-1))
+        rel_scores = self.rel_codes(self.relu(rel_compressed_f))
+
+        # De_normalize box dimensions
+        bxs = proposals_objs.proposal_boxes
+        h_I, w_I = proposals_objs.image_size
+        bxs.scale(w_I, h_I)
+
+        bxs = proposals_rels.proposal_pair_boxes
+        h_I, w_I = proposals_rels.image_size
+        bxs.scale(w_I, h_I)
+
+        return rel_scores, rel_compressed_f
 
     def losses(self, predictions, proposals):
         """

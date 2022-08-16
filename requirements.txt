@@ -1,6 +1,6 @@
 -r itl/memory/requirements.txt
 -r itl/vision/requirements.txt
 -r itl/lang/requirements.txt
--r itl/recognitive_reasoning/requirements.txt
+-r itl/theoretical_reasoning/requirements.txt
 -r itl/practical_reasoning/requirements.txt
 -r itl/lpmln/requirements.txt
