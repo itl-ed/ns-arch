@@ -28,17 +28,21 @@ if __name__ == "__main__":
     opts = parse_arguments()
 
     if opts.exp1_difficulty == "base":
-        target_concepts = [
-            "brandy_glass.n.*",
-            "banana.n.01",
-            "wine_bottle.n.01"
-        ]
+        target_concepts = {
+            "cls": [
+                "brandy_glass.n.*",
+                "banana.n.01",
+                "wine_bottle.n.01"
+            ]
+        }
     elif opts.exp1_difficulty == "easy":
-        target_concepts = [
-            "brandy_glass.n.*",
-            "burgundy_glass.n.*",
-            "champagne_coupe.n.*"
-        ]
+        target_concepts = {
+            "cls": [
+                "brandy_glass.n.*",
+                "burgundy_glass.n.*",
+                "champagne_coupe.n.*"
+            ]
+        }
     else:
         raise NotImplementedError
 
@@ -62,6 +66,18 @@ if __name__ == "__main__":
         f"{opts.exp1_strat_feedback}_" \
         f"{opts.strat_mismatch}_" \
         f"{opts.exp1_random_seed}"
+
+    ## Temp code for prior knowledge injection
+
+    # Sample rule injection
+    # knowledge_inp = {
+    #     "v_usr_in": "n",
+    #     "l_usr_in": f"Brandy glasses have short stems.",
+    #     "pointing": {}
+    # }
+    # agent.loop(**knowledge_inp)
+
+    ## Temp code end
 
     for i in tqdm.tqdm(range(num_eps), total=num_eps):
         print("")

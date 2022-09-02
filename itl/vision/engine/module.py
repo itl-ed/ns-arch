@@ -445,7 +445,21 @@ class SceneGraphGenerator(LightningModule):
                     })
 
                 wandb.finish()
-    
+
+    @classmethod
+    def load_from_dict(cls, ckpt, **kwargs):
+        """
+        Workaround method for loading PL model state from already loaded checkpoint dict,
+        not from local path. Snippet taken from pl.LightningModule.load_from_checkpoint().
+        """
+        # for past checkpoint need to add the new key
+        if cls.CHECKPOINT_HYPER_PARAMS_KEY not in ckpt:
+            ckpt[cls.CHECKPOINT_HYPER_PARAMS_KEY] = {}
+        # override the hparams with values that were passed in
+        ckpt[cls.CHECKPOINT_HYPER_PARAMS_KEY].update(kwargs)
+
+        return cls._load_model_state(ckpt, **kwargs)
+
     def predict_step(self, batch, batch_idx):
         raise NotImplementedError("Deprecated, need fix to conform with updated visualize_sg_predictions()")
 

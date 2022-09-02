@@ -7,6 +7,8 @@ import re
 import json
 import copy
 import random
+from itertools import islice
+from collections import defaultdict
 
 import numpy as np
 from detectron2.structures import BoxMode
@@ -27,40 +29,71 @@ class SimulatedTeacher:
         # Target concepts to teach to agent; naturally controls ITL difficulty
         self.target_concepts = target_concepts
 
-        # Fetch in advance set of images containing any instance of the target
-        # concepts
-        self.img_candidates = {
-            conc: [
-                (
-                    img,
-                    [self.metadata["classes"].index(conc) in obj["classes"]
-                        for obj in img["annotations"]]
-                ) for img in self.data_annotation
-            ]
-            for conc in self.target_concepts
-        }
-        self.img_candidates = {
-            conc: [
-                (img, [oi for oi, is_inst in enumerate(is_insts) if is_inst])
-                for (img, is_insts) in imgs if any(is_insts)
-            ]
-            for conc, imgs in self.img_candidates.items()
-        }
+        # Indexing instances in images by concept in advance
+        self.exemplars_cls = defaultdict(dict)
+        self.exemplars_att = defaultdict(dict)
+        self.exemplars_rel = defaultdict(dict)
 
+        for img in self.data_annotation:
+            indexing_per_img = {
+                "cls": defaultdict(list),
+                "att": defaultdict(list),
+                "rel": defaultdict(list)
+            }
+
+            for oi, obj in enumerate(img["annotations"]):
+                # Index by class
+                for c in obj["classes"]:
+                    indexing_per_img["cls"][c].append(oi)
+                
+                # Index by attribute
+                for a in obj["attributes"]:
+                    indexing_per_img["att"][a].append(oi)
+
+                # Index by relation
+                for rels in obj["relations"]:
+                    for r in rels["relation"]:
+                        indexing_per_img["rel"][r].append((oi, rels["object_id"]))
+
+            # Collate by img and append
+            for c, objs in indexing_per_img["cls"].items():
+                c_name = self.metadata["classes"][c]
+                self.exemplars_cls[c_name][img["image_id"]] = objs
+            for a, objs in indexing_per_img["att"].items():
+                a_name = self.metadata["attributes"][a]
+                self.exemplars_att[a_name][img["image_id"]] = objs
+            for r, obj_pairs in indexing_per_img["rel"].items():
+                r_name = self.metadata["relations"][r]
+                self.exemplars_rel[r_name][img["image_id"]] = obj_pairs
+        
+        self.exemplars_cls = dict(self.exemplars_cls)
+        self.exemplars_att = dict(self.exemplars_att)
+        self.exemplars_rel = dict(self.exemplars_rel)
+
+        # Set seed
         random.seed(seed)
-        for imgs in self.img_candidates.values():
-            random.shuffle(imgs)
 
-        # Exemplars for training
+        # Split exemplars for training and testing per concept
         self.training_exemplars = {
-            conc: copy.deepcopy(imgs[:-test_set_size])
-            for conc, imgs in self.img_candidates.items()
+            cat_type: {
+                conc: copy.deepcopy(list(islice(
+                    getattr(self, f"exemplars_{cat_type}")[conc].items(),
+                    len(getattr(self, f"exemplars_{cat_type}")[conc])-test_set_size
+                )))
+                for conc in concepts
+            }
+            for cat_type, concepts in target_concepts.items()
         }
-
-        # Exemplars for testing
         self.test_exemplars = {
-            conc: copy.deepcopy(imgs[-test_set_size:])
-            for conc, imgs in self.img_candidates.items()
+            cat_type: {
+                conc: copy.deepcopy(list(islice(
+                    getattr(self, f"exemplars_{cat_type}")[conc].items(),
+                    len(getattr(self, f"exemplars_{cat_type}")[conc])-test_set_size,
+                    None
+                )))
+                for conc in concepts
+            }
+            for cat_type, concepts in target_concepts.items()
         }
 
         # History of ITL episode records

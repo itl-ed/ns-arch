@@ -21,6 +21,10 @@ class Lexicon:
         return symbol in self.s2d
 
     def add(self, symbol, denotation, freq=None):
+        # For consistency; we don't need the 'adjective satellite' thingy
+        # from WordNet
+        if symbol[1] == "s": symbol = (symbol[0], "a")
+
         # Symbol-to-denotation
         if symbol in self.s2d:
             self.s2d[symbol].append(denotation)
@@ -58,11 +62,6 @@ class Lexicon:
             else:
                 freq = None
             lemma, pos, _ = a.split(".")
-
-            # For consistency; we don't need the 'adjective satellite' thingy
-            # from WordNet
-            if pos == "s": pos = "a"
-
             self.add((lemma, pos), (i, "att"), freq)
 
         for i, r in enumerate(predicates["rel"]):

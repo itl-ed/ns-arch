@@ -451,8 +451,8 @@ class SemanticParser:
         # structured set of ASP literals
         translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
 
-        # We assume bare NPs (underspecified quant.) have universal reading when arg1 of index
-        # (and existential reading otherwise)
+        # We assume bare NPs (underspecified quant.) have universal reading when they are arg1
+        # of index (and existential reading otherwise)
         is_bare = lambda rf: any([
             r["pos"] == "q" and r["predicate"] == "udef"
             for r in parse["relations"]["by_args"][(rf,)]
@@ -461,6 +461,12 @@ class SemanticParser:
             ev_arg1 = parse["relations"]["by_id"][ev_id]["args"][1]
             if is_bare(ev_arg1):
                 ref_map[ev_arg1]["is_univ_quantified"] = True
+        for ref in ref_map:
+            # Handle function terms as well
+            if isinstance(ref, tuple):
+                # If all function term args are universally quantified
+                if all(ref_map[fa]["is_univ_quantified"] for fa in ref[1]):
+                    ref_map[ref]["is_univ_quantified"] = True
 
         # Reorganizing ref_map: not entirely necessary, just my OCD
         ref_map_map = defaultdict(lambda: len(ref_map_map))

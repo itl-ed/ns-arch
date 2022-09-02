@@ -5,7 +5,6 @@ scene graph generation & classification given bbox), few-shot registration of ne
 concepts
 """
 import os
-import pickle
 import logging
 from itertools import chain, permutations, product
 
@@ -31,7 +30,6 @@ from fvcore.common.checkpoint import (
 from .data import VGDataModule
 from .engine import SceneGraphGenerator
 from .utils import has_model, rename_resnet_params
-from .utils.path_manager import PathManager
 from .utils.visualize import visualize_sg_predictions
 
 __all__ = ["VisionModule"]
@@ -42,13 +40,12 @@ logger.setLevel(logging.INFO)
 
 class VisionModule:
 
-    def __init__(self, opts, initial_load=True):
+    def __init__(self, opts):
         """
         Args:
             opts: argparse.Namespace, from parse_argument()
         """
         self.opts = opts
-        self.path_manager = PathManager
 
         # Fetch detectron config from path, then update corresponding fields with
         # provided command line arguments
@@ -99,37 +96,6 @@ class VisionModule:
             "gradient_clip_val": 1.0
         }
 
-        # If initial_load is True, call self.load_model() once with either provided
-        # opts.load_checkpoint_path, or checkpoint path provided in default detectron2
-        # config (cfg.MODEL.WEIGHTS, as long as it is not empty string)
-        if initial_load:
-            if opts.load_checkpoint_path is None:
-                ckpt_path = cfg.MODEL.WEIGHTS
-            else:
-                ckpt_path = opts.load_checkpoint_path
-            
-            if ckpt_path: self.load_model(ckpt_path)
-        
-        # Initialize the category prediction heads (i.e. nuke em) if specified; mainly
-        # for experiment purposes, to prepare learners with zero concept knowledge but
-        # still with good feature extraction capability
-        if opts.initialize_categories:
-            roi_heads = self.model.base_model.roi_heads
-            predictor_heads = roi_heads.box_predictor
-
-            predictor_heads.num_classes = roi_heads.num_classes = 0
-            predictor_heads.num_attributes = roi_heads.num_attributes = 0
-            predictor_heads.num_relations = roi_heads.num_relations = 0
-
-            for cat_type in ["cls", "att", "rel"]:
-                empty_codes_layer = nn.Linear(
-                    predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
-                )
-                setattr(predictor_heads, f"{cat_type}_codes", empty_codes_layer)
-
-            self.predicates = {"cls": [], "att": [], "rel": []}
-            self.predicates_freq = {"cls": [], "att": [], "rel": []}
-
         # New visual input buffer
         self.new_input = None
 
@@ -146,7 +112,7 @@ class VisionModule:
         """
         Train the vision model with specified dataset: either in 1) traditional
         batch-mode for training base components, or 2) few-shot mode for training the
-        meta-learner component. Not really expected to be called by end-user.
+        meta-learner component. Not really expected to be called by lay end-user.
 
         Args:
             exp_name: str (optional), human-readable display name for this training run; if
@@ -330,7 +296,7 @@ class VisionModule:
         Args:
             image: str; input image, passed as path to image file
             exemplars: Exemplars (optional); set of positive & negative concept exemplars
-            bboxes: N*4 array-like (optional); set of bounding boxes provided
+            bboxes: dict[str, dict] (optional); set of entities with bbox info
             specs: list[(set[(str, int, list[str])], int)] (optional); set of FOL search
                 specifications
             visualize: bool (optional); whether to show visualization of inference result
@@ -396,7 +362,7 @@ class VisionModule:
 
             self.f_vecs = ({}, {}, {}, {}, {}, f_vecs[5])    # f_vecs[5]: backbone output
 
-            # Label and reorganize scene graph and feature vectors into a more intelligible
+            # Label & reorganize scene graph, and feature vectors into a more intelligible
             # format...
             self.scene = {
                 f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
@@ -663,46 +629,23 @@ class VisionModule:
                 new_cat_predictor.weight.data[cat_ind] = final_code
 
                 setattr(predictor_heads, target_layer, new_cat_predictor)
-
-    @has_model
-    def save_model(self):
-        """
-        Save current state of the vision model as torch checkpoint, while updating concept
-        vocabulary in metadata; this should be called to ensure novel concepts registered
-        with add_concept() are permanently learned.
-
-        Args:
-
-        """
-        ...
     
-    def load_model(self, ckpt_path):
+    def load_model(self, ckpt, ckpt_path=None, local_ckpt_path=None):
         """
-        Load a trained vision model from a torch checkpoint. Should be called before any
-        real use of the vision component.
+        Load a trained vision model from a torch checkpoint. Should be called before
+        any real use of the vision component. The optional path arguments are needed
+        when resuming batch training the model.
 
         Args:
-            ckpt_path: str; path to checkpoint to load
+            ckpt: dict; loaded checkpoint object
+            ckpt_path: (Optional) str; original checkpoint path str
+            local_ckpt_path: (Optional) str; resolved local checkpoint path str
         """
-        assert ckpt_path, "Provided checkpoint path is empty"
+        assert ckpt and len(ckpt)>0, "Provided checkpoint is empty"
 
         # Clear before update
         self.current_local_ckpt_path = None
         self.current_wandb_id = None
-
-        logger.info("[Vision] Loading from {} ...".format(ckpt_path))
-        if not os.path.isfile(ckpt_path):
-            local_ckpt_path = self.path_manager.get_local_path(ckpt_path)
-            assert os.path.isfile(local_ckpt_path), \
-                "Checkpoint {} not found!".format(local_ckpt_path)
-        else:
-            local_ckpt_path = ckpt_path
-
-        try:
-            ckpt = torch.load(local_ckpt_path)
-        except RuntimeError:
-            with open(local_ckpt_path, "rb") as f:
-                ckpt = pickle.load(f)
 
         if "state_dict" in ckpt:
             # Likely has loaded a checkpoint containing model with this codebase
@@ -717,17 +660,16 @@ class VisionModule:
             self.cfg.MODEL.ROI_HEADS.NUM_ATTRIBUTES = num_att
             self.cfg.MODEL.ROI_HEADS.NUM_RELATIONS = num_rel
 
-            self.model = SceneGraphGenerator.load_from_checkpoint(
-                local_ckpt_path, strict=False, cfg=self.cfg, offline=self.opts.offline
+            self.model = SceneGraphGenerator.load_from_dict(
+                ckpt, strict=False, cfg=self.cfg, offline=self.opts.offline
             )
 
             # Store local path of the currently loaded checkpoint, so that it can be
             # fed into self.trainer as ckpt_path arg
             self.current_local_ckpt_path = local_ckpt_path
-            if ckpt_path.startswith("wandb://"):
-                # Needed if resuming training
+            if ckpt_path is not None and ckpt_path.startswith("wandb://"):
                 self.current_wandb_id = ckpt_path.strip("wandb://").split("/")[2]
-            
+
             # If checkpoint has "predicates" & "predicates_freq" field, store as property
             if "predicates" in ckpt:
                 self.predicates = ckpt["predicates"]
@@ -755,3 +697,23 @@ class VisionModule:
                 logger.warning(get_missing_parameters_message(keys.missing_keys))
             if keys.unexpected_keys:
                 logger.warning(get_unexpected_parameters_message(keys.unexpected_keys))
+
+        # Initialize the category prediction heads (i.e. nuke'em) if specified; mainly
+        # for experiment purposes, to prepare learners with zero concept knowledge but
+        # still with good feature extraction capability
+        if self.opts.initialize_categories:
+            roi_heads = self.model.base_model.roi_heads
+            predictor_heads = roi_heads.box_predictor
+
+            predictor_heads.num_classes = roi_heads.num_classes = 0
+            predictor_heads.num_attributes = roi_heads.num_attributes = 0
+            predictor_heads.num_relations = roi_heads.num_relations = 0
+
+            for cat_type in ["cls", "att", "rel"]:
+                empty_codes_layer = nn.Linear(
+                    predictor_heads.CODE_SIZE, 0, device=self.model.base_model.device
+                )
+                setattr(predictor_heads, f"{cat_type}_codes", empty_codes_layer)
+
+            self.predicates = {"cls": [], "att": [], "rel": []}
+            self.predicates_freq = {"cls": [], "att": [], "rel": []}

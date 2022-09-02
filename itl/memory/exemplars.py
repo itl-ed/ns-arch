@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import numpy as np
 
 
@@ -8,33 +10,65 @@ class Exemplars:
     registration of novel concepts.
     """
     def __init__(self):
-        # Dict from visual concept to list of vectors (matrix)
-        self.pos_exs = {}        # Positive exemplars
-        self.neg_exs = {}        # Negative (but close?) exemplars
+        # Storage of source image patches
+        self.storage_img = []
 
-    def __len__(self):
-        return len(self.pos_exs)
+        # Storage of vectors, and pointers to their source
+        self.storage_vec = {
+            "cls": np.array([], dtype=np.float32),
+            "att": np.array([], dtype=np.float32),
+            "rel": np.array([], dtype=np.float32)
+        }
+        self.vec2img = { "cls": {}, "att": {}, "rel": {} }
+
+        # Labelling as dict from visual concept to list of pointers to vectors
+        self.exemplars_pos = {
+            "cls": defaultdict(set), "att": defaultdict(set), "rel": defaultdict(set)
+        }
+        self.exemplars_neg = {
+            "cls": defaultdict(set), "att": defaultdict(set), "rel": defaultdict(set)
+        }
 
     def __repr__(self):
-        return f"Exemplars(len={len(self)})"
+        scene_desc = f"scenes={len(self.storage_img)}"
+        obj_desc = f"objects={sum([len(img[1]) for img in self.storage_img])}"
+        conc_desc = f"concepts={len(self.exemplars_pos['cls'])}" \
+            f"/{len(self.exemplars_pos['att'])}" \
+            f"/{len(self.exemplars_pos['rel'])}"
+        return f"Exemplars({scene_desc}, {obj_desc}, {conc_desc})"
     
     def __getitem__(self, item):
-        return { "pos": self.pos_exs.get(item), "neg": self.neg_exs.get(item) }
+        conc_ind, cat_type = item
 
-    def add_pos(self, concept, f_vec, provenance):
-        if concept in self.pos_exs:
-            self.pos_exs[concept] = (
-                np.concatenate((self.pos_exs[concept][0], f_vec[None])),
-                np.concatenate((self.pos_exs[concept][1], provenance[None])),
-            )
-        else:
-            self.pos_exs[concept] = (f_vec[None], provenance[None])
+        pos_exs = self.exemplars_pos[cat_type][conc_ind]
+        pos_exs = self.storage_vec[cat_type][list(pos_exs)]
+        neg_exs = self.exemplars_neg[cat_type][conc_ind]
+        neg_exs = self.storage_vec[cat_type][list(neg_exs)]
 
-    def add_neg(self, concept, f_vec, provenance):
-        if concept in self.neg_exs:
-            self.neg_exs[concept] = (
-                np.concatenate((self.neg_exs[concept][0], f_vec[None])),
-                np.concatenate((self.neg_exs[concept][1], provenance[None])),
-            )
-        else:
-            self.neg_exs[concept] = (f_vec[None], provenance[None])
+        return { "pos": pos_exs, "neg": neg_exs }
+    
+    def add_exs(self, sources, f_vecs, pointers_src, pointers_exm):
+        assert len(sources) > 0
+        self.storage_img += sources
+
+        N_I = len(self.storage_img)
+
+        for cat_type in ["cls", "att", "rel"]:
+            if cat_type in pointers_src:
+                assert cat_type in f_vecs
+                N_C = len(self.storage_vec[cat_type])
+
+                # Add to feature vector matrix
+                self.storage_vec[cat_type] = np.concatenate([
+                    f_vecs[cat_type],
+                    self.storage_vec[cat_type].reshape(-1, f_vecs[cat_type].shape[-1])
+                ])
+                # Mapping from vector row index to source object in image
+                for fv_id, (src_img, src_obj) in pointers_src[cat_type].items():
+                    self.vec2img[cat_type][fv_id+N_C] = (src_img+N_I, src_obj)
+                # Positive/negative exemplar tagging by vector row index
+                for conc_ind, (exs_pos, exs_neg) in pointers_exm[cat_type].items():
+                    exs_pos = {fv_id+N_C for fv_id in exs_pos}
+                    exs_neg = {fv_id+N_C for fv_id in exs_neg}
+                    self.exemplars_pos[cat_type][conc_ind] |= exs_pos
+                    self.exemplars_neg[cat_type][conc_ind] |= exs_neg

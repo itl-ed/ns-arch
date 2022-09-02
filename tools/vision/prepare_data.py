@@ -11,5 +11,5 @@ from itl.opts import parse_arguments
 
 if __name__ == "__main__":
     opts = parse_arguments()
-    vision = VisionModule(opts, initial_load=False)
+    vision = VisionModule(opts)
     vision.dm.prepare_data()

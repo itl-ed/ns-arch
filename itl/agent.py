@@ -1,12 +1,16 @@
 """
 Outermost wrapper containing ITL agent API
 """
+import os
 import math
+import pickle
 import readline
 import rlcompleter
 
 import cv2
+import torch
 import numpy as np
+import pytorch_lightning as pl
 from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
@@ -17,6 +21,7 @@ from .theoretical_reasoning import TheoreticalReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
+from .path_manager import PathManager
 
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
@@ -29,6 +34,7 @@ class ITLAgent:
 
     def __init__(self, opts):
         self.opts = opts
+        self.path_manager = PathManager
 
         # Initialize component modules
         self.vision = VisionModule(opts)
@@ -37,10 +43,8 @@ class ITLAgent:
         self.practical = PracticalReasonerModule()
         self.lt_mem = LongTermMemoryModule()
 
-        # Initialize empty lexicon with concepts in visual module
-        self.lt_mem.lexicon.fill_from_dicts(
-            self.vision.predicates, self.vision.predicates_freq
-        )
+        # Load agent model from specified path
+        self.load_model()
 
         # Show visual UI and plots
         self.vis_ui_on = True
@@ -55,7 +59,7 @@ class ITLAgent:
 
         while True:
             self.loop()
-    
+
     def loop(self, v_usr_in=None, l_usr_in=None, pointing=None):
         """
         Single agent activity loop. Provide usr_in for programmatic execution; otherwise,
@@ -67,6 +71,76 @@ class ITLAgent:
         act_out = self._act()
 
         return act_out
+
+    def save_model(self, ckpt_path):
+        """
+        Save current snapshot of the agent's long-term knowledge as torch checkpoint;
+        in the current scope of the research, by 'long-term knowledge' we are referring
+        to the following information:
+
+        - Vision model; feature extractor backbone most importantly, and concept-specific
+            vectors
+        - Knowledge stored in long-term memory module:
+            - Symbolic knowledge base, including generalized symbolic knowledge represented
+                as logic programming rules
+            - Visual exemplar base, including positive/negative exemplars of visual concepts
+                represented as internal feature vectors along with original image patches from
+                which the vectors are obtained
+            - Lexicon, including associations between words (linguistic form) and their
+                denotations (linguistic meaning; here, visual concepts)
+        """
+        ckpt = {
+            "vision": {
+                "state_dict": self.vision.model.state_dict(),
+                "predicates": self.vision.predicates,
+                "predicates_freq": self.vision.predicates_freq
+            },
+            "lt_mem": {
+                "exemplars": vars(self.lt_mem.exemplars),
+                "kb": vars(self.lt_mem.kb),
+                "lexicon": vars(self.lt_mem.lexicon)
+            }
+        }
+        torch.save(ckpt, ckpt_path)
+    
+    def load_model(self):
+        """
+        Load from a torch checkpoint to initialize the agent; the checkpoint may contain
+        a snapshot of agent knowledge obtained as an output of self.save_model() evoked
+        previously, or just pre-trained weights of the vision module only (likely generated
+        as output of the vision module's training API)
+        """
+        # Resolve path to checkpoint (Use vision cfg default if not provided)
+        ckpt_path = self.opts.load_checkpoint_path or self.vision.cfg.MODEL.WEIGHTS
+        if not os.path.isfile(ckpt_path):
+            local_ckpt_path = self.path_manager.get_local_path(ckpt_path)
+            assert os.path.isfile(local_ckpt_path), \
+                "Checkpoint {} not found!".format(local_ckpt_path)
+        else:
+            local_ckpt_path = ckpt_path
+
+        # Load agent model checkpoint file
+        try:
+            ckpt = torch.load(local_ckpt_path)
+        except RuntimeError:
+            with open(local_ckpt_path, "rb") as f:
+                ckpt = pickle.load(f)
+
+        if "vision" in ckpt:
+            # Likely a checkpoint saved with self.save_model(); first load the vision
+            # module
+            self.vision.load_model(ckpt["vision"])
+
+            raise NotImplementedError
+        else:
+            # Likely a checkpoint only containing pre-trained vision model weights;
+            # pass the dict directly to self.vision.load_model()
+            self.vision.load_model(ckpt)
+
+        # Initialize empty lexicon with concepts in visual module
+        self.lt_mem.lexicon.fill_from_dicts(
+            self.vision.predicates, self.vision.predicates_freq
+        )
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
@@ -557,7 +631,7 @@ class ITLAgent:
     
     def prepare_answer_Q(self, ui):
         """
-        Prepare an answer a question that has been deemed answerable, by first computing
+        Prepare an answer to a question that has been deemed answerable, by first computing
         raw ingredients from which answer candidates can be composed, picking out an answer
         among the candidates, then translating the answer into natural language form to be
         uttered
