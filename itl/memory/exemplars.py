@@ -1,5 +1,6 @@
 from collections import defaultdict
 
+import cv2
 import numpy as np
 
 
@@ -9,6 +10,8 @@ class Exemplars:
     module's feature extractor component). Primarily used for incremental few-shot
     registration of novel concepts.
     """
+    TARGET_MAX = 80
+
     def __init__(self):
         # Storage of source image patches
         self.storage_img = []
@@ -49,7 +52,25 @@ class Exemplars:
     
     def add_exs(self, sources, f_vecs, pointers_src, pointers_exm):
         assert len(sources) > 0
-        self.storage_img += sources
+
+        # Add source images and object bboxes; for storage size concern, resize into
+        # smaller resolutions (so that max(width, height) <= 80) and record original
+        # image sizes
+        scaling_factors = [
+            Exemplars.TARGET_MAX / max(img.shape[:2])
+            for img, _ in sources
+        ]
+        self.storage_img += [
+            {
+                "image": cv2.resize(
+                    img, dsize=(int(img.shape[1]*sf), int(img.shape[0]*sf))
+                ),
+                "original_width": img.shape[1],
+                "original_height": img.shape[0],
+                "objects": bboxes
+            }
+            for (img, bboxes), sf in zip(sources, scaling_factors)
+        ]
 
         N_I = len(self.storage_img)
 

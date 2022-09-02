@@ -64,7 +64,7 @@ if __name__ == "__main__":
     cls_f_vecs_all = []
     cls_pos_exs = defaultdict(set)
 
-    for img in tqdm.tqdm(user.data_annotation[:10], total=len(user.data_annotation[:10])):
+    for img in tqdm.tqdm(user.data_annotation, total=len(user.data_annotation)):
         # Process all images in dataset
         inp = {
             "file_name": os.path.join(user.image_dir_prefix, img["file_name"]),
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     att_f_vecs_all = []; rel_f_vecs_all = []
     att_pos_exs = defaultdict(set); rel_pos_exs = defaultdict(set)
 
-    for img in tqdm.tqdm(user.data_annotation[:10], total=len(user.data_annotation[:10])):
+    for img in tqdm.tqdm(user.data_annotation, total=len(user.data_annotation)):
         # Process all images in dataset
         inp = {
             "file_name": os.path.join(user.image_dir_prefix, img["file_name"]),
