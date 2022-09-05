@@ -10,8 +10,7 @@ import rlcompleter
 import cv2
 import torch
 import numpy as np
-import pytorch_lightning as pl
-from detectron2.structures import BoxMode
+from detectron2.structures import Boxes, BoxMode
 
 from .memory import LongTermMemoryModule
 from .vision import VisionModule
@@ -102,7 +101,7 @@ class ITLAgent:
             }
         }
         torch.save(ckpt, ckpt_path)
-    
+
     def load_model(self):
         """
         Load from a torch checkpoint to initialize the agent; the checkpoint may contain
@@ -131,16 +130,15 @@ class ITLAgent:
             # module
             self.vision.load_model(ckpt["vision"])
 
-            raise NotImplementedError
+            # Fill in long-term memory components with loaded data
+            for mem_component, mem_data in ckpt["lt_mem"].items():
+                for component_prop, component_data in mem_data.items():
+                    component = getattr(self.lt_mem, mem_component)
+                    setattr(component, component_prop, component_data)
         else:
             # Likely a checkpoint only containing pre-trained vision model weights;
             # pass the dict directly to self.vision.load_model()
             self.vision.load_model(ckpt)
-
-        # Initialize empty lexicon with concepts in visual module
-        self.lt_mem.lexicon.fill_from_dicts(
-            self.vision.predicates, self.vision.predicates_freq
-        )
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
@@ -396,9 +394,9 @@ class ITLAgent:
 
                     # Acquire novel concept by updating lexicon (and vision.predicates)
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
-                    self.vision.predicates[cat_type].append(
-                        f"{name}.{pos}.0{len(self.lt_mem.lexicon.s2d[(name, pos)])}"
-                    )
+                    # self.vision.predicates[cat_type].append(
+                    #     f"{name}.{pos}.0{len(self.lt_mem.lexicon.s2d[(name, pos)])}"
+                    # )
 
                     ui = int(tok[0].strip("u"))
                     ri = int(tok[1].strip("r"))
@@ -411,17 +409,9 @@ class ITLAgent:
                         args = [
                             self.theoretical.value_assignment[arg] for arg in rule_head[0][2]
                         ]
-
-                        # Image patch
-                        ex_bbox = (float("inf"), float("inf"), -float("inf"), -float("inf"))
-                        for a in args:
-                            a_bbox = self.lang.dialogue.referents["env"][a]["bbox"]
-                            ex_bbox = (
-                                int(min(ex_bbox[0], a_bbox[0])), int(min(ex_bbox[1], a_bbox[1])),
-                                int(max(ex_bbox[2], a_bbox[2])), int(max(ex_bbox[3], a_bbox[3]))
-                            )
-                        ex_img = self.vision.last_raw[ex_bbox[1]:ex_bbox[3], ex_bbox[0]:ex_bbox[2]]
-                        ex_img = cv2.resize(ex_img, dsize=(128,128))
+                        ex_bboxes = [
+                            self.lang.dialogue.referents["env"][a]["bbox"] for a in args
+                        ]
 
                         if cat_type == "cls":
                             f_vec = self.vision.f_vecs[0][args[0]]
@@ -430,9 +420,15 @@ class ITLAgent:
                         else:
                             assert cat_type == "rel"
                             f_vec = self.vision.f_vecs[2][args[0]][args[1]]
+                        
+                        pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
+                        pointers_exm = { concept_ind: ({0}, set()) }
 
-                        self.lt_mem.exemplars.add_pos(
-                            novel_concept, f_vec.cpu().numpy(), ex_img
+                        self.lt_mem.exemplars.add_exs(
+                            sources=[(self.vision.last_raw, ex_bboxes)],
+                            f_vecs={ cat_type: f_vec[None,:].cpu().numpy() },
+                            pointers_src={ cat_type: pointers_src },
+                            pointers_exm={ cat_type: pointers_exm }
                         )
 
                         # Update the category code parameter in the vision model's predictor
@@ -546,26 +542,19 @@ class ITLAgent:
                 if rule.is_fact():
                     # Positive grounded fact
                     atom = rule.head[0]
-                    exemplar_add_func = self.lt_mem.exemplars.add_pos
+                    exm_pointer = ({0}, set())
                 else:
                     # Negative grounded fact
                     atom = rule.body[0]
-                    exemplar_add_func = self.lt_mem.exemplars.add_neg
+                    exm_pointer = (set(), {0})
 
-                cat_type, cat_ind = atom.name.split("_")
-                cat_ind = int(cat_ind)
+                cat_type, concept_ind = atom.name.split("_")
+                concept_ind = int(concept_ind)
                 args = [a for a, _ in atom.args]
 
-                # Image patch
-                ex_bbox = (float("inf"), float("inf"), -float("inf"), -float("inf"))
-                for a in args:
-                    a_bbox = self.lang.dialogue.referents["env"][a]["bbox"]
-                    ex_bbox = (
-                        int(min(ex_bbox[0], a_bbox[0])), int(min(ex_bbox[1], a_bbox[1])),
-                        int(max(ex_bbox[2], a_bbox[2])), int(max(ex_bbox[3], a_bbox[3]))
-                    )
-                ex_img = self.vision.last_raw[ex_bbox[1]:ex_bbox[3], ex_bbox[0]:ex_bbox[2]]
-                ex_img = cv2.resize(ex_img, dsize=(128,128))
+                ex_bboxes = [
+                    self.lang.dialogue.referents["env"][a]["bbox"] for a in args
+                ]
 
                 # Fetch current score for the asserted fact
                 if cat_type == "cls":
@@ -576,16 +565,21 @@ class ITLAgent:
                     assert cat_type == "rel"
                     f_vec = self.vision.f_vecs[2][args[0]][args[1]]
 
-                imperfect_concept = (cat_ind, cat_type)
-
                 # Add new concept exemplars to memory, as feature vectors at the
                 # penultimate layer right before category prediction heads
-                exemplar_add_func(
-                    imperfect_concept, f_vec.cpu().numpy(), ex_img
+                pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
+                pointers_exm = { concept_ind: exm_pointer }
+
+                self.lt_mem.exemplars.add_exs(
+                    sources=[(self.vision.last_raw, ex_bboxes)],
+                    f_vecs={ cat_type: f_vec[None,:].cpu().numpy() },
+                    pointers_src={ cat_type: pointers_src },
+                    pointers_exm={ cat_type: pointers_exm }
                 )
 
                 # Update the category code parameter in the vision model's predictor
                 # head using the new set of exemplars
+                imperfect_concept = (concept_ind, cat_type)
                 self.vision.update_concept(
                     imperfect_concept, self.lt_mem.exemplars[imperfect_concept]
                 )

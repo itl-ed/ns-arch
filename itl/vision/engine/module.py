@@ -110,7 +110,8 @@ class SceneGraphGenerator(LightningModule):
         }
 
     def on_load_checkpoint(self, ckpt):
-        self.start_iter = ckpt["iteration"]
+        if "iteration" in ckpt:
+            self.start_iter = ckpt["iteration"]
 
     def setup(self, stage):
         self.iteration_timer = hooks.IterationTimer()

@@ -444,80 +444,105 @@ class VisionModule:
             predictor_heads = self.model.base_model.roi_heads.box_predictor
             D = predictor_heads.compress_cls.out_features
 
-            for concept in set(exemplars.pos_exs) | set(exemplars.neg_exs):
-                # Prepare values needed to compute distance to pos/neg prototypes (if
-                # exemplars are present)
-                cat_ind, cat_type = concept
+            for cat_type in ["cls", "att", "rel"]:
+                pos_exs = exemplars.exemplars_pos[cat_type]
+                neg_exs = exemplars.exemplars_neg[cat_type]
 
-                if concept in exemplars.pos_exs:
-                    pos_exs = torch.tensor(exemplars.pos_exs[concept][0], device=dev)
-                else:
-                    pos_exs = torch.zeros(0, D, device=dev)
-
-                if concept in exemplars.neg_exs:
-                    neg_exs = torch.tensor(exemplars.neg_exs[concept][0], device=dev)
-                else:
-                    neg_exs = torch.zeros(0, D, device=dev)
-
-                if concept in exemplars.pos_exs:
-                    pos_proto = pos_exs.mean(dim=0)
-                else:
-                    pos_proto = None
-                
-                if concept in exemplars.neg_exs:
-                    neg_proto = neg_exs.mean(dim=0)
-                else:
-                    neg_proto = None
-
-                # Class and attribute predictions for scene graph nodes
-                for oi in fs_pred_nodes:
-                    if cat_type == "cls":
-                        f_vec_cat = self.f_vecs[0][oi]
-                    elif cat_type == "att":
-                        raise NotImplementedError
+                for cat_ind in (set(pos_exs) | set(neg_exs)):
+                    # Prepare values needed to compute distance to pos/neg prototypes
+                    # (if exemplars are present; some day we could maybe try zero-shot
+                    # prototype estimation by leveraging other resources like pre-trained
+                    # word embeddings?)
+                    if cat_ind in pos_exs and len(pos_exs[cat_ind])>0:
+                        proto_pos = exemplars.storage_vec[cat_type][list(pos_exs[cat_ind])]
+                        proto_pos = torch.tensor(proto_pos, device=dev).mean(dim=0)
                     else:
-                        continue
-
-                    # Use squared Euclidean distance (L2 norm)
-                    if pos_proto is not None:
-                        pos_dist = torch.linalg.norm(f_vec_cat-pos_proto).item()
-                    else:
-                        pos_dist = float("inf")
+                        proto_pos = None
                     
-                    if neg_proto is not None:
-                        neg_dist = torch.linalg.norm(f_vec_cat-neg_proto).item()
+                    if cat_ind in neg_exs and len(neg_exs[cat_ind])>0:
+                        proto_neg = exemplars.storage_vec[cat_type][list(neg_exs[cat_ind])]
+                        proto_neg = torch.tensor(proto_neg, device=dev).mean(dim=0)
                     else:
-                        neg_dist = float("inf")
-                    
-                    fs_score = F.softmax(torch.tensor([-pos_dist,-neg_dist]), dim=0)
-                    fs_score = fs_score[0].item()
+                        proto_neg = None
 
-                    if cat_type == "cls":
-                        if "pred_classes" in self.scene[oi]:
-                            C = len(self.scene[oi]["pred_classes"])
-                            if cat_ind >= C:
-                                self.scene[oi]["pred_classes"] = np.concatenate((
-                                    self.scene[oi]["pred_classes"], np.zeros(cat_ind+1-C)
-                                ))
-                        else:
-                            self.scene[oi]["pred_classes"] = np.zeros(cat_ind+1)
-                        
-                        self.scene[oi]["pred_classes"][cat_ind] = fs_score
+                    # Fetch appropriate feature vector and name of prediction field to fill
+                    if cat_type == "cls" or cat_type == "att":
+                        # Class and attribute predictions for scene graph nodes
+                        for oi in fs_pred_nodes:
+                            if cat_type == "cls":
+                                f_vec_cat = self.f_vecs[0][oi]
+                                field_name = "pred_classes"
+                            else:
+                                f_vec_cat = self.f_vecs[1][oi]
+                                field_name = "pred_attributes"
+
+                            # Use squared Euclidean distance (L2 norm)
+                            if proto_pos is not None:
+                                pos_dist = torch.linalg.norm(f_vec_cat-proto_pos).item()
+                            else:
+                                pos_dist = float("inf")
+                            
+                            if proto_neg is not None:
+                                neg_dist = torch.linalg.norm(f_vec_cat-proto_neg).item()
+                            else:
+                                neg_dist = float("inf")
+
+                            fs_score = F.softmax(torch.tensor([-pos_dist,-neg_dist]), dim=0)
+                            fs_score = fs_score[0].item()
+
+                            # Fill in the scene graph with the score
+                            if field_name in self.scene[oi]:
+                                C = len(self.scene[oi][field_name])
+                                if cat_ind >= C:
+                                    self.scene[oi][field_name] = np.concatenate((
+                                        self.scene[oi][field_name], np.zeros(cat_ind+1-C)
+                                    ))
+                            else:
+                                self.scene[oi][field_name] = np.zeros(cat_ind+1)
+                            
+                            self.scene[oi][field_name][cat_ind] = fs_score
+
                     else:
-                        pass
+                        # Relation predictions for scene graph edges
+                        assert cat_type == "rel"
+                        for oi, oj in fs_pred_edges:
+                            f_vec_cat = self.f_vecs[2][oi][oj]
+                            field_name = "pred_relations"
 
-                # Relation predictions for scene graph edges
-                for oi, oj in fs_pred_edges:
-                    if cat_type != "rel":
-                        continue
+                            # Use squared Euclidean distance (L2 norm)
+                            if proto_pos is not None:
+                                pos_dist = torch.linalg.norm(f_vec_cat-proto_pos).item()
+                            else:
+                                pos_dist = float("inf")
+                            
+                            if proto_neg is not None:
+                                neg_dist = torch.linalg.norm(f_vec_cat-proto_neg).item()
+                            else:
+                                neg_dist = float("inf")
 
-                    pass
+                            fs_score = F.softmax(torch.tensor([-pos_dist,-neg_dist]), dim=0)
+                            fs_score = fs_score[0].item()
+
+                            # Fill in the scene graph with the score
+                            if field_name in self.scene[oi]:
+                                if oj in self.scene[oi][field_name]:
+                                    C = len(self.scene[oi][field_name][oj])
+                                    if cat_ind >= C:
+                                        self.scene[oi][field_name][oj] = np.concatenate((
+                                            self.scene[oi][field_name][oj], np.zeros(cat_ind+1-C)
+                                        ))
+                                else:
+                                    self.scene[oi][field_name][oj] = np.zeros(cat_ind+1)
+                            else:
+                                self.scene[oi][field_name] = { oj: np.zeros(cat_ind+1) }
+                            
+                            self.scene[oi][field_name][oj][cat_ind] = fs_score
 
         if visualize:
             self.summ = visualize_sg_predictions(
                 self.last_raw, self.scene, self.predicates
             )
-    
+
     def reshow_pred(self):
         assert self.summ is not None, "No predictions have been made yet"
         dummy = plt.figure()

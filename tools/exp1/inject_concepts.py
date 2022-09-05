@@ -13,6 +13,7 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+import cv2
 import tqdm
 import torch
 import numpy as np
@@ -29,28 +30,24 @@ TAB = "\t"
 if __name__ == "__main__":
     opts = parse_arguments()
 
-    target_concepts = {
-        "cls": [
-            "brandy_glass.n.*",
-            "burgundy_glass.n.*",
-            "champagne_coupe.n.*"
-        ]
-    }
-
     # Set up agent & user
     agent = ITLAgent(opts)
     user = SimulatedTeacher(
-        target_concepts=target_concepts,
+        target_concepts={},
         strat_feedback=opts.exp1_strat_feedback,
         test_set_size=opts.exp1_test_set_size,
         seed=opts.exp1_random_seed
     )
-    # Also control PYTHONHASHSEED environment var (e.g. launch.json if in vscode)
+    # Also control PYTHONHASHSEED environment var (e.g. in bash script, or launch.json if in vscode)
 
+    # Set of intermediary concepts to be injected -- parts, attributes, relations
     intermediary_concepts = {
-        "cls": set(user.exemplars_cls) - set(user.domain_knowledge),
+        "cls": {        # Hand-picked
+            "handle.n.01", "body.n.08", "meat.n.01", "tine.n.01", "foot.n.03", "label.n.01",
+            "bowl.n.01", "stem.n.03", "neck.n.04", "blade.n.09", "bone.n.01"
+        },
         "att": set(user.exemplars_att),
-        "rel": set(user.exemplars_rel),
+        "rel": set(user.exemplars_rel)
     }
 
     agent.vision.dm.setup("test")
@@ -91,7 +88,10 @@ if __name__ == "__main__":
         # Source image and bounding boxes corresponding to each RoI feature vector
         # (Bboxes of RoIs for relations can be recovered from bboxes of RoI pairs)
         source_imgs.append((
-            convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR"),
+            cv2.resize(
+                convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR"),
+                (inp[0]["width"], inp[0]["height"])
+            ),
             BoxMode.convert(
                 np.stack([obj["bbox"] for obj in img["annotations"]]),
                 BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     # Pointing class vectors to their source objects
     oi_offsets = np.cumsum([0] + [len(bboxes) for _, bboxes in source_imgs[:-1]])
     pointers_cls_src = {
-        oi+off: (i, oi)
+        oi+off: (i, (oi,))
         for i, ((_, bboxes), off) in enumerate(zip(source_imgs, oi_offsets))
         for oi in range(len(bboxes))
     }
@@ -140,10 +140,10 @@ if __name__ == "__main__":
 
     # Finally add class exemplars
     agent.lt_mem.exemplars.add_exs(
-        source_imgs,
-        { "cls": cls_f_vecs_all },
-        { "cls": pointers_cls_src },
-        { "cls": pointers_cls_exm }
+        sources=source_imgs,
+        f_vecs={ "cls": cls_f_vecs_all },
+        pointers_src={ "cls": pointers_cls_src },
+        pointers_exm={ "cls": pointers_cls_exm }
     )
     # Update the category code parameter in the vision model's predictor head using
     # the new set of exemplars
@@ -193,7 +193,10 @@ if __name__ == "__main__":
         # Source image and bounding boxes corresponding to each RoI feature vector
         # (Bboxes of RoIs for relations can be recovered from bboxes of RoI pairs)
         source_imgs.append((
-            convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR"),
+            cv2.resize(
+                convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR"),
+                (inp[0]["width"], inp[0]["height"])
+            ),
             BoxMode.convert(
                 np.stack([obj["bbox"] for obj in img["annotations"]]),
                 BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
@@ -290,10 +293,10 @@ if __name__ == "__main__":
 
     # Finally add attribute & relation exemplars
     agent.lt_mem.exemplars.add_exs(
-        source_imgs,
-        { "att": att_f_vecs_all, "rel": rel_f_vecs_all },
-        { "att": pointers_att_src, "rel": pointers_rel_src },
-        { "att": pointers_att_exm, "rel": pointers_rel_exm }
+        sources=source_imgs,
+        f_vecs={ "att": att_f_vecs_all, "rel": rel_f_vecs_all },
+        pointers_src={ "att": pointers_att_src, "rel": pointers_rel_src },
+        pointers_exm={ "att": pointers_att_exm, "rel": pointers_rel_exm }
     )
     # Update the category code parameter in the vision model's predictor head using
     # the new set of exemplars

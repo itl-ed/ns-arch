@@ -16,7 +16,10 @@ class Lexicon:
 
         # Add reserved symbols & denotations
         for s, d in Lexicon.RESERVED.items(): self.add(s, d)
-    
+
+    def __repr__(self):
+        return f"Lexicon(len={len(self.s2d)})"
+
     def __contains__(self, symbol):
         return symbol in self.s2d
 
@@ -39,35 +42,3 @@ class Lexicon:
 
         freq = freq or 1
         self.d_freq[denotation] = freq
-
-    def fill_from_dicts(self, predicates, predicates_freq):
-        """
-        Populate empty lexicon with provided dicts of visual concept predicates
-        and their frequency info
-        """
-        assert len(self.s2d) == len(Lexicon.RESERVED), \
-            "This method initializes empty lexicons only"
-
-        for i, c in enumerate(predicates["cls"]):
-            if predicates_freq is not None:
-                freq = predicates_freq["cls"][i]
-            else:
-                freq = None
-            lemma, pos, _ = c.split(".")
-            self.add((lemma, pos), (i, "cls"), freq)
-
-        for i, a in enumerate(predicates["att"]):
-            if predicates_freq is not None:
-                freq = predicates_freq["att"][i]
-            else:
-                freq = None
-            lemma, pos, _ = a.split(".")
-            self.add((lemma, pos), (i, "att"), freq)
-
-        for i, r in enumerate(predicates["rel"]):
-            if predicates_freq is not None:
-                freq = predicates_freq["rel"][i]
-            else:
-                freq = None
-            lemma, pos, _ = r.split(".")
-            self.add((lemma, pos), (i, "rel"), freq)

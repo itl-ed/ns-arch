@@ -120,20 +120,21 @@ if __name__ == "__main__":
 
     # Final 'exam' after the series of ITL interactions
     exam_result = defaultdict(lambda: defaultdict(int))
-    for conc, imgs in user.test_exemplars.items():
+    for conc, imgs in user.test_exemplars["cls"].items():
         concept_string = conc.split(".")[0]
         concept_string = concept_string.replace("_", " ")
 
         for img, instances in tqdm.tqdm(imgs, total=len(imgs)):
-            instance = instances[0]
-
+            img = user.data_annotation[img]
             img_f = img["file_name"]
+
+            instance = instances[0]
             instance_bbox = np.array(img["annotations"][instance]["bbox"])
             instance_bbox = BoxMode.convert(
                 instance_bbox[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
             )[0]
 
-            for conc_test in user.test_exemplars:
+            for conc_test in user.test_exemplars["cls"]:
                 concept_test_string = conc_test.split(".")[0]
                 concept_test_string = concept_test_string.replace("_", " ")
 
@@ -176,6 +177,8 @@ if __name__ == "__main__":
 
                 data[i,j] = exam_result[conc_i][conc_j] / opts.exp1_test_set_size
             out_csv.write(",".join([str(d) for d in data[i]])+"\n")
+
+    sys.exit()
 
     # Cluster analysis of positive/negative exemplars
     from torch.utils.tensorboard import SummaryWriter

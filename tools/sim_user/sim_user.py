@@ -7,7 +7,6 @@ import re
 import json
 import copy
 import random
-from itertools import islice
 from collections import defaultdict
 
 import numpy as np
@@ -23,6 +22,10 @@ class SimulatedTeacher:
             self.metadata = json.load(md_file)
         with open("tools/sim_user/tabletop_domain.json") as dom_file:
             self.domain_knowledge = json.load(dom_file)
+        
+        self.data_by_img_id = {
+            img["image_id"]: img for img in self.data_annotation
+        }
 
         self.image_dir_prefix = "datasets/tabletop/images"
 
@@ -74,27 +77,20 @@ class SimulatedTeacher:
         random.seed(seed)
 
         # Split exemplars for training and testing per concept
-        self.training_exemplars = {
-            cat_type: {
-                conc: copy.deepcopy(list(islice(
-                    getattr(self, f"exemplars_{cat_type}")[conc].items(),
-                    len(getattr(self, f"exemplars_{cat_type}")[conc])-test_set_size
-                )))
-                for conc in concepts
-            }
-            for cat_type, concepts in target_concepts.items()
-        }
-        self.test_exemplars = {
-            cat_type: {
-                conc: copy.deepcopy(list(islice(
-                    getattr(self, f"exemplars_{cat_type}")[conc].items(),
-                    len(getattr(self, f"exemplars_{cat_type}")[conc])-test_set_size,
-                    None
-                )))
-                for conc in concepts
-            }
-            for cat_type, concepts in target_concepts.items()
-        }
+        self.training_exemplars = {}; self.test_exemplars = {}
+        for cat_type, concepts in target_concepts.items():
+            if cat_type not in self.training_exemplars:
+                self.training_exemplars[cat_type] = {}
+            if cat_type not in self.test_exemplars:
+                self.test_exemplars[cat_type] = {}
+
+            for conc in concepts:
+                all_exs = copy.deepcopy(list(
+                    getattr(self, f"exemplars_{cat_type}")[conc].items()
+                ))
+                random.shuffle(all_exs)
+                self.training_exemplars[cat_type][conc] = all_exs[:-test_set_size]
+                self.test_exemplars[cat_type][conc] = all_exs[-test_set_size:]
 
         # History of ITL episode records
         self.episode_records = []
@@ -109,8 +105,8 @@ class SimulatedTeacher:
         Initiate an ITL episode by asking a what-question on a concept instance
         """
         # Fetch next target concept to test/teach this episode, then rotate the list
-        self.current_target_concept = self.target_concepts.pop()
-        self.target_concepts = [self.current_target_concept] + self.target_concepts
+        self.current_target_concept = self.target_concepts["cls"].pop()
+        self.target_concepts["cls"] = [self.current_target_concept] + self.target_concepts["cls"]
 
         concept_string = self.current_target_concept.split(".")[0]
         concept_string = concept_string.replace("_", " ")
@@ -127,8 +123,9 @@ class SimulatedTeacher:
         # exemplar of the target concept in front of the agent's vision sensor...
         # In this experiment, let's load an image containing an instance of the target
         # concept, and then present to the agent along with the question.
-        img_cands = self.training_exemplars[self.current_target_concept]
+        img_cands = self.training_exemplars["cls"][self.current_target_concept]
         sampled_img, instances = img_cands.pop()
+        sampled_img = self.data_by_img_id[sampled_img]
         sampled_instance = random.sample(instances, 1)[0]
 
         img_f = sampled_img["file_name"]
