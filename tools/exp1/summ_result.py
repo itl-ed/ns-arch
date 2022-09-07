@@ -135,7 +135,7 @@ if __name__ == "__main__":
         # Plot curve
         plt.xlabel("# exemplars")
         plt.ylabel("cumulative regret")
-        plt.ylim(0, int(len(data["curve"]) * 0.5))
+        plt.ylim(0, int(len(data["curve"]) * 0.8))
         plt.grid()
 
         # Ordering legends according to the prespecified ordering above
@@ -186,7 +186,7 @@ if __name__ == "__main__":
                 data["confMat"][i,i] / data["test_set_size"]
                 for i in range(len(data["confMat"]))
             ]
-            f1_per_concept = [p*r/(p+r) for p, r in zip(P_per_concept, R_per_concept)]
+            f1_per_concept = [2*p*r/(p+r) for p, r in zip(P_per_concept, R_per_concept)]
 
             data["config_label"] = config_label
             data["mF1"] = sum(f1_per_concept) / len(data["concepts"])

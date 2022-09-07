@@ -9,7 +9,22 @@ def wrap_args(*args):
     Wrap list of arguments, adding whether each arg is variable or not by looking at
     if the first letter is uppercased
     """
-    return [(a, type(a)==str and a[0].isupper()) for a in args]
+    wrapped = []
+    for a in args:
+        if type(a) == str:
+            # Non-function term
+            wrapped.append((a, a[0].isupper()))
+        elif type(a) == tuple:
+            # Function term
+            _, f_args = a
+            wrapped.append((a, all(fa[0].isupper() for fa in f_args)))
+        elif type(a) == int or type(a) == float:
+            # Number, definitely not a variable
+            wrapped.append((a, False))
+        else:
+            raise NotImplementedError
+
+    return wrapped
 
 def logit(p, large=float("inf")):
     """ Compute logit of the probability value p """

@@ -102,20 +102,32 @@ class Literal:
         else:
             return self
     
-    def substitute(self, val, subs_val, is_pred):
+    def substitute(self, subs_map):
         """
         Return new Rule instance where all occurrences of designated arg or pred are
         replaced with provided new value
         """
-        if is_pred:
-            assert self.name == "*_?", \
-                "Predicate substitution must only be called on literal with the special " \
-                "reserved predicate '*_?'."
-            subs_name = subs_val[0]
-            subs_args = self.args[1:]
+        if self.name == "*_?" and self.args[0][0] in subs_map:
+            # Substituting the reserved predicate "*_?" with a contentful predicate
+            subs_name = subs_map[self.args[0][0]]
+            self_args = self.args[1:]
         else:
-            subs_name = self.name
-            subs_args = [subs_val if a[0] == val else a for a in self.args]
+            subs_name = subs_map.get(self.name, self.name)
+            self_args = self.args
+
+        subs_args = []
+        for a_term, a_is_var in self_args:
+            if type(a_term)==tuple:
+                # Function term; appropriately substitute function name and args
+                f_name, f_args = a_term
+                subs_f_name = subs_map.get(f_name, f_name)
+                subs_f_args = tuple(subs_map.get(fa, fa) for fa in f_args)
+                subs_args.append(
+                    ((subs_f_name, subs_f_args), a_is_var)
+                )
+            else:
+                # Non-function term; simple substitution
+                subs_args.append((subs_map.get(a_term, a_term), a_is_var))
 
         return Literal(subs_name, subs_args, self.naf)
 

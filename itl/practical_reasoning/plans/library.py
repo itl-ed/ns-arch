@@ -37,7 +37,7 @@ library = {
     "address_mismatch": [
         # Prepare answering utterance to generate
         {
-            "action_method": Val(referrable=["handle_mismatch"]),
+            "action_method": Val(referrable=["comp_actions", "handle_mismatch"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
         # Generate whatever response queued
@@ -52,7 +52,7 @@ library = {
     "address_unanswered_Q": [
         # Prepare answering utterance to generate
         {
-            "action_method": Val(referrable=["attempt_answer_Q"]),
+            "action_method": Val(referrable=["comp_actions", "attempt_answer_Q"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
     ],
@@ -62,7 +62,7 @@ library = {
     "answer_Q": [
         # Prepare the answer to be uttered
         {
-            "action_method": Val(referrable=["prepare_answer_Q"]),
+            "action_method": Val(referrable=["comp_actions", "prepare_answer_Q"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
         # Generate the prepared answer

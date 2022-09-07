@@ -81,7 +81,7 @@ class Rule:
         return contained
 
     def terms(self):
-        """ Return set of all terms (constant or variable) occurring in the rule """
+        """ Return set of all terms (non-function or function) occurring in the rule """
         terms_head = set.union(*[set(hl.args) for hl in self.head]) \
             if len(self.head) else set()
         terms_body = set.union(*[set(bl.args) for bl in self.body]) \
@@ -100,13 +100,25 @@ class Rule:
         """ Returns True if the rule is variable-free """
         return all([l.is_grounded() for l in self.literals()])
 
-    def is_instance(self, other):
+    def is_isomorphic_to(self, other):
         """
-        Returns true if self can be instantiated from other by grounding variables (if any)
+        Return true if self is isomorphic to other up to variable renaming (but not constant
+        renaming)
         """
+        # Trivially true if equal
+        if self == other: return True
+
         # False if heads/bodies have different length
         if len(self.head) != len(other.head): return False
         if len(self.body) != len(other.body): return False
+
+        # False if heads/bodies have predicate mismatch
+        head_preds_s = {(hl.name, len(hl.args)) for hl in self.head}
+        head_preds_o = {(hl.name, len(hl.args)) for hl in other.head}
+        if head_preds_s != head_preds_o: return False
+        body_preds_s = {(bl.name, len(bl.args)) for bl in self.body}
+        body_preds_o = {(bl.name, len(bl.args)) for bl in other.body}
+        if body_preds_s != body_preds_o: return False
 
         terms_s = self.terms(); terms_o = other.terms()
 
@@ -117,11 +129,43 @@ class Rule:
             if c_o not in consts_s:
                 return False            # Found constant that cannot be matched
 
-        # Now trying unification for those that passed tests so far
-        vars_o = [t for t, is_var in terms_o if is_var]
-        consts_s = {t for t, is_var in terms_s if not is_var}
+        # Try to find isomorphism
+        ism = _lits_isomorphism(self.head, other.head, {})
+        ism = _lits_isomorphism(self.body, other.body, ism)
 
-        # Obtain signatures for each term occurring in rule
+        return ism is not None
+
+    def is_instance_of(self, other):
+        """
+        Returns true if self can be instantiated from other by grounding variables (if any)
+        """
+        # Trivially true if equal
+        if self == other: return True
+
+        # False if heads/bodies have different length
+        if len(self.head) != len(other.head): return False
+        if len(self.body) != len(other.body): return False
+
+        # False if heads/bodies have predicate mismatch
+        head_preds_s = {(hl.name, len(hl.args)) for hl in self.head}
+        head_preds_o = {(hl.name, len(hl.args)) for hl in other.head}
+        if head_preds_s != head_preds_o: return False
+        body_preds_s = {(bl.name, len(bl.args)) for bl in self.body}
+        body_preds_o = {(bl.name, len(bl.args)) for bl in other.body}
+        if body_preds_s != body_preds_o: return False
+
+        terms_s = self.terms(); terms_o = other.terms()
+
+        consts_s = {t for t, is_var in terms_s if not is_var}
+        consts_o = {t for t, is_var in terms_o if not is_var}
+
+        for c_o in consts_o:
+            if c_o not in consts_s:
+                return False            # Found constant that cannot be matched
+
+        # Now trying unification for those that passed tests so far...
+
+        # Obtaining signatures for each term occurring in rule
         def term_signatures(rule):
             sigs = defaultdict(list)
             for hl in rule.head:
@@ -131,7 +175,7 @@ class Rule:
                 for i, a in enumerate(bl.args):
                     sigs[a].append((bl.name, bl.naf, i))
             return dict(sigs)
-        
+
         sigs_s = term_signatures(self); sigs_o = term_signatures(other)
 
         # First unify constants
@@ -149,6 +193,7 @@ class Rule:
         # Try variable substitution; keep looking for substitutable constant to
         # 'consume' until vars_o is exhausted. If feasible, must succeed in whichever
         # order.
+        vars_o = [t for t, is_var in terms_o if is_var]
         while len(vars_o) > 0:
             v = vars_o.pop()
 
@@ -158,7 +203,7 @@ class Rule:
 
                 if cnt1 & cnt2 == cnt1:
                     # sigs_o[v] can unify with sig
-                    for s in sigs_o[v]: sig.remove(s)
+                    for s in sigs_o[(v, True)]: sig.remove(s)
                     if len(sig) == 0: del sigs_s[t_s]
                     break
             else:
@@ -169,12 +214,99 @@ class Rule:
 
         return True
 
-    def substitute(self, val, new_val, is_pred):
+    def substitute(self, subs_map):
         """
         Return new Rule instance where all occurrences of designated arg or pred are
         replaced with provided new value
         """
-        new_head = [hl.substitute(val, new_val, is_pred) for hl in self.head]
-        new_body = [bl.substitute(val, new_val, is_pred) for bl in self.body]
+        new_head = [hl.substitute(subs_map) for hl in self.head]
+        new_body = [bl.substitute(subs_map) for bl in self.body]
 
         return Rule(head=new_head, body=new_body)
+
+
+def _lits_isomorphism(lits1, lits2, ism):
+    """
+    Helper method for testing whether two sets of literals are isomorphic up to
+    variable renaming
+    """
+    isomorphism = ism   # Start with provided isomorphism candidate
+    for hl_s in lits1:
+        lit_matched = False
+
+        for hl_o in lits2:
+            if hl_s.name != hl_o.name: continue
+
+            potential_mapping = {}; cannot_map_args = False
+            for sa, oa in zip(hl_s.args, hl_o.args):
+                sa_term, sa_is_var = sa
+                oa_term, oa_is_var = oa
+
+                if sa_is_var != oa_is_var:
+                    # Term type mismatch
+                    cannot_map_args = True; break
+
+                if sa_is_var == oa_is_var == False:
+                    if sa_term != oa_term:
+                        # Constant term mismatch
+                        cannot_map_args = True; break
+                else:
+                    if type(sa_term) != type(oa_term):
+                        # Function vs. non-function term mismatch
+                        cannot_map_args = True; break
+
+                    if type(sa_term) == type(oa_term) == str:
+                        # Both args are variable terms
+                        if sa_term in isomorphism:
+                            if isomorphism[sa_term] != oa_term:
+                                # Conflict with existing mapping
+                                cannot_map_args = True; break
+                        elif sa_term in potential_mapping:
+                            if potential_mapping[sa_term] != oa_term:
+                                # Conflict with existing potential mapping
+                                cannot_map_args = True; break
+                        else:
+                            # Record potential mapping
+                            potential_mapping[sa_term] = oa_term
+
+                    elif type(sa_term) == type(oa_term) == tuple:
+                        sa_f_name, sa_f_args = sa_term
+                        oa_f_name, oa_f_args = oa_term
+
+                        if sa_f_name != oa_f_name:
+                            # Function name mismatch
+                            cannot_map_args = True; break
+                        
+                        if len(sa_f_args) != len(oa_f_args):
+                            # Function arity mismatch
+                            cannot_map_args = True; break
+
+                        for sfa, ofa in zip(sa_f_args, oa_f_args):
+                            if sfa in isomorphism:
+                                if isomorphism[sfa] != ofa:
+                                    # Conflict with existing mapping
+                                    cannot_map_args = True; break
+                            elif sfa in potential_mapping:
+                                if potential_mapping[sfa] != ofa:
+                                    # Conflict with existing potential mapping
+                                    cannot_map_args = True; break
+                            else:
+                                # Both args are variable terms, record potential mapping
+                                potential_mapping[sfa] = ofa
+                    
+                    else:
+                        raise NotImplementedError
+
+        if cannot_map_args:
+            # Discard potential mapping and move on
+            continue
+        else:
+            # Update isomorphism
+            lit_matched = True
+            isomorphism.update(potential_mapping)
+
+        # Return None as soon as any literal is found to be unmappable to any
+        if not lit_matched: return None
+
+    # Successfully found an isomorphism
+    return isomorphism

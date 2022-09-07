@@ -1,6 +1,6 @@
 """
 Language processing module API that exposes only the high-level functionalities
-requtt_idred by the ITL agent: situate the embodied agent in a physical environment,
+required by the ITL agent: situate the embodied agent in a physical environment,
 understand & generate language input in the context of the dialogue
 """
 import copy

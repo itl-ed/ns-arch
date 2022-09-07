@@ -526,10 +526,7 @@ class Models:
             )
             ev_instances = {
                 s_opt: [
-                    reduce(
-                        lambda r, a: r.substitute(a[0][0], (a[1], False), a[0][1]),
-                        [ev_rule]+[(qv, o) for qv, o in zip(q_vars, s_opt)]
-                    )
+                    ev_rule.substitute({ qv[0]: o for qv, o in zip(q_vars, s_opt) })
                     for ev_rule in event
                 ]
                 for s_opt in subs_options

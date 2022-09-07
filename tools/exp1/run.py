@@ -30,24 +30,24 @@ if __name__ == "__main__":
     if opts.exp1_difficulty == "base":
         target_concepts = {
             "cls": [
-                "brandy_glass.n.*",
                 "banana.n.01",
-                "wine_bottle.n.01"
+                "wine_bottle.n.01",
+                "brandy_glass.n.*"
             ]
         }
     elif opts.exp1_difficulty == "easy":
         target_concepts = {
             "cls": [
-                "brandy_glass.n.*",
+                "champagne_coupe.n.*",
                 "burgundy_glass.n.*",
-                "champagne_coupe.n.*"
+                "brandy_glass.n.*"
             ]
         }
     else:
         raise NotImplementedError
 
     # Number of episodes = Episode per concept * Number of concepts
-    num_eps = opts.exp1_num_episodes * len(target_concepts)
+    num_eps = opts.exp1_num_episodes * len(target_concepts["cls"])
 
     # Set up agent & user
     agent = ITLAgent(opts)
@@ -67,18 +67,6 @@ if __name__ == "__main__":
         f"{opts.strat_mismatch}_" \
         f"{opts.exp1_random_seed}"
 
-    ## Temp code for prior knowledge injection
-
-    # Sample rule injection
-    # knowledge_inp = {
-    #     "v_usr_in": "n",
-    #     "l_usr_in": f"Brandy glasses have short stems.",
-    #     "pointing": {}
-    # }
-    # agent.loop(**knowledge_inp)
-
-    ## Temp code end
-
     for i in tqdm.tqdm(range(num_eps), total=num_eps):
         print("")
         print(f"Sys> Episode {i+1}")
@@ -94,6 +82,18 @@ if __name__ == "__main__":
         
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
+
+        ## Temp code for prior knowledge injection
+        if i==0:
+            # Sample rule injection
+            knowledge_inp = {
+                "v_usr_in": "n",
+                "l_usr_in": f"Brandy glasses have short stems.",
+                # "l_usr_in": f"Stems of brandy glasses are short.",
+                "pointing": {}
+            }
+            agent.loop(**knowledge_inp)
+        ## Temp code end
 
     res_dir = os.path.join(opts.output_dir_path, "exp1_res")
     os.makedirs(res_dir, exist_ok=True)
