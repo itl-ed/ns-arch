@@ -305,7 +305,7 @@ class LanguageModule:
                         
                         q_rules.append((rule_head, rule_body, None))
                     
-                    query = (None, q_rules)
+                    question = (None, q_rules)
 
                 else:
                     # wh- question with wh-quantified entities; first add built rules to
@@ -340,15 +340,15 @@ class LanguageModule:
                     info = [info[i] for i, args in enumerate(rule_args) if len(wh_refs & args) == 0]
                     
                     q_vars = set.union(*rule_args) & wh_refs
-                    query = (q_vars, q_rules)
+                    question = (q_vars, q_rules)
 
                 if len(info) > 0:
                     info = _map_and_format(info, ref_map, f"u{ui}")
                 else:
                     info = None
-                query = _map_and_format(query, ref_map, f"u{ui}")
+                question = _map_and_format(question, ref_map, f"u{ui}")
 
-                new_record = ("U", (info, query), parse["raw"])
+                new_record = ("U", (info, question), parse["raw"])
                 self.dialogue.record.append(new_record)    # Add new record
                 self.dialogue.unanswered_Q.add(ui)
 

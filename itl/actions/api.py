@@ -1,9 +1,16 @@
 """
 Agent actions API that implements and exposes 'composite' actions that require
 interplay between more than one agent modules, internal or external. Actions are
-to be registered to an ITLAgent instance first, and later evoked by plans fetched
-from PracticalReasonerModule.
+to be registered to an ITLAgent instance provided as __init__ arg first (thus
+forming circular reference), and later evoked by plans fetched from the practical
+reasoning module.
 """
+from functools import reduce
+from collections import defaultdict
+
+from ..lpmln import Literal
+
+
 class AgentCompositeActions:
     
     def __init__(self, agent):
@@ -102,9 +109,9 @@ class AgentCompositeActions:
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
         translated = self.agent.theoretical.translate_dialogue_content(dialogue_state)
 
-        _, query = translated[ui]
+        _, question = translated[ui]
 
-        if query is None:
+        if question is None:
             # Question cannot be answered for some reason
             return
         else:
@@ -127,20 +134,136 @@ class AgentCompositeActions:
 
         translated = self.agent.theoretical.translate_dialogue_content(dialogue_state)
 
-        _, query = translated[ui]
-        assert query is not None
+        _, question = translated[ui]
+        assert question is not None
 
-        q_vars, _ = query
+        q_vars, q_rules = question
+        models_vl, _, _ = self.agent.theoretical.concl_vis_lang
 
-        # Ensure it has every ingredient available for making most informed judgements
-        # on computing the best answer to the question. Namely, for logic-based reasoner,
-        # inspect its current belief after sensemaking against its KB, performing visual
-        # search
-        print(0)
+        # Ensure it has every ingredient available needed for making most informed judgements
+        # on computing the best answer to the question. Specifically, scene graph outputs from
+        # vision module may be omitting some entities, whose presence and properties may have
+        # critical influence on the symbolic sensemaking process. Make sure such entities, if
+        # actually present, are captured in scene graphs by performing visual search as needed.
+        if len(self.agent.lt_mem.kb.entries) > 0:
+            # Queries (in IR sense) to feed into KB for fetching search specs. Represent each
+            # query as a pair of predicates of interest & arg entities of interest
+            kb_queries = set()
+
+            for qr in q_rules:
+                # Inspecting literals in each q_rule for identifying search specs to feed into
+                # visual search calls
+                for q_lit in qr.literals():
+                    if q_lit.name == "*_?":
+                        # Literal whose predicate is question-marked (contained for questions
+                        # like "What is this?", etc.); the first argument term, standing for
+                        # the predicate variable, must be contained in q_vars
+                        assert q_lit.args[0] in q_vars
+
+                        # Assume we are only interested in cls concepts with "What is this?"
+                        # type of questions
+                        kb_query_preds = frozenset([
+                            pred for pred in self.agent.lt_mem.kb.entries_by_pred 
+                            if pred.startswith("cls")
+                        ])
+                        kb_query_args = tuple(q_lit.args[1:])
+                    else:
+                        # Literal with fixed predicate, to which can narrow down the KB query
+                        kb_query_preds = frozenset([q_lit.name])
+                        kb_query_args = tuple(q_lit.args)
+                    
+                    kb_queries.add((kb_query_preds, kb_query_args))
+
+            # Query the KB to collect search specs
+            search_spec_cands = []
+            for kb_qr in kb_queries:
+                kb_query_preds, kb_query_args = kb_qr
+
+                for pred in kb_query_preds:
+                    # Relevant KB entries containing predicate of interest
+                    relevant_entries = self.agent.lt_mem.kb.entries_by_pred[pred]
+                    relevant_entries = [
+                        self.agent.lt_mem.kb.entries[entry_id]
+                        for entry_id in relevant_entries
+                    ]
+
+                    # Set of literals for each relevant KB entry
+                    relevant_literals = [
+                        set.union(*[r.literals() for r in entry[0]])
+                        for entry in relevant_entries
+                    ]
+                    # Depending on which literal (with matching predicate name) in literal
+                    # sets to use as 'anchor', there can be multiple choices of search specs
+                    relevant_literals = [
+                        { l: lits-{l} for l in lits if l.name==pred }
+                        for lits in relevant_literals
+                    ]
+
+                    # Collect search spec candidates. We will disregard attribute concepts as
+                    # search spec elements, noticing that it is usually sufficient and generalizable
+                    # to provide object class info only as specs for searching potentially relevant,
+                    # yet unrecognized entities in a scene. This is more of a heuristic for now --
+                    # maybe justify this on good grounds later...
+                    specs = [
+                        {
+                            tgt_lit: (
+                                {rl for rl in rel_lits if not rl.name.startswith("att_")},
+                                {la: qa for la, qa in zip(tgt_lit.args, kb_query_args)}
+                            )
+                            for tgt_lit, rel_lits in lits.items()
+                        }
+                        for lits in relevant_literals
+                    ]
+                    specs = [
+                        {
+                            tgt_lit.substitute(terms=term_map): frozenset({
+                                rl.substitute(terms=term_map) for rl in rel_lits
+                            })
+                            for tgt_lit, (rel_lits, term_map) in spc.items()
+                        }
+                        for spc in specs
+                    ]
+                    search_spec_cands += specs
+
+            # Merge and flatten down to a single layer dict
+            def set_add_merge(d1, d2):
+                for k, v in d2.items(): d1[k].add(v)
+                return d1
+            search_spec_cands = reduce(set_add_merge, [defaultdict(set)]+search_spec_cands)
+
+            # Finalize set of search specs, excluding those which already have satisfying
+            # entities in the current sensemaking output
+            final_specs = []
+            for lits_sets in search_spec_cands.values():
+                for lits in lits_sets:
+                    # Lift any remaining function term args to non-function variable args
+                    all_fn_args = set(
+                        a for a in set.union(*[set(l.args) for l in lits])
+                        if type(a[0])==tuple
+                    )
+                    all_var_names = set(
+                        t_val for t_val, t_is_var in set.union(*[l.nonfn_terms() for l in lits])
+                        if t_is_var
+                    )
+                    fn_lifting_map = {
+                        fa: (f"X{i+len(all_var_names)}", True)
+                        for i, fa in enumerate(all_fn_args)
+                    }
+
+                    lits = frozenset([l.substitute(terms=fn_lifting_map) for l in lits])
+                    if not any(Literal.isomorphism_btw(lits, spc[1], {}) for spc in final_specs):
+                        # Append only if there isn't any isomorphic spec
+                        search_vars = all_var_names | {vn for vn, _ in fn_lifting_map.values()}
+                        final_specs.append((list(search_vars), lits))
+
+            # Perform incremental visual search and another round of sensemaking
+            self.agent.vision.predict(
+                self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
+                specs=final_specs
+            )
 
         # Compute raw answer candidates by appropriately querying current world models
-        models_vl, _, _ = self.agent.theoretical.concl_vis_lang
-        answers_raw, _ = models_vl.query(*query)
+        answers_raw, _ = models_vl.query(*question)
 
         if q_vars is not None:
             # (Temporary) For now, let's limit our answer to "what is X" questions to nouns:

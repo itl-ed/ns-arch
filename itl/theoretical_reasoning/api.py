@@ -197,7 +197,7 @@ class TheoreticalReasonerModule:
 
         # Understood dialogue record contents
         occurring_preds = set()
-        for ui, (_, (rules, query), _) in enumerate(dialogue_state["record"]):
+        for ui, (_, (rules, question), _) in enumerate(dialogue_state["record"]):
             if rules is not None:
                 for ri, rule in enumerate(rules):
                     head, body, _ = rule
@@ -252,7 +252,7 @@ class TheoreticalReasonerModule:
                             else:
                                 rule_body = None
 
-                            # Rule to query models_v with
+                            # Question to query models_v with
                             q_rule = Rule(head=rule_head, body=rule_body)
                             q_vars = tuple((a, False) for a in occurring_args)
                             query_result, _ = models_v.query(q_vars, q_rule)
@@ -275,8 +275,8 @@ class TheoreticalReasonerModule:
 
                                 aprog.add_hard_rule(Rule(head=c_head, body=c_body))
             
-            if query is not None:
-                _, q_rules = query
+            if question is not None:
+                _, q_rules = question
 
                 for qi, rule in enumerate(q_rules):
                     head, body, _ = rule
@@ -430,7 +430,7 @@ class TheoreticalReasonerModule:
         result = []
         a_map = lambda args: [self.value_assignment.get(a, a) for a in args]
 
-        for ui, (_, (rules, query), _) in enumerate(dialogue_state["record"]):
+        for ui, (_, (rules, question), _) in enumerate(dialogue_state["record"]):
             # If the utterance contains an unresolved neologism, give up translation
             # for the time being
             contains_unresolved_neologism = any([
@@ -480,9 +480,9 @@ class TheoreticalReasonerModule:
             else:
                 translated_rules = None
             
-            # Translate query
-            if query is not None:
-                q_vars, q_rules = query
+            # Translate question
+            if question is not None:
+                q_vars, q_rules = question
 
                 translated_qrs = []
                 for qi, (head, body, _) in enumerate(q_rules):
@@ -522,11 +522,11 @@ class TheoreticalReasonerModule:
 
                     translated_qrs.append(Rule(head=rule_head, body=rule_body))
 
-                translated_query = q_vars, translated_qrs
+                translated_question = q_vars, translated_qrs
             else:
-                translated_query = None
+                translated_question = None
 
-            result.append((translated_rules, translated_query))
+            result.append((translated_rules, translated_question))
 
         return result
 

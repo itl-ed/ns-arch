@@ -520,13 +520,21 @@ class Models:
 
             # All possible grounded instances of event
             subs_options = product(*[
-                [p[0] for p in preds if pred_arities[qv]==p[1]]
-                    if is_pred else ents
-                for qv, is_pred in q_vars]
-            )
+                [p[0] for p in preds if pred_arities[qv]==p[1]] if is_pred else ents
+                for qv, is_pred in q_vars
+            ])
             ev_instances = {
                 s_opt: [
-                    ev_rule.substitute({ qv[0]: o for qv, o in zip(q_vars, s_opt) })
+                    ev_rule.substitute(
+                        preds={
+                            qv[0]: o for qv, o in zip(q_vars, s_opt)
+                            if qv[0].startswith("P")
+                        },
+                        terms={
+                            qv: (o, False) for qv, o in zip(q_vars, s_opt)
+                            if not qv[0].startswith("P")
+                        }
+                    )
                     for ev_rule in event
                 ]
                 for s_opt in subs_options

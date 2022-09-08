@@ -297,7 +297,7 @@ class VisionModule:
             image: str; input image, passed as path to image file
             exemplars: Exemplars (optional); set of positive & negative concept exemplars
             bboxes: dict[str, dict] (optional); set of entities with bbox info
-            specs: list[(set[(str, int, list[str])], int)] (optional); set of FOL search
+            specs: list[(list[str], frozenset[Literal])] (optional); set of FOL search
                 specifications
             visualize: bool (optional); whether to show visualization of inference result
                 on a pop-up window

@@ -3,6 +3,8 @@ Implements LP^MLN weighted rule class
 """
 from collections import defaultdict, Counter
 
+from .literal import Literal
+
 
 class Rule:
     """ ASP rule, as comprehensible by popular ASP solvers like clingo. """
@@ -130,8 +132,8 @@ class Rule:
                 return False            # Found constant that cannot be matched
 
         # Try to find isomorphism
-        ism = _lits_isomorphism(self.head, other.head, {})
-        ism = _lits_isomorphism(self.body, other.body, ism)
+        ism = Literal.isomorphism_btw(self.head, other.head, {})
+        ism = Literal.isomorphism_btw(self.body, other.body, ism)
 
         return ism is not None
 
@@ -214,99 +216,12 @@ class Rule:
 
         return True
 
-    def substitute(self, subs_map):
+    def substitute(self, **kwargs):
         """
         Return new Rule instance where all occurrences of designated arg or pred are
         replaced with provided new value
         """
-        new_head = [hl.substitute(subs_map) for hl in self.head]
-        new_body = [bl.substitute(subs_map) for bl in self.body]
+        new_head = [hl.substitute(**kwargs) for hl in self.head]
+        new_body = [bl.substitute(**kwargs) for bl in self.body]
 
         return Rule(head=new_head, body=new_body)
-
-
-def _lits_isomorphism(lits1, lits2, ism):
-    """
-    Helper method for testing whether two sets of literals are isomorphic up to
-    variable renaming
-    """
-    isomorphism = ism   # Start with provided isomorphism candidate
-    for hl_s in lits1:
-        lit_matched = False
-
-        for hl_o in lits2:
-            if hl_s.name != hl_o.name: continue
-
-            potential_mapping = {}; cannot_map_args = False
-            for sa, oa in zip(hl_s.args, hl_o.args):
-                sa_term, sa_is_var = sa
-                oa_term, oa_is_var = oa
-
-                if sa_is_var != oa_is_var:
-                    # Term type mismatch
-                    cannot_map_args = True; break
-
-                if sa_is_var == oa_is_var == False:
-                    if sa_term != oa_term:
-                        # Constant term mismatch
-                        cannot_map_args = True; break
-                else:
-                    if type(sa_term) != type(oa_term):
-                        # Function vs. non-function term mismatch
-                        cannot_map_args = True; break
-
-                    if type(sa_term) == type(oa_term) == str:
-                        # Both args are variable terms
-                        if sa_term in isomorphism:
-                            if isomorphism[sa_term] != oa_term:
-                                # Conflict with existing mapping
-                                cannot_map_args = True; break
-                        elif sa_term in potential_mapping:
-                            if potential_mapping[sa_term] != oa_term:
-                                # Conflict with existing potential mapping
-                                cannot_map_args = True; break
-                        else:
-                            # Record potential mapping
-                            potential_mapping[sa_term] = oa_term
-
-                    elif type(sa_term) == type(oa_term) == tuple:
-                        sa_f_name, sa_f_args = sa_term
-                        oa_f_name, oa_f_args = oa_term
-
-                        if sa_f_name != oa_f_name:
-                            # Function name mismatch
-                            cannot_map_args = True; break
-                        
-                        if len(sa_f_args) != len(oa_f_args):
-                            # Function arity mismatch
-                            cannot_map_args = True; break
-
-                        for sfa, ofa in zip(sa_f_args, oa_f_args):
-                            if sfa in isomorphism:
-                                if isomorphism[sfa] != ofa:
-                                    # Conflict with existing mapping
-                                    cannot_map_args = True; break
-                            elif sfa in potential_mapping:
-                                if potential_mapping[sfa] != ofa:
-                                    # Conflict with existing potential mapping
-                                    cannot_map_args = True; break
-                            else:
-                                # Both args are variable terms, record potential mapping
-                                potential_mapping[sfa] = ofa
-                    
-                    else:
-                        raise NotImplementedError
-
-        if cannot_map_args:
-            # Discard potential mapping and move on
-            continue
-        else:
-            # Update isomorphism
-            lit_matched = True
-            isomorphism.update(potential_mapping)
-
-        # Return None as soon as any literal is found to be unmappable to any
-        if not lit_matched: return None
-
-    # Successfully found an isomorphism
-    return isomorphism

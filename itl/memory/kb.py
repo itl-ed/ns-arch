@@ -14,7 +14,8 @@ class KnowledgeBase:
         # Knowledge base entries stored as collections of rules; each collection
         # corresponds to a batch (i.e. conjunction) of generic rules extracted from
         # the same provenance (utterances from teacher, etc.), associated with a
-        # shared probability weight value between 0 ~ 1
+        # shared probability weight value between 0 ~ 1. Each collection stands for
+        # a conjunction of heads of rules, which should share the same rule body.
         self.entries = []
 
         # Indexing entries by contained predicates
@@ -28,18 +29,24 @@ class KnowledgeBase:
 
     def add(self, rules, weight, source):
         """ Returns whether KB is expanded or not """
+        # More than one rules should represent conjunction of rule heads for the same
+        # rule body
+        assert all(r.body == rules[0].body for r in rules)
+
         # Neutralizing variable & function names by stripping off utterance indices, etc.
         rename_var = set.union(*[
             {t[0] for t in r.terms() if type(t[0])==str} for r in rules
         ])
-        rename_var = { vn: re.match("(.+)u.*$", vn).group(1) for vn in rename_var }
+        rename_var = {
+            (vn, True): (re.match("(.+)u.*$", vn).group(1), True) for vn in rename_var
+        }
         rename_fn = set.union(*[
             {t[0][0] for t in r.terms() if type(t[0])==tuple} for r in rules
         ])
         rename_fn = {
             fn: re.match("(.+)_.*$", fn).group(1)+str(i) for i, fn in enumerate(rename_fn)
         }
-        rules = {r.substitute({**rename_var, **rename_fn}) for r in rules}
+        rules = { r.substitute(terms=rename_var, functions=rename_fn) for r in rules }
 
         occurring_preds = set.union(*[{lit.name for lit in r.literals()} for r in rules])
 
