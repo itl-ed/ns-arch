@@ -8,7 +8,9 @@ reasoning module.
 from functools import reduce
 from collections import defaultdict
 
-from ..lpmln import Literal
+import numpy as np
+
+from ..lpmln import Literal, Rule
 
 
 class AgentCompositeActions:
@@ -250,17 +252,43 @@ class AgentCompositeActions:
                         for i, fa in enumerate(all_fn_args)
                     }
 
-                    lits = frozenset([l.substitute(terms=fn_lifting_map) for l in lits])
-                    if not any(Literal.isomorphism_btw(lits, spc[1], {}) for spc in final_specs):
-                        # Append only if there isn't any isomorphic spec
-                        search_vars = all_var_names | {vn for vn, _ in fn_lifting_map.values()}
-                        final_specs.append((list(search_vars), lits))
+                    search_vars = all_var_names | {vn for vn, _ in fn_lifting_map.values()}
+                    search_vars = tuple(search_vars)
+                    if len(search_vars) == 0:
+                        # Disregard if there's no variables in search spec (i.e. no search target
+                        # after all)
+                        continue
+
+                    lits = [l.substitute(terms=fn_lifting_map) for l in lits]
+                    lits = frozenset([l for l in lits if any(la_is_var for _, la_is_var in l.args)])
+                    if any(Literal.isomorphism_btw(lits, spc[1], {}) for spc in final_specs):
+                        # Disregard if there's already an isomorphic literal set
+                        continue
+
+                    # Check if the agent is already (visually) aware of the potential search
+                    # targets; if so, disregard this one
+                    check_result, _ = models_vl.query(
+                        tuple((v, False) for v in search_vars),
+                        [Rule(head=l) for l in lits]
+                    )
+                    if len(check_result) > 0:
+                        continue
+
+                    final_specs.append((search_vars, lits))
 
             # Perform incremental visual search and another round of sensemaking
+            O = len(self.agent.vision.scene)
+            oi_offsets = np.cumsum([0]+[len(vars) for vars, _ in final_specs][:-1])
+            final_specs = {
+                tuple(f"o{offset+i+O}" for i in range(len(spc[0]))): spc
+                for spc, offset in zip(final_specs, oi_offsets)
+            }
             self.agent.vision.predict(
                 self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
                 specs=final_specs
             )
+
+            print(0)
 
         # Compute raw answer candidates by appropriately querying current world models
         answers_raw, _ = models_vl.query(*question)

@@ -297,8 +297,8 @@ class VisionModule:
             image: str; input image, passed as path to image file
             exemplars: Exemplars (optional); set of positive & negative concept exemplars
             bboxes: dict[str, dict] (optional); set of entities with bbox info
-            specs: list[(list[str], frozenset[Literal])] (optional); set of FOL search
-                specifications
+            specs: dict[tuple[str], (list[str], frozenset[Literal])] (optional); set of FOL
+                search specifications
             visualize: bool (optional); whether to show visualization of inference result
                 on a pop-up window
         Returns:
@@ -320,7 +320,7 @@ class VisionModule:
         if bboxes is None and specs is None:
             # Full prediction
             inp = [self.dm.mapper_batch["test"](inp)]
-            exs_cached = exs_idx_map = inc_idx_map = None
+            exs_cached = exs_idx_map = inc_idx_map = search_specs = None
         else:
             # Incremental prediction; fetch bboxes and box f_vecs for existing detections
             exs_cached = {
@@ -335,6 +335,7 @@ class VisionModule:
                 ]
             }
             exs_idx_map = { i: ent for i, ent in enumerate(self.scene) }
+            exs_idx_map_inv = { ent: i for i, ent in enumerate(self.scene) }
 
             if bboxes is not None:
                 # Instance classification mode
@@ -342,14 +343,64 @@ class VisionModule:
                 inp = [self.dm.mapper_batch["test_props"](inp)]
 
                 inc_idx_map = { i: ent for i, ent in enumerate(bboxes) }
+                search_specs = None
             else:
                 assert specs is not None
                 # Instance search mode
-                inc_idx_map = { i: ent for i, ent in enumerate(specs) }
+                inp = [self.dm.mapper_batch["test"](inp)]
+
+                oi_offsets = np.cumsum([0]+[len(ents) for ents in specs][:-1])
+                inc_idx_map = {
+                    offset+i: e
+                    for ents, offset in zip(specs, oi_offsets)
+                    for i, e in enumerate(ents)
+                }
+
+                # Provide search specs as appropriate vectors; required info provided
+                # differently, depending on whether prediction is exemplar-based or
+                # model-based
+                if exemplars is None:
+                    # Search spec info for model-based prediction
+                    search_by = "model"
+                    raise NotImplementedError
+                else:
+                    # Search spec info for exemplar-based prediction
+                    search_by = "exemplar"
+                    search_conds = []
+                    for s_vars, dscr in specs.values():
+                        dscr_translated = []
+                        for d_lit in dscr:
+                            cat_type, conc_ind = d_lit.name.split("_")
+                            conc_ind = int(conc_ind)
+
+                            # Handles to literal args; either search target variable
+                            # or previously identified entity
+                            arg_handles = [
+                                ("v", s_vars.index(a[0]))
+                                    if a[0] in s_vars
+                                    else ("e", exs_idx_map_inv[a[0]])
+                                for a in d_lit.args
+                            ]
+                            # Reference vector, as mean of positive exemplar feature vectors
+                            # fetched from exemplar base
+                            ex_vecs = exemplars[(conc_ind, cat_type)]
+                            ref_vec_pos = torch.tensor(
+                                ex_vecs["pos"], device=self.model.base_model.device
+                            ).mean(dim=0) if len(ex_vecs["pos"]) > 0 else None
+                            ref_vec_neg = torch.tensor(
+                                ex_vecs["neg"], device=self.model.base_model.device
+                            ).mean(dim=0) if len(ex_vecs["neg"]) > 0 else None
+                            ref_vecs = (ref_vec_pos, ref_vec_neg)
+
+                            dscr_translated.append((cat_type, arg_handles, ref_vecs))
+
+                        search_conds.append((len(s_vars), dscr_translated))
+                    
+                    search_specs = (search_by, search_conds)
 
         with torch.no_grad():
             output, f_vecs, inc_out = self.model.base_model.inference(
-                inp, exs_cached=exs_cached
+                inp, exs_cached=exs_cached, search_specs=search_specs
             )
             output = [out["instances"] for out in output]
 
@@ -431,12 +482,12 @@ class VisionModule:
                 self.f_vecs[4][oi] = f_vecs[4][i]       # sem_f_vecs
 
             # Nodes and edges in scene graphs for which few-shot predictions should be made
-            fs_pred_nodes = inc_idx_map.values()
-            fs_pred_edges = chain(
-                permutations(bboxes, 2),
+            fs_pred_nodes = list(inc_idx_map.values())
+            fs_pred_edges = list(chain(
+                permutations(fs_pred_nodes, 2),
                 product(exs_idx_map.values(), inc_idx_map.values()),
                 product(inc_idx_map.values(), exs_idx_map.values()),
-            )
+            ))
 
         if exemplars is not None:
             # Computing few shot exemplar-based scores
@@ -448,19 +499,19 @@ class VisionModule:
                 pos_exs = exemplars.exemplars_pos[cat_type]
                 neg_exs = exemplars.exemplars_neg[cat_type]
 
-                for cat_ind in (set(pos_exs) | set(neg_exs)):
+                for conc_ind in (set(pos_exs) | set(neg_exs)):
                     # Prepare values needed to compute distance to pos/neg prototypes
                     # (if exemplars are present; some day we could maybe try zero-shot
                     # prototype estimation by leveraging other resources like pre-trained
                     # word embeddings?)
-                    if cat_ind in pos_exs and len(pos_exs[cat_ind])>0:
-                        proto_pos = exemplars.storage_vec[cat_type][list(pos_exs[cat_ind])]
+                    if conc_ind in pos_exs and len(pos_exs[conc_ind])>0:
+                        proto_pos = exemplars.storage_vec[cat_type][list(pos_exs[conc_ind])]
                         proto_pos = torch.tensor(proto_pos, device=dev).mean(dim=0)
                     else:
                         proto_pos = None
                     
-                    if cat_ind in neg_exs and len(neg_exs[cat_ind])>0:
-                        proto_neg = exemplars.storage_vec[cat_type][list(neg_exs[cat_ind])]
+                    if conc_ind in neg_exs and len(neg_exs[conc_ind])>0:
+                        proto_neg = exemplars.storage_vec[cat_type][list(neg_exs[conc_ind])]
                         proto_neg = torch.tensor(proto_neg, device=dev).mean(dim=0)
                     else:
                         proto_neg = None
@@ -493,14 +544,14 @@ class VisionModule:
                             # Fill in the scene graph with the score
                             if field_name in self.scene[oi]:
                                 C = len(self.scene[oi][field_name])
-                                if cat_ind >= C:
+                                if conc_ind >= C:
                                     self.scene[oi][field_name] = np.concatenate((
-                                        self.scene[oi][field_name], np.zeros(cat_ind+1-C)
+                                        self.scene[oi][field_name], np.zeros(conc_ind+1-C)
                                     ))
                             else:
-                                self.scene[oi][field_name] = np.zeros(cat_ind+1)
+                                self.scene[oi][field_name] = np.zeros(conc_ind+1)
                             
-                            self.scene[oi][field_name][cat_ind] = fs_score
+                            self.scene[oi][field_name][conc_ind] = fs_score
 
                     else:
                         # Relation predictions for scene graph edges
@@ -527,16 +578,16 @@ class VisionModule:
                             if field_name in self.scene[oi]:
                                 if oj in self.scene[oi][field_name]:
                                     C = len(self.scene[oi][field_name][oj])
-                                    if cat_ind >= C:
+                                    if conc_ind >= C:
                                         self.scene[oi][field_name][oj] = np.concatenate((
-                                            self.scene[oi][field_name][oj], np.zeros(cat_ind+1-C)
+                                            self.scene[oi][field_name][oj], np.zeros(conc_ind+1-C)
                                         ))
                                 else:
-                                    self.scene[oi][field_name][oj] = np.zeros(cat_ind+1)
+                                    self.scene[oi][field_name][oj] = np.zeros(conc_ind+1)
                             else:
-                                self.scene[oi][field_name] = { oj: np.zeros(cat_ind+1) }
+                                self.scene[oi][field_name] = { oj: np.zeros(conc_ind+1) }
                             
-                            self.scene[oi][field_name][oj][cat_ind] = fs_score
+                            self.scene[oi][field_name][oj][conc_ind] = fs_score
 
         if visualize:
             self.summ = visualize_sg_predictions(
@@ -610,7 +661,7 @@ class VisionModule:
             mix_ratio: float; Mixing ratio between old code vs. new code - 1.0 corresponds to
                 total update with new code
         """
-        cat_ind, cat_type = concept
+        conc_ind, cat_type = concept
 
         predictor_heads = self.model.base_model.roi_heads.box_predictor
         code_gen = getattr(self.model.meta, f"{cat_type}_code_gen")
@@ -640,7 +691,7 @@ class VisionModule:
                 cat_predictor = getattr(predictor_heads, target_layer)
 
                 # Take existing code, to be averaged with new code
-                old_code = cat_predictor.weight.data[cat_ind]
+                old_code = cat_predictor.weight.data[conc_ind]
                 final_code = mix_ratio*new_code + (1-mix_ratio)*old_code
 
                 # Update category code vector
@@ -651,7 +702,7 @@ class VisionModule:
                     D, C, bias=False, device=cat_predictor.weight.device
                 )
                 new_cat_predictor.weight.data = cat_predictor.weight.data
-                new_cat_predictor.weight.data[cat_ind] = final_code
+                new_cat_predictor.weight.data[conc_ind] = final_code
 
                 setattr(predictor_heads, target_layer, new_cat_predictor)
     

@@ -21,7 +21,7 @@ class DualModeRCNN(GeneralizedRCNN):
     """
     def inference(
         self, batched_inputs,
-        detected_instances=None, do_postprocess=True, exs_cached=None
+        detected_instances=None, do_postprocess=True, exs_cached=None, search_specs=None
     ):
         assert not self.training
 
@@ -39,14 +39,16 @@ class DualModeRCNN(GeneralizedRCNN):
                 # getting filtered out
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
                 results, f_vecs, inc_out = self.roi_heads(
-                    images, features, proposals, None, boxes_provided=True, exs_cached=exs_cached
+                    images, features, proposals, targets=None,
+                    exs_cached=exs_cached, boxes_provided=True
                 )
             else:
                 # Otherwise, default behavior of the parent class
                 assert self.proposal_generator is not None
                 proposals, _ = self.proposal_generator(images, features, None)
                 results, f_vecs, inc_out = self.roi_heads(
-                    images, features, proposals, None, boxes_provided=False, exs_cached=exs_cached
+                    images, features, proposals, targets=None,
+                    exs_cached=exs_cached, boxes_provided=False, search_specs=search_specs
                 )
         else:
             # No use case handled by this snippet yet...

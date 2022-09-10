@@ -509,7 +509,8 @@ class Models:
             # Set of atoms that appear in models covered by this Models instance
             atoms_covered = self.atoms()     # Effectively the union of all models covered
 
-            # Set of entities and predicates (along w/ arity info) occurring in atoms_covered
+            # Set of entities and predicates (along w/ arity info - values defined only for
+            # predicate q_var) occurring in atoms_covered
             ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
             preds = set((atm.name, len(atm.args)) for atm in atoms_covered)
             pred_arities = {

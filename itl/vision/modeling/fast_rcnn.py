@@ -3,6 +3,7 @@ Implement custom modules by extending detectron2-provided defaults, to be plugge
 into our scene graph generation model
 """
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from detectron2.data import MetadataCatalog
@@ -461,7 +462,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
 
         return {k: v * self.loss_weight.get(k, 1.0) * ROI_HEAD_WGT for k, v in losses.items()}
 
-    def inference(self, predictions, proposals, boxes_provided=False):
+    def inference(self, predictions, proposals, boxes_provided=False, nms_scores=None):
         """
         Extended for a new scene graph generation inference output format; the method effectively
         fuses super().inference(), fast_rcnn_inference(), and fast_rcnn_inference_single_image()
@@ -470,10 +471,13 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         Args:
             predictions: (Tensor, Tensor, Tensor, Tensor, Tensor), return value of self.forward()
             proposals: (Instances, Instances), passed from super().forward()
-            boxes_provided: Bool, whether to skip filtering by objectness score & NMS -- expected
-                to be True for 'classification mode' where inputs come with proposals from ground
-                truth bounding boxes
-        
+            boxes_provided: bool (optional), whether to skip filtering by objectness score & NMS
+                -- expected to be True for 'classification mode' where inputs come with proposals
+                from ground truth bounding boxes
+            nms_scores: Tensor (optional), scores with which NMS scores will be run instead of
+                the objectness scores (which is generally equivalent to salience in scene),
+                expectedly obtained from some compatibility test for visual search
+
         Returns:
             list[Instances]: A list of N instances, one for each image in the batch, that stores
                 the topk most confidence detections.
@@ -513,35 +517,41 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
             boxes_per_image = Boxes(boxes_per_image.reshape(-1, 4))
             boxes_per_image.clip(image_shape)
             boxes_per_image = boxes_per_image.tensor.view(-1, num_bbox_reg_classes, 4)  # R x C x 4
+            if num_bbox_reg_classes == 1:
+                boxes_per_image = boxes_per_image[:,0,:]
 
             if boxes_provided:
                 filter_inds = torch.arange(len(boxes_per_image), device=boxes_per_image.device)
-                if num_bbox_reg_classes == 1:
-                    boxes_per_image = boxes_per_image[:,0,:]
             else:
-                ## 1. Filter results based on detection scores. It can make NMS more efficient
-                ##    by filtering out low-confidence detections.
-                filter_mask = objectness_scores_per_image.view(len(boxes_per_image)) > score_thresh
-                filter_inds = filter_mask.nonzero().squeeze()
-                if len(filter_inds.shape) == 0:
-                    filter_inds = filter_inds[None]
+                if nms_scores is None:
+                    ## If not given explicit measures by which proposals are to be ranked, use
+                    ## objectness scores to filter and rank them
 
-                # Filter out proposal pairs containing any proposals that are filtered out
-                pair_filter_inds = pair_select_indices(len(filter_inds), filter_inds)
+                    # First filter results based on detection scores. It can make NMS more efficient
+                    # by filtering out low-confidence detections.
+                    filter_mask = objectness_scores_per_image.view(len(boxes_per_image)) > score_thresh
+                    filter_inds = filter_mask.nonzero().squeeze()
+                    if len(filter_inds.shape) == 0:
+                        filter_inds = filter_inds[None]
 
-                if num_bbox_reg_classes == 1:
-                    boxes_per_image = boxes_per_image[filter_mask, 0]
-                else:
+                    # Filter out proposal pairs containing any proposals that are filtered out
+                    pair_filter_inds = pair_select_indices(len(filter_inds), filter_inds)
+
                     boxes_per_image = boxes_per_image[filter_mask]
-                objectness_scores_per_image = objectness_scores_per_image[filter_mask]
-                cls_scores_per_image = cls_scores_per_image[filter_mask]
-                att_scores_per_image = att_scores_per_image[filter_mask]
-                rel_scores_per_image = rel_scores_per_image[pair_filter_inds]
+                    objectness_scores_per_image = objectness_scores_per_image[filter_mask]
+                    cls_scores_per_image = cls_scores_per_image[filter_mask]
+                    att_scores_per_image = att_scores_per_image[filter_mask]
+                    rel_scores_per_image = rel_scores_per_image[pair_filter_inds]
 
-                ## 2. Apply NMS to the filtered proposals.
+                    # Scores to feed into NMS
+                    nms_scores = objectness_scores_per_image.view(len(filter_inds))
+                else:
+                    filter_inds = torch.arange(len(boxes_per_image))
+
+                # Apply NMS to the filtered proposals, with provided scores.
                 keep = batched_nms(
-                    boxes_per_image, objectness_scores_per_image.view(len(filter_inds)),
-                    torch.zeros(len(filter_inds), dtype=torch.int64, device=filter_inds.device),
+                    boxes_per_image, nms_scores,
+                    torch.zeros(len(nms_scores), dtype=torch.int64, device=nms_scores.device),
                     nms_thresh
                 )
                 if topk_per_image >= 0:
@@ -567,7 +577,8 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
                         torch.zeros([1,R], device=rel_scores_per_image.device),
                         rel_scores_per_image[i*(N-1)+i:(i+1)*(N-1)]
                     ], dim=0)
-                for i in range(N)], dim=0)
+                    for i in range(N)
+                ], dim=0)
 
             result = Instances(image_shape)
             result.pred_classes = cls_scores_per_image

@@ -177,9 +177,12 @@ class Literal:
             lit_matched = False
 
             for hl_o in lits2:
-                if hl_s.name != hl_o.name: continue
-
                 potential_mapping = {}; cannot_map_args = False
+
+                if hl_s.name != hl_o.name:
+                    # Predicate name mismatch
+                    cannot_map_args = True; continue
+
                 for sa, oa in zip(hl_s.args, hl_o.args):
                     sa_term, sa_is_var = sa
                     oa_term, oa_is_var = oa
