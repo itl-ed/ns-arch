@@ -104,7 +104,14 @@ class Literal:
 
     def nonfn_terms(self):
         """ Return set of all non-function argument terms occurring in the literal """
-        return set((a_val, a_is_var) for a_val, a_is_var in self.args if type(a_val)!=tuple)
+        terms = set()
+        for a_val, a_is_var in self.args:
+            if type(a_val)==tuple:
+                terms |= {(fa, fa[0].isupper()) for fa in a_val[1]}
+            else:
+                terms.add((a_val, a_is_var))
+
+        return terms
 
     def substitute(self, terms=None, functions=None, preds=None):
         """
@@ -141,7 +148,9 @@ class Literal:
                     f_name, f_args = a_term
                     subs_f_name = fns_map.get(f_name, f_name)
                     subs_f_args = tuple(term_names_map.get(fa, fa) for fa in f_args)
-                    subs_is_var = any(term_is_var_map[fa] for fa in subs_f_args)
+                    subs_is_var = any(
+                        term_is_var_map.get(fa, fa[0].isupper()) for fa in subs_f_args
+                    )
                     subs_args.append(
                         ((subs_f_name, subs_f_args), subs_is_var)
                     )
@@ -170,9 +179,12 @@ class Literal:
     def isomorphism_btw(lits1, lits2, ism):
         """
         Helper method for testing whether two iterables of literals are isomorphic up to
-        variable renaming. Return an isomorphism if found to be so; otherwise, return None
+        variable & function renaming. Return an isomorphism if found to be so; otherwise,
+        return None.
         """
-        isomorphism = ism   # Start with provided isomorphism candidate
+        isomorphism = ism or {
+            "terms": {}, "functions": {}
+        }
         for hl_s in lits1:
             lit_matched = False
 
@@ -202,42 +214,51 @@ class Literal:
 
                         if type(sa_term) == type(oa_term) == str:
                             # Both args are variable terms
-                            if sa_term in isomorphism:
-                                if isomorphism[sa_term] != oa_term:
+                            if sa_term in isomorphism["terms"]:
+                                if isomorphism["terms"][sa_term] != oa_term:
                                     # Conflict with existing mapping
                                     cannot_map_args = True; break
-                            elif sa_term in potential_mapping:
-                                if potential_mapping[sa_term] != oa_term:
+                            elif sa_term in potential_mapping["terms"]:
+                                if potential_mapping["terms"][sa_term] != oa_term:
                                     # Conflict with existing potential mapping
                                     cannot_map_args = True; break
                             else:
                                 # Record potential mapping
-                                potential_mapping[sa_term] = oa_term
+                                potential_mapping["terms"][sa_term] = oa_term
 
                         elif type(sa_term) == type(oa_term) == tuple:
                             sa_f_name, sa_f_args = sa_term
                             oa_f_name, oa_f_args = oa_term
 
-                            if sa_f_name != oa_f_name:
-                                # Function name mismatch
-                                cannot_map_args = True; break
-                            
                             if len(sa_f_args) != len(oa_f_args):
                                 # Function arity mismatch
                                 cannot_map_args = True; break
 
+                            # Function name mismatch
+                            if sa_f_name in isomorphism["functions"]:
+                                if isomorphism["functions"][sa_f_name] != oa_f_name:
+                                    # Conflict with existing mapping
+                                    cannot_map_args = True; break
+                            elif sa_f_name in potential_mapping["functions"]:
+                                if potential_mapping["functions"][sa_f_name] != oa_f_name:
+                                    # Conflict with existing potential mapping
+                                    cannot_map_args = True; break
+                            else:
+                                # Record potential mapping
+                                potential_mapping["functions"][sa_f_name] = oa_f_name
+
                             for sfa, ofa in zip(sa_f_args, oa_f_args):
-                                if sfa in isomorphism:
-                                    if isomorphism[sfa] != ofa:
+                                if sfa in isomorphism["terms"]:
+                                    if isomorphism["terms"][sfa] != ofa:
                                         # Conflict with existing mapping
                                         cannot_map_args = True; break
-                                elif sfa in potential_mapping:
-                                    if potential_mapping[sfa] != ofa:
+                                elif sfa in potential_mapping["terms"]:
+                                    if potential_mapping["terms"][sfa] != ofa:
                                         # Conflict with existing potential mapping
                                         cannot_map_args = True; break
                                 else:
                                     # Both args are variable terms, record potential mapping
-                                    potential_mapping[sfa] = ofa
+                                    potential_mapping["terms"][sfa] = ofa
                         
                         else:
                             raise NotImplementedError
@@ -248,7 +269,8 @@ class Literal:
             else:
                 # Update isomorphism
                 lit_matched = True
-                isomorphism.update(potential_mapping)
+                isomorphism["terms"].update(potential_mapping["terms"])
+                isomorphism["functions"].update(potential_mapping["functions"])
 
             # Return None as soon as any literal is found to be unmappable to any
             if not lit_matched: return None

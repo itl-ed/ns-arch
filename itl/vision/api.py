@@ -437,8 +437,8 @@ class VisionModule:
             #     }
 
             # Nodes and edges in scene graphs for which few-shot predictions should be made
-            fs_pred_nodes = self.scene.keys()
-            fs_pred_edges = permutations(self.scene, 2)
+            fs_pred_nodes = list(self.scene.keys())
+            fs_pred_edges = list(permutations(self.scene, 2))
 
             # Reformat & resize input image
             img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")

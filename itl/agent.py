@@ -24,10 +24,10 @@ from .path_manager import PathManager
 
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
-SR_THRES = -math.log(0.5)   # Mismatch surprisal threshold
-U_W_PR = 1.0                # How much the agent values information provided by the user
-EPS = 1e-10                 # Value used for numerical stabilization
-TAB = "\t"                  # For use in format strings
+SR_THRES = -math.log(0.5)    # Mismatch surprisal threshold
+U_IN_PR = 1.0                # How much the agent values information provided by the user
+EPS = 1e-10                  # Value used for numerical stabilization
+TAB = "\t"                   # For use in format strings
 
 class ITLAgent:
 
@@ -312,11 +312,11 @@ class ITLAgent:
             ###################################################################
 
             dialogue_state = self.lang.dialogue.export_as_dict()
-            kb_prog = self.lt_mem.kb.export_as_program()
 
             if self.vision.new_input is not None or vision_model_updated or kb_updated:
                 # Sensemaking from vision input only
-                self.theoretical.sensemake_vis(self.vision.scene, kb_prog)
+                inference_prog = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
+                self.theoretical.sensemake_vis(self.vision.scene, inference_prog)
 
             if self.lang.new_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
@@ -371,7 +371,7 @@ class ITLAgent:
                     
                     if len(kb_rules_to_add) > 0:
                         provenance = dialogue_state["record"][ui][2]
-                        kb_updated |= self.lt_mem.kb.add(kb_rules_to_add, U_W_PR, provenance)
+                        kb_updated |= self.lt_mem.kb.add(kb_rules_to_add, U_IN_PR, provenance)
 
             # Handle neologisms
             neologisms = {

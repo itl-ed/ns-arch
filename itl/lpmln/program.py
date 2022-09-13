@@ -43,18 +43,18 @@ class Program:
         prog_s = ""
 
         weight_strs = []; max_ws_len = 0
-        for _, w_pr in self.rules:
-            if 1.0 in w_pr:
+        for _, r_pr in self.rules:
+            if 1.0 in r_pr:
                 weight_strs.append("a")
-            elif 0.0 in w_pr:
+            elif 0.0 in r_pr:
                 weight_strs.append("-a")
             else:
-                if len(w_pr) == 1:
-                    w_pr_str = f"logit({w_pr[0]:.3f})"
+                if len(r_pr) == 1:
+                    r_pr_str = f"logit({r_pr[0]:.3f})"
                 else:
-                    w_pr_str = ",".join([f"logit({p:.3f})" for p in w_pr])
-                    w_pr_str = f"[{w_pr_str}]"
-                weight_strs.append(w_pr_str)
+                    r_pr_str = ",".join([f"logit({p:.3f})" for p in r_pr])
+                    r_pr_str = f"[{r_pr_str}]"
+                weight_strs.append(r_pr_str)
             
             max_ws_len = max(len(weight_strs[-1]), max_ws_len)
 
@@ -75,25 +75,25 @@ class Program:
     def __iadd__(self, other):
         return self + other
     
-    def add_rule(self, rule, w_pr=None):
+    def add_rule(self, rule, r_pr=None):
         """
-        Probability value of 0 or 1 indicates hard-weighted rules. If w_pr is not provided,
+        Probability value of 0 or 1 indicates hard-weighted rules. If r_pr is not provided,
         assume value(s) of 0.5 (effectively giving zero weights)
         """
         if len(rule.head) > 0:
-            if w_pr is None:
-                w_pr = [0.5] * len(rule.head)
-            if type(w_pr) != list:
-                w_pr = [w_pr] * len(rule.head)
+            if r_pr is None:
+                r_pr = [0.5] * len(rule.head)
+            if type(r_pr) != list:
+                r_pr = [r_pr] * len(rule.head)
         else:
-            w_pr = [w_pr]
-        w_pr = tuple(w_pr)
+            r_pr = [r_pr]
+        r_pr = tuple(r_pr)
 
         assert isinstance(rule, Rule), "Added value must be a Rule"
-        for p in w_pr:
+        for p in r_pr:
             assert 0 <= p <= 1, "Must provide valid probability value to compute rule weight"
 
-        self.rules.append((rule, w_pr))
+        self.rules.append((rule, r_pr))
 
         for hl in rule.head:
             self._rules_by_atom[hl.as_atom()].add(len(self.rules)-1)
@@ -149,7 +149,7 @@ class Program:
             r.is_fact() and r.is_grounded() for r, _ in self.rules
         ])
         if grounded_facts_only:
-            facts = [(r.head[0], float(w_pr[0]), None) for r, w_pr in self.rules]
+            facts = [(r.head[0], float(r_pr[0]), None) for r, r_pr in self.rules]
 
             models = Models(factors=facts)
             memoized_models = { FrozenMultiset(self.rules): models }
@@ -212,26 +212,26 @@ class Program:
         grounded_rules = set()
         grounded_rules_by_head = defaultdict(set)
 
-        for ri, (rule, w_pr) in enumerate(self.rules):
+        for ri, (rule, r_pr) in enumerate(self.rules):
             # All possible grounded rules that may originate from this rule
-            gr_head_insts = [instantiable_atoms[hl] for hl in rule.head]
+            gr_head_insts = [instantiable_atoms[hl.as_atom()] for hl in rule.head]
             gr_head_insts = product(*gr_head_insts)
-            gr_body_insts = [instantiable_atoms[bl] for bl in rule.body]
+            gr_body_insts = [instantiable_atoms[bl.as_atom()] for bl in rule.body]
             gr_body_insts = product(*gr_body_insts)
 
             gr_rule_insts = product(gr_head_insts, gr_body_insts)
             gr_rule_insts = [
                 Rule(head=list(gh), body=list(gb)) for gh, gb in gr_rule_insts
             ]
-            gr_rule_insts = {(gr_rule, w_pr, ri) for gr_rule in gr_rule_insts}
+            gr_rule_insts = {(gr_rule, r_pr, ri) for gr_rule in gr_rule_insts}
 
             grounded_rules |= gr_rule_insts
 
-        for gr_rule, w_pr, ri in grounded_rules:
+        for gr_rule, r_pr, ri in grounded_rules:
             if len(gr_rule.head) > 0:
                 for gh in gr_rule.head:
                     gh_i = atoms_map[gh]
-                    grounded_rules_by_head[gh_i].add((gr_rule, w_pr, ri))
+                    grounded_rules_by_head[gh_i].add((gr_rule, r_pr, ri))
 
                     dep_graph.add_node(gh_i)
                     for gb in gr_rule.body:
@@ -241,7 +241,7 @@ class Program:
             else:
                 # Integrity constraint; add rule-specific auxiliary atom
                 aux_i += 1
-                grounded_rules_by_head[aux_i].add((gr_rule, w_pr, ri))
+                grounded_rules_by_head[aux_i].add((gr_rule, r_pr, ri))
 
                 aux_lit = Literal("con_aux", args=[(ri, False)])
                 atoms_map[aux_lit] = aux_i
@@ -253,7 +253,7 @@ class Program:
                     dep_graph.add_node(aux_i)
                     dep_graph.add_edge(gb_i, aux_i)
 
-        grounded_rules = FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grounded_rules])
+        grounded_rules = FrozenMultiset([(gr_rule, r_pr) for gr_rule, r_pr, _ in grounded_rules])
 
         # Try exploiting memoized solutions for the whole grounded rule set
         if len(provided_mem) > 0:
@@ -280,7 +280,7 @@ class Program:
         # Try exploiting memoized solutions by assembling from provided_mem
         if len(provided_mem) > 0:
             gr_rules_comp_frozen = [
-                FrozenMultiset([(gr_rule, w_pr) for gr_rule, w_pr, _ in grs_c])
+                FrozenMultiset([(gr_rule, r_pr) for gr_rule, r_pr, _ in grs_c])
                 for grs_c in grounded_rules_per_comp
             ]
 
@@ -309,7 +309,7 @@ class Program:
             if len(provided_mem) > 0:
                 # Check if memoized solution exists for the component
                 gr_rules_fms = FrozenMultiset([
-                    (gr_rule, w_pr) for gr_rule, w_pr, _ in grounded_rules_relevant
+                    (gr_rule, r_pr) for gr_rule, r_pr, _ in grounded_rules_relevant
                 ])
                 if gr_rules_fms in provided_mem:
                     # Model found
@@ -341,7 +341,7 @@ class Program:
 
                     # (Assuming only one fact is present with the atom as head)
                     facts = [self.rules[fs.pop()] for fs in facts]
-                    facts = [(f.head[0], float(w_pr[0]), None) for f, w_pr in facts]
+                    facts = [(f.head[0], float(r_pr[0]), None) for f, r_pr in facts]
 
                     tree = Models(factors=facts)
 
@@ -390,27 +390,27 @@ class Program:
                     # (Cannot use factored representation since we need to reduce program top for
                     # each possible model of the program bottom.)
                     
-                    # Only need to consider soft rules (i.e. rules with 0.0 < w_pr < 1.0) when finding
+                    # Only need to consider soft rules (i.e. rules with 0.0 < r_pr < 1.0) when finding
                     # top-k models with this method
-                    soft_facts = [(rule, w_pr) for rule, w_pr in bottom.rules if 0.0 < w_pr[0] < 1.0]
+                    soft_facts = [(rule, r_pr) for rule, r_pr in bottom.rules if 0.0 < r_pr[0] < 1.0]
                     hard_facts = [
-                        (rule, w_pr) for rule, w_pr in bottom.rules if w_pr[0] == 0.0 or w_pr[0] == 1.0
+                        (rule, r_pr) for rule, r_pr in bottom.rules if r_pr[0] == 0.0 or r_pr[0] == 1.0
                     ]
 
                     # Aggregate rules with same head atom; probabilities are logsumexp-ed (then exp-ed back)
                     soft_facts_agg = defaultdict(lambda: float("-inf"))
-                    for rule, w_pr in soft_facts:
-                        soft_facts_agg[rule.head[0]] = np.exp(np.logaddexp(soft_facts_agg[rule.head[0]], np.log(w_pr)))
-                    soft_facts = [(Rule(head=head), w_pr) for head, w_pr in soft_facts_agg.items()]
+                    for rule, r_pr in soft_facts:
+                        soft_facts_agg[rule.head[0]] = np.exp(np.logaddexp(soft_facts_agg[rule.head[0]], np.log(r_pr)))
+                    soft_facts = [(Rule(head=head), r_pr) for head, r_pr in soft_facts_agg.items()]
 
                     # Rules should be sorted by weights first to apply the algorithm
                     soft_facts = sorted(soft_facts, key=lambda rw: rw[1][0], reverse=True)
 
-                    # Using logits of w_pr values as rule weights ensures direct association of the
+                    # Using logits of r_pr values as rule weights ensures direct association of the
                     # rule weights with the marginal probabilities of rule head atoms across all possible
                     # models (... on the assumption that there are no probabilistic choice rules with the
                     # same head atoms with non-disjoint body in program)
-                    rule_weights = [logit(w_pr[0], LARGE) for _, w_pr in soft_facts]
+                    rule_weights = [logit(r_pr[0], LARGE) for _, r_pr in soft_facts]
 
                     # (Log of) partition function for all the soft rules can be analytically computed as below
                     logZ = sum([np.log(1+np.exp(w)) for w in rule_weights])
@@ -448,8 +448,8 @@ class Program:
                     # Combine the results with hard-weighted facts
                     bottom_models = [
                         (
-                            pos_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==1.0},
-                            neg_atoms | {hr.head[0] for (hr, w_pr) in hard_facts if w_pr[0]==0.0},
+                            pos_atoms | {hr.head[0] for (hr, r_pr) in hard_facts if r_pr[0]==1.0},
+                            neg_atoms | {hr.head[0] for (hr, r_pr) in hard_facts if r_pr[0]==0.0},
                             pr
                         )
                         for pos_atoms, neg_atoms, pr in bottom_models
@@ -700,7 +700,7 @@ class Program:
         bottom_rules = []; top_rules = []
 
         # Add each grounded rule to either top or bottom
-        for gr_rule, w_pr, ri in grounded_rules_rel:
+        for gr_rule, r_pr, ri in grounded_rules_rel:
 
             # Check if this grounded rule should enter bottom or top
             add_to_top = False
@@ -718,9 +718,9 @@ class Program:
             # Add a copy for each rule in self that unifies with the grounded rule, with
             # retrieved weight
             if add_to_top:
-                top_rules.append((gr_rule, w_pr))
+                top_rules.append((gr_rule, r_pr))
             else:
-                bottom_rules.append((gr_rule, w_pr))
+                bottom_rules.append((gr_rule, r_pr))
 
         # Return None as top for trivial splits
         bottom_program = Program(bottom_rules)
@@ -781,12 +781,12 @@ class Program:
         """
         as_str = ""
 
-        for ri, (rule, w_pr) in enumerate(self.rules):
+        for ri, (rule, r_pr) in enumerate(self.rules):
             if len(rule.head) <= 1:
-                if w_pr[0] == 1.0:
+                if r_pr[0] == 1.0:
                     # Add as-is
                     as_str += str(rule) + "\n"
-                elif w_pr[0] == 0.0:
+                elif r_pr[0] == 0.0:
                     # Turn into corresponding integrity constraint and add
                     as_str += str(rule.flip()) + "\n"
                 else:
@@ -796,7 +796,7 @@ class Program:
                         if unsats:
                             # Add rule with unsat atom which is derived whenever
                             # rule head is not true
-                            weight = int(logit(w_pr[0], LARGE) * SCALE_PREC)
+                            weight = int(logit(r_pr[0], LARGE) * SCALE_PREC)
                             unsat_args = [(ri, False), (weight, False)]
                             unsat_rule = Rule(
                                 head=Literal("unsat", unsat_args),
@@ -808,7 +808,7 @@ class Program:
                             # Add a modified rule with the same body but unsat atom
                             # as head, which is satisfied whenever constraint body is
                             # true
-                            weight = int(logit(w_pr[0], LARGE) * SCALE_PREC)
+                            weight = int(logit(r_pr[0], LARGE) * SCALE_PREC)
                             unsat_args = [(ri, False), (weight, False)]
                             unsat_rule = Rule(
                                 head=Literal("unsat", unsat_args),

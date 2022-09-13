@@ -54,13 +54,13 @@ class Models:
                 ]
 
                 lits_agg = defaultdict(lambda: (0.5, None))
-                for lit, w_pr, coll in lit_factors:
-                    w_pr_agg = sigmoid(logit(lits_agg[lit][0]) + logit(w_pr))
+                for lit, r_pr, coll in lit_factors:
+                    r_pr_agg = sigmoid(logit(lits_agg[lit][0]) + logit(r_pr))
                     coll_agg = lits_agg[lit][1] if coll is None else coll
-                    lits_agg[lit] = (w_pr_agg, coll_agg)
+                    lits_agg[lit] = (r_pr_agg, coll_agg)
 
                 self.factors = [
-                    (lit, w_pr, coll) for lit, (w_pr, coll) in lits_agg.items()
+                    (lit, r_pr, coll) for lit, (r_pr, coll) in lits_agg.items()
                 ] + non_lit_factors
 
     def __repr__(self):

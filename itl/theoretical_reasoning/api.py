@@ -22,13 +22,16 @@ from collections import defaultdict
 
 import numpy as np
 
-from ..lpmln import Rule, Program, Literal
+from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import wrap_args
 
 
-EPS = 1e-10          # Value used for numerical stabilization
-U_W_PR = 1.0         # How much the agent values information provided by the user
 TAB = "\t"           # For use in format strings
+
+EPS = 1e-10          # Value used for numerical stabilization
+U_IN_PR = 1.0        # How much the agent values information provided by the user
+DEF_P_PR = 0.05      # Default prior probability for any predicates holding, prior to
+                     # observation of any visual evidence
 
 class TheoreticalReasonerModule:
 
@@ -52,7 +55,7 @@ class TheoreticalReasonerModule:
 
         self.mismatches = set()
 
-    def sensemake_vis(self, vis_scene, kb_prog, objectness_thresh=0.75, category_thresh=0.75):
+    def sensemake_vis(self, vis_scene, inference_prog, category_thresh=0.75):
         """
         Combine raw visual perception outputs from the vision module (predictions with
         confidence) with existing knowledge to make final verdicts on the state of affairs,
@@ -60,18 +63,16 @@ class TheoreticalReasonerModule:
 
         Args:
             vis_scene: Predictions (scene graphs) from the vision module
-            objectness_thresh: float; Only consider recognised instances with objectness
-                score higher than this value
             category_thresh: float; Only consider recognised categories with category
                 score higher than this value
         """
-        prog = kb_prog
+        prog = inference_prog
 
         # Filter by objectness threshold (recognized objects are already ranked by
         # objectness score)
         vis_scene = copy.deepcopy({
             oi: obj for oi, obj in vis_scene.items()
-            if obj["pred_objectness"] > objectness_thresh
+            if obj["pred_objectness"] > 0.75
         })
         # Accordingly exclude per-object relation predictions
         for obj in vis_scene.values():
@@ -84,38 +85,33 @@ class TheoreticalReasonerModule:
         # Build ASP program for processing perception outputs
         pprog = Program()
 
-        for oi, obj in vis_scene.items():
-            # Objectness
-            rule = Rule(head=Literal("object", [(oi,False)]))
-            w_pr = float(obj["pred_objectness"])
-            pprog.add_rule(rule, w_pr)
+        possible_lits = set()     # Set of literals that have possibility to occur
 
+        # Biasing literals by visual evidence
+        for oi, obj in vis_scene.items():
             # Object classes
             if "pred_classes" in obj:
                 classes = set(np.where(obj["pred_classes"] > category_thresh)[0])
-                if len(obj["pred_classes"]) > 0:
-                    # Also add the max category even if score is below threshold
-                    classes.add(obj["pred_classes"].argmax())
                 for c in classes:
-                    rule = Rule(
-                        head=Literal(f"cls_{c}", [(oi,False)]),
-                        body=[Literal("object", [(oi,False)])]
-                    )
-                    w_pr = float(obj["pred_classes"][c])
-                    pprog.add_rule(rule, w_pr)
+                    # p_vis ::  cls_C(oi).
+                    event_lit = Literal(f"cls_{c}", [(oi,False)])
+                    rule = Rule(head=event_lit)
+                    r_pr = float(obj["pred_classes"][c])
+
+                    pprog.add_rule(rule, r_pr)
+                    possible_lits.add(event_lit)    # Add as possibility
 
             # Object attributes
             if "pred_attributes" in obj:
                 attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
-                if len(obj["pred_attributes"]) > 0:
-                    attributes.add(obj["pred_attributes"].argmax())
                 for a in attributes:
-                    rule = Rule(
-                        head=Literal(f"att_{a}", [(oi,False)]),
-                        body=[Literal("object", [(oi,False)])]
-                    )
-                    w_pr = float(obj["pred_attributes"][a])
-                    pprog.add_rule(rule, w_pr)
+                    # p_vis ::  att_A(oi).
+                    event_lit = Literal(f"att_{a}", [(oi,False)])
+                    rule = Rule(head=event_lit)
+                    r_pr = float(obj["pred_attributes"][a])
+
+                    pprog.add_rule(rule, r_pr)
+                    possible_lits.add(event_lit)
 
             # Object relations
             if "pred_relations" in obj:
@@ -124,18 +120,14 @@ class TheoreticalReasonerModule:
                     for oj, per_obj in obj["pred_relations"].items()
                 }
                 for oj, per_obj in relations.items():
-                    if len(obj["pred_relations"][oj]) > 0:
-                        per_obj.add(obj["pred_relations"][oj].argmax())
                     for r in per_obj:
-                        rule = Rule(
-                            head=Literal(f"rel_{r}", [(oi,False),(oj,False)]),
-                            body=[
-                                Literal("object", [(oi,False)]),
-                                Literal("object", [(oj,False)])
-                            ]
-                        )
-                        w_pr = float(obj["pred_relations"][oj][r])
-                        pprog.add_rule(rule, w_pr)
+                        # p_vis ::  rel_R(oi,oj).
+                        event_lit = Literal(f"rel_{r}", [(oi,False),(oj,False)])
+                        rule = Rule(head=event_lit)
+                        r_pr = float(obj["pred_relations"][oj][r])
+
+                        pprog.add_rule(rule, r_pr)
+                        possible_lits.add(event_lit)
 
         # Solve with clingo to find the best K_M models of the program
         prog += pprog
@@ -557,7 +549,7 @@ class TheoreticalReasonerModule:
                     ])
                     if head_has_var or body_has_var: continue
 
-                    dprog.add_rule(r, U_W_PR)
+                    dprog.add_rule(r, U_IN_PR)
 
         # Finally, reasoning with all visual+language info
         if len(dprog) > 0:

@@ -46,8 +46,8 @@ class AgentCompositeActions:
                     atom = rule.body[0]
                     exm_pointer = (set(), {0})
 
-                cat_type, concept_ind = atom.name.split("_")
-                concept_ind = int(concept_ind)
+                cat_type, conc_ind = atom.name.split("_")
+                conc_ind = int(conc_ind)
                 args = [a for a, _ in atom.args]
 
                 ex_bboxes = [
@@ -66,7 +66,7 @@ class AgentCompositeActions:
                 # Add new concept exemplars to memory, as feature vectors at the
                 # penultimate layer right before category prediction heads
                 pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
-                pointers_exm = { concept_ind: exm_pointer }
+                pointers_exm = { conc_ind: exm_pointer }
 
                 self.agent.lt_mem.exemplars.add_exs(
                     sources=[(self.agent.vision.last_raw, ex_bboxes)],
@@ -77,7 +77,7 @@ class AgentCompositeActions:
 
                 # Update the category code parameter in the vision model's predictor
                 # head using the new set of exemplars
-                imperfect_concept = (concept_ind, cat_type)
+                imperfect_concept = (conc_ind, cat_type)
                 self.agent.vision.update_concept(
                     imperfect_concept, self.agent.lt_mem.exemplars[imperfect_concept]
                 )
@@ -239,14 +239,14 @@ class AgentCompositeActions:
             for lits_sets in search_spec_cands.values():
                 for lits in lits_sets:
                     # Lift any remaining function term args to non-function variable args
-                    all_fn_args = set(
+                    all_fn_args = {
                         a for a in set.union(*[set(l.args) for l in lits])
                         if type(a[0])==tuple
-                    )
-                    all_var_names = set(
+                    }
+                    all_var_names = {
                         t_val for t_val, t_is_var in set.union(*[l.nonfn_terms() for l in lits])
                         if t_is_var
-                    )
+                    }
                     fn_lifting_map = {
                         fa: (f"X{i+len(all_var_names)}", True)
                         for i, fa in enumerate(all_fn_args)
@@ -261,8 +261,13 @@ class AgentCompositeActions:
 
                     lits = [l.substitute(terms=fn_lifting_map) for l in lits]
                     lits = frozenset([l for l in lits if any(la_is_var for _, la_is_var in l.args)])
-                    if any(Literal.isomorphism_btw(lits, spc[1], {}) for spc in final_specs):
-                        # Disregard if there's already an isomorphic literal set
+
+                    # Disregard if there's already an isomorphic literal set
+                    has_isomorphic_spec = any(
+                        Literal.isomorphism_btw(lits, spc[1], None) is not None
+                        for spc in final_specs
+                    )
+                    if has_isomorphic_spec:
                         continue
 
                     # Check if the agent is already (visually) aware of the potential search
@@ -276,7 +281,7 @@ class AgentCompositeActions:
 
                     final_specs.append((search_vars, lits))
 
-            # Perform incremental visual search and another round of sensemaking
+            # Perform incremental visual search...
             O = len(self.agent.vision.scene)
             oi_offsets = np.cumsum([0]+[len(vars) for vars, _ in final_specs][:-1])
             final_specs = {
@@ -288,7 +293,11 @@ class AgentCompositeActions:
                 specs=final_specs
             )
 
-            print(0)
+            #  ... and another round of sensemaking
+            inference_prog = self.agent.lt_mem.kb.export_reasoning_program()
+            self.theoretical.sensemake_vis(self.vision.scene, inference_prog)
+            self.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
+            self.theoretical.sensemake_vis_lang(dialogue_state)
 
         # Compute raw answer candidates by appropriately querying current world models
         answers_raw, _ = models_vl.query(*question)

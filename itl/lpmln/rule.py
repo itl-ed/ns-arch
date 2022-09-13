@@ -11,8 +11,10 @@ class Rule:
     def __init__(self, head=None, body=None, lb=None, ub=None):
         # Accept singletons
         if head is not None and not type(head) == list:
+            assert type(head) == Literal
             head = [head]
         if body is not None and not type(body) == list:
+            assert type(body) == Literal
             body = [body]
 
         self.head = [] if head is None else head
@@ -132,7 +134,7 @@ class Rule:
                 return False            # Found constant that cannot be matched
 
         # Try to find isomorphism
-        ism = Literal.isomorphism_btw(self.head, other.head, {})
+        ism = Literal.isomorphism_btw(self.head, other.head, None)
         ism = Literal.isomorphism_btw(self.body, other.body, ism)
 
         return ism is not None
