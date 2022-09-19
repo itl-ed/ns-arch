@@ -215,7 +215,7 @@ class DialogueManager:
                 [torch.tensor(e["bbox"]) for e in self.referents["env"].values()]
             )
 
-            iou_thresh = 0.8
+            iou_thresh = 0.7
             ious = torchvision.ops.box_iou(
                 torch.tensor(drawn_bbox)[None,:], env_ref_bboxes
             )

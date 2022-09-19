@@ -182,43 +182,44 @@ class VGDataModule(LightningDataModule):
         }
 
         # Load and store VG metadata in MetadataCatalog
-        with open(f"{self.data_dir}/metadata.json") as meta_f:
-            data = json.load(meta_f)
+        if os.path.exists(self.data_dir):
+            with open(f"{self.data_dir}/metadata.json") as meta_f:
+                data = json.load(meta_f)
 
-            # MetadataCatalogs
-            for spl in splits:
-                md = MetadataCatalog.get(f"vg_{spl}")
-                md.count = data[f"{spl}_cnt"]
-                md.data_dir = self.data_dir
-                md.ann_path = data[f"{spl}_ann_path"]
-                md.classes = data["classes"]
-                md.attributes = data["attributes"]
-                md.relations = data["relations"]
-                md.obj_counts = data["obj_counts"]
-                md.obj_pair_counts = data["obj_pair_counts"]
-                md.classes_counts = data["classes_counts"]
-                md.attributes_counts = data["attributes_counts"]
-                md.relations_counts = data["relations_counts"]
+                # MetadataCatalogs
+                for spl in splits:
+                    md = MetadataCatalog.get(f"vg_{spl}")
+                    md.count = data[f"{spl}_cnt"]
+                    md.data_dir = self.data_dir
+                    md.ann_path = data[f"{spl}_ann_path"]
+                    md.classes = data["classes"]
+                    md.attributes = data["attributes"]
+                    md.relations = data["relations"]
+                    md.obj_counts = data["obj_counts"]
+                    md.obj_pair_counts = data["obj_pair_counts"]
+                    md.classes_counts = data["classes_counts"]
+                    md.attributes_counts = data["attributes_counts"]
+                    md.relations_counts = data["relations_counts"]
 
-                num_preds = {
-                    "cls": len(md.classes),
-                    "att": len(md.attributes),
-                    "rel": len(md.relations)
-                }
+                    num_preds = {
+                        "cls": len(md.classes),
+                        "att": len(md.attributes),
+                        "rel": len(md.relations)
+                    }
 
-                # Register VG datasets in DatasetCatalog
-                DatasetCatalog.register(
-                    f"vg_{spl}", lambda spl=spl: _vg_data_getter(spl)
-                )
+                    # Register VG datasets in DatasetCatalog
+                    DatasetCatalog.register(
+                        f"vg_{spl}", lambda spl=spl: _vg_data_getter(spl)
+                    )
 
-                # Number of predicates info
-                if spl == "train":
-                    self.mapper_batch["train"].num_preds = num_preds
-                    self.mapper_fs["train"].num_preds = num_preds
-                else:
-                    self.mapper_batch["test"].num_preds = num_preds
-                    self.mapper_batch["test_props"].num_preds = num_preds
-                    self.mapper_fs["test"].num_preds = num_preds
+                    # Number of predicates info
+                    if spl == "train":
+                        self.mapper_batch["train"].num_preds = num_preds
+                        self.mapper_fs["train"].num_preds = num_preds
+                    else:
+                        self.mapper_batch["test"].num_preds = num_preds
+                        self.mapper_batch["test_props"].num_preds = num_preds
+                        self.mapper_fs["test"].num_preds = num_preds
 
     def train_dataloader(self):
         if self.few_shot:

@@ -104,30 +104,10 @@ class Program:
         self.add_rule(rule, 1.0)
 
     def solve(self, topk_ratio=TOPK_RATIO, provided_mem=None):
-        """
-        Wraps around self._solve, in order to pass the resulting models instance through
-        filters that do not permit coexistence of any literal and its classical negation.
-
-        (A price to pay, not using clingo solver for whole program...)
-        """
-        models, memoized_models = self._solve(
+        """ Wraps around self._solve, and exposed as class instance method """
+        return self._solve(
             topk_ratio=topk_ratio, provided_mem=provided_mem
         )
-
-        # Find strong-negated atoms
-        covered_atoms = set(models.marginals()[0])
-        cnegs = {a for a in covered_atoms if a.name.startswith("-")}
-
-        # Need to handle atoms whose strong negation are covered as well
-        to_clean = {a.flip_classical() for a in cnegs} & covered_atoms
-
-        models_cleaned = models
-        for atm in to_clean:
-            # Filter with disjunction {not atm V not -atom}
-            disj = {atm.flip(), atm.flip_classical().flip()}
-            models_cleaned = models_cleaned.filter(disj)
-
-        return models_cleaned, memoized_models
 
     def _solve(self, topk_ratio=TOPK_RATIO, provided_mem=None):
         """
@@ -170,26 +150,6 @@ class Program:
         }
         atoms_inv_map = {v: k for k, v in atoms_map.items()}
         aux_i = len(atoms_map)
-
-        # Atoms with classical negation are not covered by ctl.symbolic_atoms...
-        # Handle them appropriately
-        max_atm_ind = max(set.union(*[set(r[0]+r[1]) for r in rules_obs.rules]))
-        atoms_missed = set(range(1, max_atm_ind+1)) - set(atoms_inv_map)
-        cneg_counterparts = {
-            missed: set([
-                body for head, body, _ in rules_obs.rules
-                if len(head)==0 and len(body)==2 and missed in body
-            ][0])
-            for missed in atoms_missed
-        }
-        cneg_counterparts = {
-            missed: (pair - {missed}).pop()
-            for missed, pair in cneg_counterparts.items()
-        }
-        for missed, counterpart in cneg_counterparts.items():
-            cneg_lit = atoms_inv_map[counterpart].flip_classical()
-            atoms_map[cneg_lit] = missed
-            atoms_inv_map[missed] = cneg_lit
 
         # All grounded atoms that each occurring atom can instantiate (grounded atom
         # can instantiate only self)
@@ -788,7 +748,7 @@ class Program:
                     as_str += str(rule) + "\n"
                 elif r_pr[0] == 0.0:
                     # Turn into corresponding integrity constraint and add
-                    as_str += str(rule.flip()) + "\n"
+                    as_str += "".join(str(nr)+"\n" for nr in rule.negate())
                 else:
                     if len(rule.head) == 1:
                         as_str += rule.str_as_choice() + "\n"

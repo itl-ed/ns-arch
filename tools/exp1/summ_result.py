@@ -120,11 +120,11 @@ if __name__ == "__main__":
             ## Temp: rewriting config names
             feedStratT = feedStratT + "Help"
             if diff == "base":
-                diff = "non-fine"
+                diff = "nonFine"
             elif diff == "easy":
-                diff = "fine-easy"
+                diff = "fineEasy"
             elif diff == "hard":
-                diff = "fine-hard"
+                diff = "fineHard"
 
             plt.plot(
                 range(1, len(data["curve"])+1),
@@ -158,11 +158,11 @@ if __name__ == "__main__":
             ## Temp: rewriting config names
             feedStratT = feedStratT + "Help"
             if diff == "base":
-                diff = "non-fine"
+                diff = "nonFine"
             elif diff == "easy":
-                diff = "fine-easy"
+                diff = "fineEasy"
             elif diff == "hard":
-                diff = "fine-hard"
+                diff = "fineHard"
 
             config_label = f"zeroInit_semOnly_{feedStratT}"
 
@@ -199,11 +199,11 @@ if __name__ == "__main__":
 
         ## Temp: rewriting config names
         if diff == "base":
-            diff = "non-fine"
+            diff = "nonFine"
         elif diff == "easy":
-            diff = "fine-easy"
+            diff = "fineEasy"
         elif diff == "hard":
-            diff = "fine-hard"
+            diff = "fineHard"
 
         print(f"Mean F1 scores ({diff}):")
         for d in data_collected:

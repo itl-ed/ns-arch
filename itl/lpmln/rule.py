@@ -51,16 +51,21 @@ class Rule:
     def __hash__(self):
         return hash(str(self))
     
-    def flip(self):
+    def negate(self):
         """
-        Return flipped version as new rule, cast as integrity constraint.
-
-        (Expected to be called when translating rule with weight "-a" (negative inf;
-        i.e. zero-probability) into pure ASP rule)
+        Return negate version as new rule. Implemented differently depending on
+        whether self is integrity constraint:
+            - If a regular rule, not an integrity constraint, rule "head :- body."
+                becomes ":- body, head."
+            - If an integrity constraint, rule ":- body." must be disassembled into
+                multiple integrity constraints, each having a negated body conjunct
+                as body (negation of conjunction is disjunction of negations)
         """
-        assert len(self.head) > 0, "Cannot flip integrity constraint"
-
-        return Rule(body=self.body+self.head)
+        if len(self.head) > 0:
+            assert len(self.head) == 1, "Cannot negate choice rules for now"
+            return Rule(body=self.body+self.head)
+        else:
+            return [Rule(body=[bl.flip()]) for bl in self.body]
     
     def str_as_choice(self):
         """ As string, treated as choice rule """
