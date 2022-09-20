@@ -294,8 +294,8 @@ class AgentCompositeActions:
             )
 
             #  ... and another round of sensemaking
-            inference_prog = self.agent.lt_mem.kb.export_reasoning_program()
-            self.theoretical.sensemake_vis(self.vision.scene, inference_prog)
+            exported_kb = self.agent.lt_mem.kb.export_reasoning_program(self.vision.scene)
+            self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
             self.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
             self.theoretical.sensemake_vis_lang(dialogue_state)
 

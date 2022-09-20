@@ -16,7 +16,6 @@ Here, we resort to declarative programming to encode individual sensemaking prob
 logic programs (written in the language of weighted ASP) and solve with a dedicated solver
 (clingo).
 """
-import copy
 from itertools import product
 from collections import defaultdict
 
@@ -26,12 +25,13 @@ from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import wrap_args
 
 
-TAB = "\t"           # For use in format strings
+TAB = "\t"             # For use in format strings
 
-EPS = 1e-10          # Value used for numerical stabilization
-U_IN_PR = 1.0        # How much the agent values information provided by the user
-DEF_P_PR = 0.05      # Default prior probability for any predicates holding, prior to
-                     # observation of any visual evidence
+EPS = 1e-10            # Value used for numerical stabilization
+U_IN_PR = 1.0          # How much the agent values information provided by the user
+SCORE_THRES = 0.75     # Only consider recognised categories with category score higher
+                       # than this value, unless focused attention warranted by KB
+LOWER_THRES = 0.5      # Lower threshold for predicates that deserve closer look
 
 class TheoreticalReasonerModule:
 
@@ -55,7 +55,7 @@ class TheoreticalReasonerModule:
 
         self.mismatches = set()
 
-    def sensemake_vis(self, vis_scene, inference_prog, category_thresh=0.75):
+    def sensemake_vis(self, vis_scene, exported_kb):
         """
         Combine raw visual perception outputs from the vision module (predictions with
         confidence) with existing knowledge to make final verdicts on the state of affairs,
@@ -63,35 +63,20 @@ class TheoreticalReasonerModule:
 
         Args:
             vis_scene: Predictions (scene graphs) from the vision module
-            category_thresh: float; Only consider recognised categories with category
-                score higher than this value
+            exported_kb: Output from KnowledgeBase().export_reasoning_program()
         """
-        prog = inference_prog
-
-        # Filter by objectness threshold (recognized objects are already ranked by
-        # objectness score)
-        vis_scene = copy.deepcopy({
-            oi: obj for oi, obj in vis_scene.items()
-            if obj["pred_objectness"] > 0.75
-        })
-        # Accordingly exclude per-object relation predictions
-        for obj in vis_scene.values():
-            if "pred_relations" in obj:
-                obj["pred_relations"] = {
-                    oi: per_obj for oi, per_obj in obj["pred_relations"].items()
-                    if oi in vis_scene
-                }
+        inference_prog, preds_in_kb = exported_kb
 
         # Build ASP program for processing perception outputs
         pprog = Program()
-
-        possible_lits = set()     # Set of literals that have possibility to occur
 
         # Biasing literals by visual evidence
         for oi, obj in vis_scene.items():
             # Object classes
             if "pred_classes" in obj:
-                classes = set(np.where(obj["pred_classes"] > category_thresh)[0])
+                classes = set(np.where(obj["pred_classes"] > SCORE_THRES)[0])
+                classes |= preds_in_kb["cls"] & \
+                    set(np.where(obj["pred_classes"] > LOWER_THRES)[0])
                 for c in classes:
                     # p_vis ::  cls_C(oi).
                     event_lit = Literal(f"cls_{c}", [(oi,False)])
@@ -99,11 +84,12 @@ class TheoreticalReasonerModule:
                     r_pr = float(obj["pred_classes"][c])
 
                     pprog.add_rule(rule, r_pr)
-                    possible_lits.add(event_lit)    # Add as possibility
 
             # Object attributes
             if "pred_attributes" in obj:
-                attributes = set(np.where(obj["pred_attributes"] > category_thresh)[0])
+                attributes = set(np.where(obj["pred_attributes"] > SCORE_THRES)[0])
+                attributes |= preds_in_kb["att"] & \
+                    set(np.where(obj["pred_attributes"] > LOWER_THRES)[0])
                 for a in attributes:
                     # p_vis ::  att_A(oi).
                     event_lit = Literal(f"att_{a}", [(oi,False)])
@@ -111,12 +97,12 @@ class TheoreticalReasonerModule:
                     r_pr = float(obj["pred_attributes"][a])
 
                     pprog.add_rule(rule, r_pr)
-                    possible_lits.add(event_lit)
 
             # Object relations
             if "pred_relations" in obj:
                 relations = {
-                    oj: set(np.where(per_obj > category_thresh)[0])
+                    oj: set(np.where(per_obj > SCORE_THRES)[0]) | \
+                        (preds_in_kb["rel"] & set(np.where(per_obj > LOWER_THRES)[0]))
                     for oj, per_obj in obj["pred_relations"].items()
                 }
                 for oj, per_obj in relations.items():
@@ -127,10 +113,9 @@ class TheoreticalReasonerModule:
                         r_pr = float(obj["pred_relations"][oj][r])
 
                         pprog.add_rule(rule, r_pr)
-                        possible_lits.add(event_lit)
 
         # Solve with clingo to find the best K_M models of the program
-        prog += pprog
+        prog = pprog + inference_prog
         if self.concl_vis is not None:
             _, memoized_v, _ = self.concl_vis
         else:

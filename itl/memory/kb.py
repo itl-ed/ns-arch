@@ -10,8 +10,8 @@ from ..lpmln.utils import logit, sigmoid, wrap_args
 
 
 P_C = 0.01          # Catchall hypothesis probability
-DEF_P_PR = 0.05     # Default prior probability for any predicates holding, prior to
-                    # observation of any visual evidence
+LOWER_THRES = 0.5   # Lower threshold for predicates that deserve closer look (see
+                    # ../theoretical_reasoning/api.py)
 
 class KnowledgeBase:
     """
@@ -107,7 +107,7 @@ class KnowledgeBase:
 
         return is_new_entry
 
-    def export_reasoning_program(self, vis_scene, category_thresh=0.75):
+    def export_reasoning_program(self, vis_scene):
         """
         Returns an ASP program that implements deductive & abductive reasonings by
         virtue of the listed entries
@@ -115,19 +115,29 @@ class KnowledgeBase:
         inference_prog = Program()
 
         # Add rules implementing deductive inference
-        ded_out = self._add_deductive_inference_rules(
-            inference_prog, vis_scene, category_thresh
-        )
+        ded_out = self._add_deductive_inference_rules(inference_prog, vis_scene)
         grd_rule_probs, entries_by_head, intermediate_outputs = ded_out
 
         # Add rules implementing abductive inference
         self._add_abductive_inference_rules(
-            inference_prog, vis_scene, grd_rule_probs, entries_by_head, intermediate_outputs
+            inference_prog, vis_scene,
+            grd_rule_probs, entries_by_head, intermediate_outputs
         )
 
-        return inference_prog
+        # Set of predicates that warrant consideration as possibility even with score
+        # below the threshold because they're mentioned in KB
+        preds_in_kb = set(self.entries_by_pred)
+        preds_in_kb = {
+            cat_type: {
+                int(name.strip(f"{cat_type}_")) for name in preds_in_kb
+                if name.startswith(cat_type)
+            }
+            for cat_type in ["cls", "att", "rel"]
+        }
 
-    def _add_deductive_inference_rules(self, inference_prog, vis_scene, category_thresh):
+        return inference_prog, preds_in_kb
+
+    def _add_deductive_inference_rules(self, inference_prog, vis_scene):
         """
         As self.export_reasoning_program() was getting too long, refactored code for
         deductive inference program synthesis from KB
@@ -156,16 +166,13 @@ class KnowledgeBase:
                     score = float(obj["pred_classes"][conc_ind])
                 else:
                     score = float(obj["pred_attributes"][conc_ind])
-
-                score = score \
-                    if score > category_thresh else DEF_P_PR
+                score = score if score > LOWER_THRES else 0.0
             else:
                 assert cat_type == "rel"
                 if grd_args[1] in obj["pred_relations"]:
                     rels_per_obj = obj["pred_relations"][grd_args[1]]
                     score = float(rels_per_obj[conc_ind])
-                    score = score \
-                        if score > category_thresh else DEF_P_PR
+                    score = score if score > LOWER_THRES else 0.0
                 else:
                     # No need to go further, return 0
                     score = 0.0

@@ -282,12 +282,6 @@ class ITLAgent:
                 )
 
             if self.vision.scene is not None:
-                # If some discourse referent is hard-assigned to some entity, boost its
-                # objectness score so that it's captured during sensemaking
-                for ent in set(self.lang.dialogue.assignment_hard.values()):
-                    if ent in self.vision.scene:
-                        self.vision.scene[ent]["pred_objectness"] = np.array([1.0])
-
                 # If a new entity is registered as a result of understanding the latest
                 # input, re-run vision module to update with new predictions for it
                 new_ents = set(self.lang.dialogue.referents["env"]) - set(self.vision.scene)
@@ -315,8 +309,8 @@ class ITLAgent:
 
             if self.vision.new_input is not None or vision_model_updated or kb_updated:
                 # Sensemaking from vision input only
-                inference_prog = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
-                self.theoretical.sensemake_vis(self.vision.scene, inference_prog)
+                exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
+                self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
 
             if self.lang.new_input is not None:
                 # Reference & word sense resolution to connect vision & discourse

@@ -5,6 +5,7 @@ scene graph generation & classification given bbox), few-shot registration of ne
 concepts
 """
 import os
+import copy
 import logging
 from itertools import chain, permutations, product
 
@@ -318,7 +319,7 @@ class VisionModule:
 
         # Prediction modes
         if bboxes is None and specs is None:
-            # Full prediction
+            # Full (ensemble) prediction
             inp = [self.dm.mapper_batch["test"](inp)]
             exs_cached = exs_idx_map = inc_idx_map = search_specs = None
         else:
@@ -418,6 +419,10 @@ class VisionModule:
             self.scene = {
                 f"o{i}": { f: v.cpu().numpy() for f, v in zip(pred_value_fields, obj) }
                 for i, obj in enumerate(pred_values)
+            }
+            # Filter by objectness threshold
+            self.scene = {
+                oi: obj for oi, obj in self.scene.items() if obj["pred_objectness"] > 0.5
             }
             for i, (oi, obj) in enumerate(self.scene.items()):
                 self.f_vecs[0][oi] = f_vecs[0][i]       # cls_f_vecs
