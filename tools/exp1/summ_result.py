@@ -41,7 +41,7 @@ def draw_matrix(data, row_labs, col_labs, ax):
     # Annotate with data entries
     for i in range(data.shape[1]):
         for j in range(data.shape[0]):
-            ax.text(i, j, round(data[j, i].item(), 1), ha="center", va="center")
+            ax.text(i, j, round(data[j, i].item(), 2), ha="center", va="center")
 
 
 if __name__ == "__main__":
@@ -170,7 +170,8 @@ if __name__ == "__main__":
             fig = plt.figure()
             draw_matrix(
                 data["confMat"] / data["test_set_size"],
-                data["concepts"], data["concepts"], fig.gca()
+                data["concepts"], data["concepts"], fig.gca()        # Binary choice mode
+                # data["concepts"][:-1], data["concepts"], fig.gca()     # Multiple choice mode
             )
             plt.suptitle(f"Confusion matrix for {diff} difficulty", fontsize=16)
             plt.title(f"{config_label} agent", pad=18)

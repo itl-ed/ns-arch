@@ -2,6 +2,7 @@
 Script for fine-grained grounding experiments; simulate natural interactions between
 agent (learner) and user (teacher) with varying configurations
 """
+import re
 import os
 import sys
 sys.path.insert(
@@ -134,6 +135,7 @@ if __name__ == "__main__":
                 instance_bbox[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
             )[0]
 
+            # Binary concept testing mode
             for conc_test in user.test_exemplars["cls"]:
                 concept_test_string = conc_test.split(".")[0]
                 concept_test_string = concept_test_string.replace("_", " ")
@@ -162,18 +164,45 @@ if __name__ == "__main__":
                 else:
                     raise NotImplementedError
 
+            ## Multiple-choice, pick-one mode
+            # test_input = {
+            #     "v_usr_in": os.path.join(user.image_dir_prefix, img_f),
+            #     "l_usr_in": f"What is this?",
+            #     "pointing": { "this": [instance_bbox] }
+            # }
+
+            # agent_reaction = agent.loop(**test_input)
+            # agent_utterances = [
+            #     content for act_type, content in agent_reaction
+            #     if act_type == "generate"
+            # ]
+
+            # if any(utt.startswith("This is") for utt in agent_utterances):
+            #     answer_utt = [
+            #         utt for utt in agent_utterances if utt.startswith("This is")
+            #     ][0]
+            #     answer_content = re.findall(r"This is a (.*)\.$", answer_utt)[0]
+            #     exam_result[concept_string][answer_content] += 1
+            # else:
+            #     exam_result[concept_string]["NA"] += 1
+
     # Store exam result as confusion matrix
     C = len(exam_result)
-    data = np.zeros([C,C])
+    data = np.zeros([C,C])      # Binary mode
+    # data = np.zeros([C,C+1])    # Multiple choice mode
     concepts_ordered = list(exam_result)
 
     with open(os.path.join(res_dir, f"confMat_{tail}.csv"), "w") as out_csv:
         out_csv.write(str(opts.exp1_test_set_size)+"\n")
-        out_csv.write(",".join(concepts_ordered)+"\n")
+        out_csv.write(",".join(concepts_ordered)+"\n")          # Binary mode
+        # out_csv.write(",".join(concepts_ordered+["NA"])+"\n")   # Multiple choice mode
         for i in range(C):
             for j in range(C):
                 conc_i = concepts_ordered[i]
                 conc_j = concepts_ordered[j]
 
                 data[i,j] = exam_result[conc_i][conc_j] / opts.exp1_test_set_size
+                # When multiple choice mode
+                # data[i,-1] = exam_result[conc_i]["NA"] / opts.exp1_test_set_size
+
             out_csv.write(",".join([str(d) for d in data[i]])+"\n")
