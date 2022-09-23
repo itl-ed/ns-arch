@@ -32,7 +32,7 @@ class LanguageModule:
         Put entities in the physical environment into domain of discourse
         """
         # No-op if no new visual input
-        if vis_raw is None and vis_scene is None:
+        if vis_scene is None:
             return
 
         # Start a dialogue information state anew

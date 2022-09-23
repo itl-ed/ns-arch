@@ -585,9 +585,12 @@ class SceneGraphROIHeads(StandardROIHeads):
         exs_dets = exs_cached["detections"]
 
         # Preparing box features needed
-        inc_box_features = torch.cat([
-            torch.stack([d["box_f_vec"] for d in exs_dets]), box_features
-        ])
+        if len(exs_dets) > 0:
+            inc_box_features = torch.cat([
+                torch.stack([d["box_f_vec"] for d in exs_dets]), box_features
+            ])
+        else:
+            inc_box_features = box_features
 
         outputs = []
         for pos in proposals_objs:
@@ -597,9 +600,12 @@ class SceneGraphROIHeads(StandardROIHeads):
                 Boxes([d["bbox"] for d in exs_dets]).to(box_features.device),
                 pos.proposal_boxes
             ])
-            inc_proposal_objs.sem_f_vecs = torch.cat([
-                torch.stack([d["sem_f_vec"] for d in exs_dets]), sem_f_vecs
-            ])
+            if len(exs_dets) > 0:
+                inc_proposal_objs.sem_f_vecs = torch.cat([
+                    torch.stack([d["sem_f_vec"] for d in exs_dets]), sem_f_vecs
+                ])
+            else:
+                inc_proposal_objs.sem_f_vecs = sem_f_vecs
 
             # Preparing index pairs
             N_E = len(exs_dets); N_N = len(pos)
@@ -621,33 +627,36 @@ class SceneGraphROIHeads(StandardROIHeads):
             inc_pair_idxs = inc_pair_idxs.to(box_features.device)
 
             # Preparing bounding box pairs
-            boxes_exs = torch.tensor([d["bbox"] for d in exs_dets]).to(box_features.device)
-            boxes_new = pos.proposal_boxes.tensor
-            boxes_exs_mins = boxes_exs[:,:2]; boxes_new_mins = boxes_new[:,:2]
-            boxes_exs_maxs = boxes_exs[:,2:]; boxes_new_maxs = boxes_new[:,2:]
+            if len(exs_dets) > 0:
+                boxes_exs = torch.tensor([d["bbox"] for d in exs_dets]).to(box_features.device)
+                boxes_new = pos.proposal_boxes.tensor
+                boxes_exs_mins = boxes_exs[:,:2]; boxes_new_mins = boxes_new[:,:2]
+                boxes_exs_maxs = boxes_exs[:,2:]; boxes_new_maxs = boxes_new[:,2:]
 
-            pair_mins_top_right = torch.min(
-                boxes_exs_mins[:,None,:].expand([N_E,N_N,2]),
-                boxes_new_mins[None,:,:].expand([N_E,N_N,2])
-            ).view([-1, 2])
-            pair_maxs_top_right = torch.max(
-                boxes_exs_maxs[:,None,:].expand([N_E,N_N,2]),
-                boxes_new_maxs[None,:,:].expand([N_E,N_N,2])
-            ).view([-1, 2])
-            pair_boxes_top_right = cat([pair_mins_top_right, pair_maxs_top_right], dim=-1)
+                pair_mins_top_right = torch.min(
+                    boxes_exs_mins[:,None,:].expand([N_E,N_N,2]),
+                    boxes_new_mins[None,:,:].expand([N_E,N_N,2])
+                ).view([-1, 2])
+                pair_maxs_top_right = torch.max(
+                    boxes_exs_maxs[:,None,:].expand([N_E,N_N,2]),
+                    boxes_new_maxs[None,:,:].expand([N_E,N_N,2])
+                ).view([-1, 2])
+                pair_boxes_top_right = cat([pair_mins_top_right, pair_maxs_top_right], dim=-1)
 
-            pair_mins_bottom_left = torch.min(
-                boxes_new_mins[:,None,:].expand([N_N,N_E,2]),
-                boxes_exs_mins[None,:,:].expand([N_N,N_E,2])
-            ).view([-1, 2])
-            pair_maxs_bottom_left = torch.max(
-                boxes_new_maxs[:,None,:].expand([N_N,N_E,2]),
-                boxes_exs_maxs[None,:,:].expand([N_N,N_E,2])
-            ).view([-1, 2])
-            pair_boxes_bottom_left = cat([pair_mins_bottom_left, pair_maxs_bottom_left], dim=-1)
+                pair_mins_bottom_left = torch.min(
+                    boxes_new_mins[:,None,:].expand([N_N,N_E,2]),
+                    boxes_exs_mins[None,:,:].expand([N_N,N_E,2])
+                ).view([-1, 2])
+                pair_maxs_bottom_left = torch.max(
+                    boxes_new_maxs[:,None,:].expand([N_N,N_E,2]),
+                    boxes_exs_maxs[None,:,:].expand([N_N,N_E,2])
+                ).view([-1, 2])
+                pair_boxes_bottom_left = cat([pair_mins_bottom_left, pair_maxs_bottom_left], dim=-1)
 
-            inc_pair_boxes = torch.cat([pair_boxes_top_right, pair_boxes_bottom_left])
-            inc_pair_boxes = Boxes(inc_pair_boxes)
+                inc_pair_boxes = torch.cat([pair_boxes_top_right, pair_boxes_bottom_left])
+                inc_pair_boxes = Boxes(inc_pair_boxes)
+            else:
+                inc_pair_boxes = Boxes([]).to(box_features.device)
 
             # Preparing pair proposals
             inc_proposal_rels = Instances(pos.image_size)

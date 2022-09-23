@@ -189,7 +189,7 @@ class TheoreticalReasonerModule:
                             # Skip special reserved predicates
                             if p[1] == "*": continue
 
-                            sym = f"{p[1]}_{p[0]}"
+                            sym = f"{p[1]}_{p[0].split('/')[0]}"
                             tok_loc = f"u{ui}_r{ri}_{c}{pi}"
                             aprog.add_hard_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
@@ -268,7 +268,7 @@ class TheoreticalReasonerModule:
                             # Skip special reserved predicates
                             if p[1] == "*": continue
 
-                            sym = f"{p[1]}_{p[0]}"
+                            sym = f"{p[1]}_{p[0].split('/')[0]}"
                             tok_loc = f"u{ui}_q{qi}_{c}{pi}"
                             aprog.add_hard_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
@@ -279,8 +279,9 @@ class TheoreticalReasonerModule:
             # Skip special reserved predicates
             if p[1] == "*": continue
 
+            sym = f"{p[1]}_{p[0].split('/')[0]}"
+
             # Consult lexicon to list denotation candidates
-            sym = f"{p[1]}_{p[0]}"
             if p in lexicon.s2d:
                 for vc in lexicon.s2d[p]:
                     pos_match = (p[1], vc[1]) == ("n", "cls") \
@@ -290,6 +291,7 @@ class TheoreticalReasonerModule:
                     if not pos_match: continue
 
                     den = f"{vc[1]}_{vc[0]}"
+
                     aprog.add_hard_rule(
                         Rule(head=Literal("may_denote", wrap_args(sym, den)))
                     )
@@ -384,13 +386,12 @@ class TheoreticalReasonerModule:
 
         word_senses = [atom.args[:2] for atom in opt_models[0] if atom.name == "denote"]
         word_senses = {
-            tuple(token[0].split("_")): tuple(denotation[0].split("_"))
+            tuple(token[0].split("_")): denotation[0]
             for token, denotation in word_senses
         }
         word_senses = {
-            token: (tok2sym_map[token], (denotation[0], int(denotation[1])))
-                if len(denotation[0])>0
-                else (tok2sym_map[token], None)
+            token: (tok2sym_map[token], denotation)
+                if denotation != "_neo" else (tok2sym_map[token], None)
             for token, denotation in word_senses.items()
         }
 
@@ -411,7 +412,8 @@ class TheoreticalReasonerModule:
             # If the utterance contains an unresolved neologism, give up translation
             # for the time being
             contains_unresolved_neologism = any([
-                den[1] is None for tok, den in self.word_senses.items() if tok[0]==f"u{ui}"
+                den is None for tok, (_, den) in self.word_senses.items()
+                if tok[0]==f"u{ui}"
             ])
             if contains_unresolved_neologism:
                 result.append((None, None))
@@ -425,30 +427,22 @@ class TheoreticalReasonerModule:
 
                     if head is not None:
                         rule_head = [
-                            self.word_senses[(f"u{ui}",f"r{ri}",f"h{hi}")][1]
-                            for hi in range(len(head))
-                        ]
-                        rule_head = [
                             Literal(
-                                f"{rule_head[i][0]}_{rule_head[i][1]}",
+                                self.word_senses[(f"u{ui}",f"r{ri}",f"h{hi}")][1],
                                 args=wrap_args(*a_map(h[2])), naf=h[3]
                             )
-                            for i, h in enumerate(head)
+                            for hi, h in enumerate(head)
                         ]
                     else:
                         rule_head = None
 
                     if body is not None:
                         rule_body = [
-                            self.word_senses[(f"u{ui}",f"r{ri}",f"b{bi}")][1]
-                            for bi in range(len(body))
-                        ]
-                        rule_body = [
                             Literal(
-                                f"{rule_body[i][0]}_{rule_body[i][1]}",
+                                self.word_senses[(f"u{ui}",f"r{ri}",f"b{bi}")][1],
                                 args=wrap_args(*a_map(b[2])), naf=b[3]
                             )
-                            for i, b in enumerate(body)
+                            for bi, b in enumerate(body)
                         ]
                     else:
                         rule_body = None
@@ -467,32 +461,26 @@ class TheoreticalReasonerModule:
                         rule_head = [
                             # If head literal predicate is not found in self.word_senses,
                             # it means the predicate is a special reserved one
-                            self.word_senses.get(
-                                (f"u{ui}",f"q{qi}",f"h{hi}"), (None, head[hi][1::-1])
-                            )[1]
-                            for hi in range(len(head))
-                        ]
-                        rule_head = [
                             Literal(
-                                f"{rule_head[i][0]}_{rule_head[i][1]}",
+                                self.word_senses[(f"u{ui}",f"q{qi}",f"h{hi}")][1],
                                 args=wrap_args(*a_map(h[2])), naf=h[3]
                             )
-                            for i, h in enumerate(head)
+                            if (f"u{ui}",f"q{qi}",f"h{hi}") in self.word_senses
+                            else Literal(
+                                "_".join(h[1::-1]), args=wrap_args(*a_map(h[2])), naf=h[3]
+                            )
+                            for hi, h in enumerate(head)
                         ]
                     else:
                         rule_head = None
 
                     if body is not None:
                         rule_body = [
-                            self.word_senses[(f"u{ui}",f"q{qi}",f"b{bi}")][1]
-                            for bi in range(len(body))
-                        ]
-                        rule_body = [
                             Literal(
-                                f"{rule_body[i][0]}_{rule_body[i][1]}",
+                                self.word_senses[(f"u{ui}",f"q{qi}",f"b{bi}")][1],
                                 args=wrap_args(*a_map(b[2])), naf=b[3]
                             )
-                            for i, b in enumerate(body)
+                            for bi, b in enumerate(body)
                         ]
                     else:
                         rule_body = None

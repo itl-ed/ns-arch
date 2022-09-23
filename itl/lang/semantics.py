@@ -647,7 +647,18 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
         # Handle predicates accordingly
         if rel["pos"] == "a":
             # Adjective predicates with args ('event', referent)
-            rel_lit = (rel["predicate"], "a", [arg1])
+
+            # (Many) Adjectives require consideration of the nominal 'class' of the
+            # object they modify for proper interpretation of their semantics (c.f.
+            # small elephant vs. big flea). For now, we will attach such nominal
+            # predicate names after (all) adjectival predicate names; practically,
+            # this allows the agent to search for exemplars within its exemplar-base
+            # with added info.
+            pred_name = rel["predicate"]
+            modified_ent = parse["relations"]["by_id"][arg1]
+            if modified_ent["lexical"]:
+                pred_name += "/" + modified_ent["predicate"]
+            rel_lit = (pred_name, "a", [arg1])
 
             if negate_focus:
                 focus_msgs.append([rel_lit])

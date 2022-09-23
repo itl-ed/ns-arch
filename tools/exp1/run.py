@@ -13,7 +13,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import tqdm
-import torch
 import numpy as np
 from detectron2.structures import BoxMode
 
@@ -84,15 +83,16 @@ if __name__ == "__main__":
         user.episode_records.append(user.current_record)
 
         ## Temp code for prior knowledge injection
-        if i==0:
-            # Sample rule injection
-            knowledge_inp = {
-                "v_usr_in": "n",
-                "l_usr_in": f"Brandy glasses have short stems.",
-                # "l_usr_in": f"Stems of brandy glasses are short.",
-                "pointing": {}
-            }
-            agent.loop(**knowledge_inp)
+        if opts.exp1_strat_feedback == "max":
+            if i==0:
+                # Sample rule injection
+                knowledge_inp = {
+                    "v_usr_in": "n",
+                    "l_usr_in": f"Brandy glasses have short stems.",
+                    # "l_usr_in": f"Stems of brandy glasses are short.",
+                    "pointing": {}
+                }
+                agent.loop(**knowledge_inp)
         ## Temp code end
 
     res_dir = os.path.join(opts.output_dir_path, "exp1_res")
@@ -162,7 +162,7 @@ if __name__ == "__main__":
                 else:
                     raise NotImplementedError
 
-    # Plot exam result as confusion matrix
+    # Store exam result as confusion matrix
     C = len(exam_result)
     data = np.zeros([C,C])
     concepts_ordered = list(exam_result)
@@ -177,80 +177,3 @@ if __name__ == "__main__":
 
                 data[i,j] = exam_result[conc_i][conc_j] / opts.exp1_test_set_size
             out_csv.write(",".join([str(d) for d in data[i]])+"\n")
-
-    sys.exit()
-
-    # Cluster analysis of positive/negative exemplars
-    from torch.utils.tensorboard import SummaryWriter
-
-    fvecs_to_label = defaultdict(set); fvecs_imgs = {}
-    for concept, (ex_vecs, ex_imgs) in agent.lt_mem.exemplars.pos_exs.items():
-        for v, im in list(zip(ex_vecs, ex_imgs)):
-            fvecs_to_label[tuple(v)].add((concept, "pos"))
-            fvecs_imgs[tuple(v)] = im
-    for concept, (ex_vecs, ex_imgs) in agent.lt_mem.exemplars.neg_exs.items():
-        for v, im in list(zip(ex_vecs, ex_imgs)):
-            fvecs_to_label[tuple(v)].add((concept, "neg"))
-            fvecs_imgs[tuple(v)] = im
-
-    concepts_ordered = \
-        set(agent.lt_mem.exemplars.pos_exs) | set(agent.lt_mem.exemplars.neg_exs)
-    concepts_ordered = list(concepts_ordered)
-    metadata_ordered = [agent.lt_mem.lexicon.d2s[c][0][0] for c in concepts_ordered]
-
-    fvecs_ordered = []
-    labels_ordered = []
-    imgs_ordered = []
-    for v, labels in fvecs_to_label.items():
-        fvecs_ordered.append(v)
-        label_ex = ["n/a"] * len(concepts_ordered)
-        for c, l in labels:
-            label_ex[concepts_ordered.index(c)] = l
-        labels_ordered.append(label_ex)
-        imgs_ordered.append(np.transpose(fvecs_imgs[v], [2,0,1]))
-
-    fvecs_ordered = np.array(fvecs_ordered)
-    imgs_ordered = torch.tensor(np.stack(imgs_ordered)) / 255
-
-    for i, c in enumerate(concepts_ordered):
-        pos_exs = [
-            v for v, labels in fvecs_to_label.items() if (c, "pos") in labels
-        ]
-        neg_exs = [
-            v for v, labels in fvecs_to_label.items() if (c, "neg") in labels
-        ]
-
-        if len(pos_exs) > 0:
-            pos_proto_vec = np.array([
-                v for v, labels in fvecs_to_label.items() if (c, "pos") in labels
-            ]).mean(axis=0, keepdims=True)
-            fvecs_ordered = np.concatenate([fvecs_ordered, pos_proto_vec])
-            pos_proto_label = ["n/a"] * len(concepts_ordered)
-            pos_proto_label[i] = "pos_proto"
-            labels_ordered.append(pos_proto_label)
-            imgs_ordered = torch.cat(
-                [imgs_ordered, torch.ones(imgs_ordered.shape[1:])[None]]
-            )
-
-        if len(neg_exs) > 0:
-            neg_proto_vec = np.array([
-                v for v, labels in fvecs_to_label.items() if (c, "neg") in labels
-            ]).mean(axis=0, keepdims=True)
-            fvecs_ordered = np.concatenate([fvecs_ordered, neg_proto_vec])
-            neg_proto_label = ["n/a"] * len(concepts_ordered)
-            neg_proto_label[i] = "neg_proto"
-            labels_ordered.append(neg_proto_label)
-            imgs_ordered = torch.cat(
-                [imgs_ordered, torch.ones(imgs_ordered.shape[1:])[None]]
-            )
-
-    writer = SummaryWriter(os.path.join(res_dir, f"analysis_{tail}"))
-
-    # Instance feature vectors
-    writer.add_embedding(
-        fvecs_ordered,
-        metadata=labels_ordered,
-        metadata_header=metadata_ordered,
-        label_img=imgs_ordered,
-        tag="Exemplar vector inspection"
-    )

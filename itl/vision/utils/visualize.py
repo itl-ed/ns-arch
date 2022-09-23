@@ -67,7 +67,7 @@ def visualize_sg_predictions(img, scene, predicates):
     ax.axes.xaxis.set_visible(False)
     ax.axes.yaxis.set_visible(False)
 
-    thresholds = { "obj": 0.75, "rel": 0.75 }
+    thresholds = { "obj": 0, "rel": 0 }
 
     def render(obj_thresh, rel_thresh):
         # Filter predictions to visualize by objectness threshold

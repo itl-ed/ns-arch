@@ -211,23 +211,33 @@ class DialogueManager:
 
             # First check if there's any existing high-IoU bounding box; by 'high'
             # we refer to some arbitrary threshold -- let's use 0.8 here
-            env_ref_bboxes = torch.stack(
-                [torch.tensor(e["bbox"]) for e in self.referents["env"].values()]
-            )
+            if len(self.referents["env"]) > 0:
+                env_ref_bboxes = torch.stack(
+                    [torch.tensor(e["bbox"]) for e in self.referents["env"].values()]
+                )
 
-            iou_thresh = 0.7
-            ious = torchvision.ops.box_iou(
-                torch.tensor(drawn_bbox)[None,:], env_ref_bboxes
-            )
-            best_match = ious.max(dim=-1)
+                iou_thresh = 0.7
+                ious = torchvision.ops.box_iou(
+                    torch.tensor(drawn_bbox)[None,:], env_ref_bboxes
+                )
+                best_match = ious.max(dim=-1)
 
-            if best_match.values.item() > iou_thresh:
-                # Assume the 'pointed' entity is actually this one
-                max_ind = best_match.indices.item()
-                pointed = list(self.referents["env"].keys())[max_ind]
+                if best_match.values.item() > iou_thresh:
+                    # Assume the 'pointed' entity is actually this one
+                    max_ind = best_match.indices.item()
+                    pointed = list(self.referents["env"].keys())[max_ind]
+                else:
+                    # Register the entity as a novel environment referent
+                    pointed = f"o{len(env_ref_bboxes)}"
+
+                    self.referents["env"][pointed] = {
+                        "bbox": drawn_bbox,
+                        "area": (drawn_bbox[2]-drawn_bbox[0]) * (drawn_bbox[3]-drawn_bbox[1])
+                    }
+                    self.referent_names[pointed] = pointed
             else:
                 # Register the entity as a novel environment referent
-                pointed = f"o{len(env_ref_bboxes)}"
+                pointed = "o0"
 
                 self.referents["env"][pointed] = {
                     "bbox": drawn_bbox,

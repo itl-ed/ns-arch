@@ -49,7 +49,11 @@ class Exemplars:
         neg_exs = self.storage_vec[cat_type][list(neg_exs)]
 
         return { "pos": pos_exs, "neg": neg_exs }
-    
+
+    def refresh(self):
+        # Not expected to be called by user; for compact exemplar storage during injection
+        self.__init__()
+
     def add_exs(self, sources, f_vecs, pointers_src, pointers_exm):
         assert len(sources) > 0
 

@@ -169,7 +169,7 @@ class KnowledgeBase:
                 score = score if score > LOWER_THRES else 0.0
             else:
                 assert cat_type == "rel"
-                if grd_args[1] in obj["pred_relations"]:
+                if "pred_relations" in obj and grd_args[1] in obj["pred_relations"]:
                     rels_per_obj = obj["pred_relations"][grd_args[1]]
                     score = float(rels_per_obj[conc_ind])
                     score = score if score > LOWER_THRES else 0.0
@@ -404,7 +404,9 @@ class KnowledgeBase:
             b_var_signature = intermediate_outputs[i][3]
 
             for inst, (h_grd_pr, _) in grd_probs.items():
-                if h_grd_pr != r_pr:
+                # If prior Pr(Head) is smaller than rule probability, boost Pr(Head|Body)
+                # up to the probability while retaining Pr(Body)
+                if h_grd_pr < r_pr:
                     # Manipulate prior prob of grounded head for target conditional,
                     # while retaining distributions outside the conditional
                     grd_r_unsat_lit = Literal(f"deduc_viol_{i}", wrap_args(*inst))
@@ -506,7 +508,10 @@ class KnowledgeBase:
 
                     if catchall_prob == 0.0: break     # Short-circuit if prob is zero
 
-                if catchall_prob != P_C:
+                # If prior Pr(Catchall(<=>"None of the body holds")) is larger than the
+                # catchall hypothesis probability, suppress Pr(Catchall|Head) down to the
+                # probability while retaining Pr(Head)
+                if catchall_prob > P_C:
                     # Manipulate prior prob of grounded body for target conditional,
                     # while retaining distributions outside the conditional
                     grd_coll_h_catchall_lit = Literal(

@@ -9,6 +9,7 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
 import random
+from itertools import product
 from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
@@ -100,8 +101,13 @@ if __name__ == "__main__":
 
         # Append vectors to matrix
         cls_f_vecs_all += list(f_vecs[0].cpu().numpy())
-    
+
     cls_f_vecs_all = np.array(cls_f_vecs_all, dtype=np.float32)
+
+    # Offsets for chunks of feature vectors originating from same img, determined by
+    # number of objects in each img
+    oi_offsets = np.cumsum([0] + [len(bboxes) for _, bboxes in source_imgs[:-1]])
+    oioj_offsets = np.cumsum([0] + [len(bboxes)**2 for _, bboxes in source_imgs[:-1]])
 
     # Sampling negative exemplars for class concepts
     cls_neg_exs = {
@@ -114,7 +120,6 @@ if __name__ == "__main__":
     }       # Sampling down to the same number as positive exemplars
 
     # Pointing class vectors to their source objects
-    oi_offsets = np.cumsum([0] + [len(bboxes) for _, bboxes in source_imgs[:-1]])
     pointers_cls_src = {
         oi+off: (i, (oi,))
         for i, ((_, bboxes), off) in enumerate(zip(source_imgs, oi_offsets))
@@ -210,15 +215,84 @@ if __name__ == "__main__":
     att_f_vecs_all = np.array(att_f_vecs_all, dtype=np.float32)
     rel_f_vecs_all = np.array(rel_f_vecs_all, dtype=np.float32)
 
-    # Sampling negative exemplars for attribute concepts
-    att_neg_exs = {
-        conc: set(range(len(att_f_vecs_all))) - fv_inds
+    # Sampling negative exemplars for attribute concepts;
+    # Semantics of attributes can be strongly affected by the class identities of the
+    # referents, so subcategorize attribute concepts accordingly
+    att_exs_sub = {
+        conc: {
+            cls_conc_ind: (cls_pos_exs & fv_inds, cls_pos_exs - fv_inds)
+            for cls_conc_ind, (cls_pos_exs, _), in pointers_cls_exm.items()
+        }
         for conc, fv_inds in att_pos_exs.items()
-    }       # Negative exemplar sets as complements of respective positive exemplar sets
+    }
+    att_exs_sub = {
+        conc: {
+            cls_conc_ind: (
+                pos_exs_sub,
+                set(random.sample(list(neg_exs_sub), len(pos_exs_sub)))
+            )
+            for cls_conc_ind, (pos_exs_sub, neg_exs_sub) in exs_sub.items()
+        }
+        for conc, exs_sub in att_exs_sub.items()
+    }
+    att_pos_exs = {
+        (conc, cls_cond_ind): pos_exs_sub
+        for conc, exs_sub in att_exs_sub.items()
+        for cls_cond_ind, (pos_exs_sub, _) in exs_sub.items()
+        if len(pos_exs_sub)>0
+    }
     att_neg_exs = {
-        conc: set(random.sample(list(fv_inds), len(att_pos_exs[conc])))
-        for conc, fv_inds in att_neg_exs.items()
-    }       # Sampling down to the same number as positive exemplars
+        (conc, cls_cond_ind): neg_exs_sub
+        for conc, exs_sub in att_exs_sub.items()
+        for cls_cond_ind, (_, neg_exs_sub) in exs_sub.items()
+        if len(neg_exs_sub)>0
+    }
+
+    # # Sampling negative exemplars for relation concepts;
+    # # Similar deal with sampling negative attribute exemplars, but more intricate due to
+    # # the need to address object pairs
+    # exs_by_cls_by_img = [
+    #     {
+    #         conc_ind: {
+    #             pointers_cls_src[fv_i][1][0] for fv_i in pxs
+    #             if pointers_cls_src[fv_i][0]==i
+    #         }
+    #         for conc_ind, (pxs, _) in pointers_cls_exm.items()
+    #     }
+    #     for i in range(len(source_imgs))
+    # ]
+    # exs_pairs_by_cls_by_img = [
+    #     {
+    #         (c1,c2): list(product(exs1, exs2))
+    #         for (c1, exs1), (c2, exs2) in product(exs.items(), repeat=2)
+    #     }
+    #     for exs in exs_by_cls_by_img
+    # ]
+    # rel_fv_inds_by_cls_by_img = [
+    #     {
+    #         cls_conc_ind_pairs: {
+    #             (source_imgs[i][1].shape[0] * oi) + oj + oioj_offsets[i]
+    #             for oi, oj in pairs
+    #         }
+    #         for cls_conc_ind_pairs, pairs in ex_pairs.items()
+    #     }
+    #     for i, ex_pairs in enumerate(exs_pairs_by_cls_by_img)
+    # ]
+    # rel_fv_inds_by_cls = defaultdict(set)
+    # for ex_pairs_for_img in rel_fv_inds_by_cls_by_img:
+    #     for cls_conc_ind_pairs, rel_fv_inds in ex_pairs_for_img.items():
+    #         rel_fv_inds_by_cls[cls_conc_ind_pairs] |= rel_fv_inds
+    # rel_fv_inds_by_cls = dict(rel_fv_inds_by_cls)
+
+    # rel_exs_sub = {
+    #     conc: {
+    #         cls_conc_ind_pairs: (
+    #             cls_pos_pair_exs & fv_inds, cls_pos_pair_exs - fv_inds
+    #         )
+    #         for cls_conc_ind_pairs, cls_pos_pair_exs in rel_fv_inds_by_cls.items()
+    #     }
+    #     for conc, fv_inds in rel_pos_exs.items()
+    # }
 
     # Sampling negative exemplars for relation concepts
     rel_neg_exs = {
@@ -251,7 +325,6 @@ if __name__ == "__main__":
     pointers_att_src = pointers_cls_src
 
     # Pointing relation vectors to their source object pairs - this is bit more delicate
-    oioj_offsets = np.cumsum([0] + [len(bboxes)**2 for _, bboxes in source_imgs[:-1]])
     pointers_rel_src = {
         oioj+off: (i, (oioj // len(bboxes), oioj % len(bboxes)))
         for i, ((_, bboxes), off) in enumerate(zip(source_imgs, oioj_offsets))
@@ -265,17 +338,20 @@ if __name__ == "__main__":
 
     # Register new attribute concepts along with their linguistic data
     pointers_att_exm = {}
-    for conc in att_pos_exs:
+    for conc, cls_conc_ind in att_pos_exs:
         conc_ind = agent.vision.add_concept("att")
         name, pos, _ = conc.split(".")
         name = "".join(
             tok if i==0 else tok.capitalize()       # camelCase multi-token names
             for i, tok in enumerate(name.split("_"))
         )
+        name += "/" + agent.lt_mem.lexicon.d2s[(cls_conc_ind, "cls")][0][0]
         agent.lt_mem.lexicon.add((name, pos), (conc_ind, "att"))
 
         # Packing positive & negative exemplars into a single dict
-        pointers_att_exm[conc_ind] = (att_pos_exs[conc], att_neg_exs[conc])
+        pointers_att_exm[conc_ind] = (
+            att_pos_exs[(conc, cls_conc_ind)], att_neg_exs[(conc, cls_conc_ind)]
+        )
 
     # Register new relation concepts along with their linguistic data
     pointers_rel_exm = {}
@@ -291,12 +367,19 @@ if __name__ == "__main__":
         # Packing positive & negative exemplars into a single dict
         pointers_rel_exm[conc_ind] = (rel_pos_exs[conc], rel_neg_exs[conc])
 
-    # Finally add attribute & relation exemplars
+    # Finally add all exemplars
+    agent.lt_mem.exemplars.refresh()      # Saving space; existing data all redundant
     agent.lt_mem.exemplars.add_exs(
         sources=source_imgs,
-        f_vecs={ "att": att_f_vecs_all, "rel": rel_f_vecs_all },
-        pointers_src={ "att": pointers_att_src, "rel": pointers_rel_src },
-        pointers_exm={ "att": pointers_att_exm, "rel": pointers_rel_exm }
+        f_vecs={
+            "cls": cls_f_vecs_all, "att": att_f_vecs_all, "rel": rel_f_vecs_all
+        },
+        pointers_src={
+            "cls": pointers_cls_src, "att": pointers_att_src, "rel": pointers_rel_src
+        },
+        pointers_exm={
+            "cls": pointers_cls_exm, "att": pointers_att_exm, "rel": pointers_rel_exm
+        }
     )
     # Update the category code parameter in the vision model's predictor head using
     # the new set of exemplars

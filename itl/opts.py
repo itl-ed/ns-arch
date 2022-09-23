@@ -109,7 +109,7 @@ def parse_arguments():
         help="Teacher's strategy on how to provide feedback upon learner's incorrect answer:\n"
             "1) min: Absolutely minimal feedback, telling that the answer was incorrect\n"
             "2) med: 'Medium' feedback, providing correct label in addition to 'min'\n"
-            "3) max: 'Maximum' feedback, providing linguistic explanation in addition to 'max'\n"
+            "3) max: 'Maximum' feedback, providing linguistic explanation in addition to 'med'\n"
             "(Default: min)")
     parser.add_argument("-x1df", "--exp1_difficulty",
         type=str,

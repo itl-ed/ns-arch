@@ -148,7 +148,7 @@ if __name__ == "__main__":
         labels = [hl[1] for hl in hls_sorted]
         plt.legend(handles, labels)
         
-        plt.title(f"Learning curve for {diff} difficulty (N=50)")
+        plt.title(f"Learning curve for {diff} difficulty")
         plt.savefig(os.path.join(opts.output_dir_path, f"curve_{diff}.png"))
 
     # Aggregate and visualize: confusion matrix
@@ -172,7 +172,7 @@ if __name__ == "__main__":
                 data["confMat"] / data["test_set_size"],
                 data["concepts"], data["concepts"], fig.gca()
             )
-            plt.suptitle(f"Confusion matrix for {diff} difficulty (N=50)", fontsize=16)
+            plt.suptitle(f"Confusion matrix for {diff} difficulty", fontsize=16)
             plt.title(f"{config_label} agent", pad=18)
             plt.tight_layout()
             plt.savefig(os.path.join(opts.output_dir_path, f"confMat_{diff}_{config_label}.png"))

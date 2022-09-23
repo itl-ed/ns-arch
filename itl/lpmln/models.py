@@ -511,7 +511,11 @@ class Models:
 
             # Set of entities and predicates (along w/ arity info - values defined only for
             # predicate q_var) occurring in atoms_covered
-            ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
+            if len(atoms_covered) > 0:
+                ents = set.union(*[{a[0] for a in atm.args} for atm in atoms_covered])
+            else:
+                ents = set()
+
             preds = set((atm.name, len(atm.args)) for atm in atoms_covered)
             pred_arities = {
                 l for l in set.union(*[ev_rule.literals() for ev_rule in event])

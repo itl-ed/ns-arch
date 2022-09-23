@@ -264,6 +264,11 @@ class ITLAgent:
                 )
                 vis_ui_on = False
 
+                # Temporary tampering for the sake of efficient experiments; nuke ensemble
+                # prediction result...
+                self.vision.scene = {}
+                self.vision.f_vecs = ({}, {}, {}, {}, {}, self.vision.f_vecs[5])
+
             if self.vision.new_input is not None:
                 # Inform the language module of the visual context
                 self.lang.situate(self.vision.last_input, self.vision.scene)
@@ -468,7 +473,7 @@ class ITLAgent:
         #   - any unaddressed neologism which is unresolvable
         #   - any unaddressed recognition inconsistency btw. agent and user
         #   - any unanswered question that is answerable
-        #
+
         # Ideally, this is to be accomplished declaratively by properly setting up formal
         # maintenance goals and then performing automated planning or something to come
         # up with right sequence of actions to be added to agenda. However, the ad-hoc code

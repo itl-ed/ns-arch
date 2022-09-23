@@ -288,16 +288,17 @@ class AgentCompositeActions:
                 tuple(f"o{offset+i+O}" for i in range(len(spc[0]))): spc
                 for spc, offset in zip(final_specs, oi_offsets)
             }
-            self.agent.vision.predict(
-                self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
-                specs=final_specs
-            )
+            if len(final_specs) > 0:
+                self.agent.vision.predict(
+                    self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
+                    specs=final_specs
+                )
 
-            #  ... and another round of sensemaking
-            exported_kb = self.agent.lt_mem.kb.export_reasoning_program(self.vision.scene)
-            self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
-            self.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
-            self.theoretical.sensemake_vis_lang(dialogue_state)
+                #  ... and another round of sensemaking
+                exported_kb = self.agent.lt_mem.kb.export_reasoning_program(self.agent.vision.scene)
+                self.agent.theoretical.sensemake_vis(self.agent.vision.scene, exported_kb)
+                self.agent.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
+                self.agent.theoretical.sensemake_vis_lang(dialogue_state)
 
         # Compute raw answer candidates by appropriately querying current world models
         answers_raw, _ = models_vl.query(*question)
@@ -309,6 +310,12 @@ class AgentCompositeActions:
                 ans: val for ans, val in answers_raw.items()
                 if any(not is_pred or a.startswith("cls") for a, (_, is_pred) in zip(ans, q_vars))
             }
+
+            # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
+            # elegant way in the future...
+            for ans in list(answers_raw.keys()):
+                if not(ans[0] == "cls_11" or ans[0] == "cls_12" or ans[0] == "cls_13"):
+                    del answers_raw[ans]
 
         # Pick out an answer to deliver; maximum confidence
         if len(answers_raw) > 0:
