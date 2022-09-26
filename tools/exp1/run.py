@@ -83,19 +83,6 @@ if __name__ == "__main__":
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 
-        ## Temp code for prior knowledge injection
-        if opts.exp1_strat_feedback == "max":
-            if i==0:
-                # Sample rule injection
-                knowledge_inp = {
-                    "v_usr_in": "n",
-                    "l_usr_in": f"Brandy glasses have short stems.",
-                    # "l_usr_in": f"Stems of brandy glasses are short.",
-                    "pointing": {}
-                }
-                agent.loop(**knowledge_inp)
-        ## Temp code end
-
     res_dir = os.path.join(opts.output_dir_path, "exp1_res")
     os.makedirs(res_dir, exist_ok=True)
 

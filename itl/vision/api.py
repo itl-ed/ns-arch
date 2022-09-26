@@ -495,32 +495,23 @@ class VisionModule:
             ))
 
         if exemplars is not None:
-            # Computing few shot exemplar-based scores
+            # Computing few shot exemplar-based scores; prediction logic almost analogous
+            # to Matching Network (Vinyals et al., 2016), but with Euclidean distance in
+            # place of cosine similarity
             dev = self.model.base_model.device
-            predictor_heads = self.model.base_model.roi_heads.box_predictor
-            D = predictor_heads.compress_cls.out_features
 
-            for cat_type in ["cls", "att", "rel"]:
-                pos_exs_all = exemplars.exemplars_pos[cat_type]
-                neg_exs_all = exemplars.exemplars_neg[cat_type]
+            with torch.no_grad():
+                # We can first compute distances from this 
+                for conc_ind, cat_type in exemplars.concepts_covered_gen():
+                    # Fetch exemplar vectors with positive/negative labels
+                    ex_vecs = exemplars[(conc_ind, cat_type)]
+                    pos_exs = torch.tensor(ex_vecs["pos"], device=dev)
+                    neg_exs = torch.tensor(ex_vecs["neg"], device=dev)
+                    all_exs = torch.cat([pos_exs, neg_exs])
 
-                for conc_ind in (set(pos_exs_all) | set(neg_exs_all)):
-                    # Implementation of Matching Network (weighted nearest neighbor), but
-                    # using (negative) Euclidean distance instead of cosine similarity.
-                    # (Exemplars, postive or negative, have to be present in order to compute
-                    # the distances; some day we could maybe try imagining exemplars zero-shot\
-                    # by leveraging other resources, like pre-trained word embeddings?)
-                    if conc_ind in pos_exs_all and len(pos_exs_all[conc_ind])>0:
-                        pos_exs = exemplars.storage_vec[cat_type][list(pos_exs_all[conc_ind])]
-                        pos_exs = torch.tensor(pos_exs, device=dev)
-                    else:
-                        pos_exs = None
-                    
-                    if conc_ind in neg_exs_all and len(neg_exs_all[conc_ind])>0:
-                        neg_exs = exemplars.storage_vec[cat_type][list(neg_exs_all[conc_ind])]
-                        neg_exs = torch.tensor(neg_exs, device=dev)
-                    else:
-                        neg_exs = None
+                    # Label vector
+                    ex_labels = [1]*len(pos_exs) + [0]*len(neg_exs)
+                    ex_labels = torch.tensor(ex_labels, device=dev)
 
                     # Fetch appropriate feature vector and name of prediction field to fill
                     if cat_type == "cls" or cat_type == "att":
@@ -532,18 +523,13 @@ class VisionModule:
                             else:
                                 f_vec_cat = self.f_vecs[1][oi]
                                 field_name = "pred_attributes"
+                            
+                            # Compute Euclidean distances to exemplars
+                            dists = torch.linalg.norm(all_exs-f_vec_cat[None,:], dim=-1)
 
-                            # Few-shot prediction by weighted nearest neighbor voting
-                            if pos_exs is not None and neg_exs is not None:
-                                # Use squared Euclidean distance (L2 norm)
-                                all_exs = torch.cat([pos_exs, neg_exs])
-                                dists = torch.linalg.norm(all_exs - f_vec_cat[None,:], dim=-1)
-                                fs_score = F.softmax(-dists)[:len(pos_exs)].sum().item()
-                                fs_score = max(min(1.0, fs_score), 0.0)     # Clip between 0~1
-                            else:
-                                # Either positive or negative set of exemplars does not
-                                # exist; return prediction result accordingly
-                                fs_score = 1.0 if neg_exs is None else 0.0
+                            # Final few-shot prediction by weighted neighbor voting
+                            fs_score = (F.softmax(-dists) * ex_labels).sum()
+                            fs_score = torch.clamp(fs_score, min=0, max=1).item()
 
                             # Fill in the scene graph with the score
                             if field_name in self.scene[oi]:
@@ -564,17 +550,12 @@ class VisionModule:
                             f_vec_cat = self.f_vecs[2][oi][oj]
                             field_name = "pred_relations"
 
-                            # Few-shot prediction by weighted nearest neighbor voting
-                            if pos_exs is not None and neg_exs is not None:
-                                # Use squared Euclidean distance (L2 norm)
-                                all_exs = torch.cat([pos_exs, neg_exs])
-                                dists = torch.linalg.norm(all_exs - f_vec_cat[None,:], dim=-1)
-                                fs_score = F.softmax(-dists)[:len(pos_exs)].sum().item()
-                                fs_score = max(min(1.0, fs_score), 0.0)     # Clip between 0~1
-                            else:
-                                # Either positive or negative set of exemplars does not
-                                # exist; return prediction result accordingly
-                                fs_score = 1.0 if neg_exs is None else 0.0
+                            # Compute Euclidean distances to exemplars
+                            dists = torch.linalg.norm(all_exs-f_vec_cat[None,:], dim=-1)
+
+                            # Final few-shot prediction by weighted neighbor voting
+                            fs_score = (F.softmax(-dists) * ex_labels).sum()
+                            fs_score = torch.clamp(fs_score, min=0, max=1).item()
 
                             # Fill in the scene graph with the score
                             if field_name in self.scene[oi]:

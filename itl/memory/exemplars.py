@@ -53,6 +53,14 @@ class Exemplars:
     def refresh(self):
         # Not expected to be called by user; for compact exemplar storage during injection
         self.__init__()
+    
+    def concepts_covered_gen(self):
+        for cat_type in ["cls", "att", "rel"]:
+            pos_covered = set(self.exemplars_pos[cat_type])
+            neg_covered = set(self.exemplars_neg[cat_type])
+
+            for conc_ind in pos_covered | neg_covered:
+                yield (conc_ind, cat_type)
 
     def add_exs(self, sources, f_vecs, pointers_src, pointers_exm):
         assert len(sources) > 0

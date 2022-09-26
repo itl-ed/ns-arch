@@ -155,7 +155,7 @@ class SimulatedTeacher:
         if "I am not sure." in agent_utterances:
             # Agent answered it doesn't have any clue what the concept instance is;
             # provide correct label, even if taking minimalist strategy (after all,
-            # learning cannot take place if we don't provide any!)
+            # learning cannot take place if we don't provide any)
             self.current_record["answered_concept"] = "N/A"
             self.current_record["answer_correct"] = False
             self.current_record["number_of_exemplars"] += 1
@@ -197,13 +197,29 @@ class SimulatedTeacher:
                     "pointing": { "this": [self.current_focus[1]] }
                 }
 
-                # Additional labelling provided if teacher strategy is 'greater' than [minimal
-                # feedback] or the concept hasn't ever been taught
+                # Correct label additionally provided if teacher strategy is 'greater' than
+                # [minimal feedback] or the concept hasn't ever been taught
                 taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
                 is_novel_concept = concept_string not in taught_concepts
                 if self.strat_feedback != "min" or is_novel_concept:
                     response["l_usr_in"] += f" This is a {concept_string}."
                     response["pointing"]["this"].append(self.current_focus[1])
+                
+                # Generic difference between intended concept vs. incorrect answer concept
+                # additionally provided if teacher strategy is 'greater' than [maximal feedback]
+
+                ## Temp code for prior knowledge injection
+                # if opts.exp1_strat_feedback == "max":
+                #     if i==0:
+                #         # Sample rule injection
+                #         knowledge_inp = {
+                #             "v_usr_in": "n",
+                #             "l_usr_in": f"Brandy glasses have short stems.",
+                #             # "l_usr_in": f"Stems of brandy glasses are short.",
+                #             "pointing": {}
+                #         }
+                #         agent.loop(**knowledge_inp)
+                ## Temp code end
 
         else:
             raise NotImplementedError
