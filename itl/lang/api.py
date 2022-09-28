@@ -273,7 +273,7 @@ class LanguageModule:
                 info = _map_and_format(info, ref_map, f"u{ui}")
                 info_aux = _map_and_format(info_aux, ref_map, f"u{ui}")
 
-                new_record = ("U", (info+info_aux, None), parse["raw"])
+                new_record = ("U", (info+info_aux, None), parse["conjunct_raw"][ev_id])
                 self.dialogue.record.append(new_record)    # Add new record
 
             elif parse["utt_type"][ev_id] == "ques":
@@ -348,7 +348,7 @@ class LanguageModule:
                     info = None
                 question = _map_and_format(question, ref_map, f"u{ui}")
 
-                new_record = ("U", (info, question), parse["raw"])
+                new_record = ("U", (info, question), parse["conjunct_raw"][ev_id])
                 self.dialogue.record.append(new_record)    # Add new record
                 self.dialogue.unanswered_Q.add(ui)
 

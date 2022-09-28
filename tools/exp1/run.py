@@ -73,13 +73,17 @@ if __name__ == "__main__":
         # Each single ITL episode is initiated by the teacher, aiming to test and confer
         # knowledge on one of the target concepts specified
         user_init = user.initiate_episode()
-        agent_reaction = agent.loop(**user_init)
+        agent_reactions = agent.loop(**user_init)
 
-        # Continue interaction until agent answers with "OK."
-        while ("generate", "OK.") not in agent_reaction:
-            user_reaction = user.react(agent_reaction)
-            agent_reaction = agent.loop(**user_reaction)
-        
+        # Continue interaction until agent answers with "OK." to every user reaction
+        while any(ar != ("generate", "OK.") for ar in agent_reactions):
+            user_reactions = user.react([
+                ar for ar in agent_reactions if ar != ("generate", "OK.")
+            ])
+            agent_reactions = sum([
+                agent.loop(**ur) for ur in user_reactions
+            ], [])
+
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 

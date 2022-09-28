@@ -12,7 +12,9 @@ from detectron2.structures import pairwise_iou, Boxes, Instances
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.poolers import ROIPooler
 from detectron2.modeling.sampling import subsample_labels
-from detectron2.modeling.proposal_generator.proposal_utils import add_ground_truth_to_proposals
+from detectron2.modeling.proposal_generator.proposal_utils import (
+    add_ground_truth_to_proposals
+)
 from detectron2.modeling.roi_heads import (
     ROI_HEADS_REGISTRY,
     StandardROIHeads,
@@ -22,9 +24,6 @@ from detectron2.modeling.roi_heads import (
 from .fast_rcnn import SceneGraphRCNNOutputLayers
 from ..utils import pair_vals, pair_select_indices
 
-
-# Number of top-k search results to return for each search spec
-S = 1
 
 @ROI_HEADS_REGISTRY.register()
 class SceneGraphROIHeads(StandardROIHeads):
@@ -354,8 +353,7 @@ class SceneGraphROIHeads(StandardROIHeads):
         return (proposals, proposal_pairs)
 
     def _forward_box(
-        self, features, proposals,
-        exs_cached=None, boxes_provided=False, search_specs=None
+        self, features, proposals, exs_cached=None, boxes_provided=False
     ):
         """
         Forward logic extended to pass RoI-pooled features extracted from pair-enclosing
@@ -388,142 +386,9 @@ class SceneGraphROIHeads(StandardROIHeads):
                         proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
             return losses
         else:
-            if search_specs is None:
-                # Run-of-the-mill, ensemble (non-search) prediction
-                pred_instances, kept_indices = self.box_predictor.inference(
-                    predictions, proposals, boxes_provided=boxes_provided
-                )
-                inc_out = None
-            else:
-                # Visual search mode
-                search_by, search_conds = search_specs
-
-                # Incremental relation predictions/f_vectors may be needed for computing
-                # compatibility scores in certain scenarios; compute them in advance in
-                # such cases
-                need_inc_out = any(
-                    any(
-                        cat_type=="rel" and sum(a[0]=="v" for a in arg_handles)==1
-                        for cat_type, arg_handles, _ in descr
-                    )
-                    for _, descr in search_conds
-                )
-                if need_inc_out:
-                    inc_out = self._forward_box_inc_rels(
-                        features, box_features, proposals_objs, f_vecs[3], exs_cached
-                    )[0]
-                else:
-                    inc_out = None
-
-                if search_by == "model":
-                    raise NotImplementedError
-                
-                elif search_by == "exemplar":
-                    kept_indices = [[]]
-                    for s_vars_num, descr in search_conds:
-                        # Keeping aggregate 'compatibility scores', which are boosted
-                        # according to how well each entity satisfies the provided
-                        # search conditions
-                        agg_comp_scores = torch.ones(
-                            s_vars_num, len(proposals_objs[0]), device=dev
-                        )
-
-                        for cat_type, arg_handles, ref_vecs in descr:
-                            # Should contain at least one variable arg (for the search
-                            # to make any sense)
-                            arg_is_vars = [a[0]=="v" for a in arg_handles]
-                            assert any(arg_is_vars)
-
-                            if cat_type == "cls" or cat_type == "att":
-                                # Compatibility scores by cls/att feature vector
-                                assert len(arg_handles) == 1
-                                cat_f_vecs = f_vecs[0] if cat_type == "cls" else f_vecs[1]
-
-                                # Softmax of negative euclidean distances btw. positive/negative
-                                # reference vectors
-                                if ref_vecs[0] is not None:
-                                    pos_dists = torch.linalg.norm(cat_f_vecs-ref_vecs[0], dim=1)
-                                else:
-                                    pos_dists = torch.tensor([float("inf")] * len(cat_f_vecs), device=dev)
-                                
-                                if ref_vecs[1] is not None:
-                                    neg_dists = torch.linalg.norm(cat_f_vecs-ref_vecs[1], dim=1)
-                                else:
-                                    neg_dists = torch.tensor([float("inf")] * len(cat_f_vecs), device=dev)
-
-                                comp_scores = torch.stack([-pos_dists, -neg_dists], dim=-1)
-                                comp_scores = F.softmax(comp_scores)[:, 0]
-                                agg_comp_scores[arg_handles[0][1]] *= comp_scores
-                            else:
-                                # Compatibility scores by rel feature vector
-                                assert cat_type == "rel"
-                                assert len(arg_handles) == 2
-
-                                v_args_num = sum(arg_is_vars)
-                                if v_args_num == 1:
-                                    # Recover incrementally obtained relation feature vectors,
-                                    # i.e. top right and bottom left parts of 2-by-2 partitioning
-                                    assert inc_out is not None
-                                    N_E = len(exs_cached["detections"]); N_N = len(proposals_objs[0])
-                                    D = inc_out[1].shape[-1]
-                                    inc_rel_f_vecs = inc_out[1].view(-1, 2, D)
-                                    rel_f_vecs_top_right = inc_rel_f_vecs[:,0,:].view(N_E, N_N, -1)
-                                    rel_f_vecs_bottom_left = inc_rel_f_vecs[:,1,:].view(N_N, N_E, -1)
-
-                                    v_ind = arg_is_vars.index(True); v_arg = arg_handles[v_ind]
-                                    e_ind = arg_is_vars.index(False); e_arg = arg_handles[e_ind]
-                                    if e_ind < v_ind:
-                                        # Case (e,v): Consult 'top right' of the partition
-                                        cat_f_vecs = rel_f_vecs_top_right[e_arg[1],:]
-                                    else:
-                                        # Case (e,v): Consult 'bottom left' of the partition
-                                        assert v_ind < e_ind
-                                        cat_f_vecs = rel_f_vecs_bottom_left[:,e_arg[1]]
-
-                                    # Softmax of negative euclidean distances btw. positive/negative
-                                    # reference vectors
-                                    pos_dists = torch.linalg.norm(cat_f_vecs-ref_vecs[0], dim=1)
-                                    neg_dists = torch.linalg.norm(cat_f_vecs-ref_vecs[1], dim=1)
-                                    comp_scores = torch.stack([-pos_dists, -neg_dists], dim=-1)
-                                    comp_scores = F.softmax(comp_scores)[:, 0]
-                                    agg_comp_scores[v_arg[1]] *= comp_scores
-                                else:
-                                    assert v_args_num == 2
-                                    raise NotImplementedError
-
-                        # Prediction with the aggregate scores as NMS scores, to select best search
-                        # result(s?) for each spec
-                        for comp_scores_for_var in agg_comp_scores:
-                            _, best_indices = self.box_predictor.inference(
-                                predictions, proposals, boxes_provided=boxes_provided,
-                                nms_scores=comp_scores_for_var
-                            )
-                            kept_indices[0].append(best_indices[0][:S])
-
-                    kept_indices[0] = torch.cat(kept_indices[0])
-
-                    # Assembling pred_instances output with the search results; somewhat like
-                    # a much simplified version of self.box_predictor.inference()
-                    boxes = self.box_predictor.predict_boxes(predictions, proposals)
-                    scores = self.box_predictor.predict_probs(predictions, proposals)
-
-                    result = Instances(proposals[0][0].image_size)
-                    result.pred_boxes = Boxes(boxes[0][kept_indices[0]])
-                    result.pred_objectness = scores[0][0][kept_indices[0]]
-                    result.pred_classes = scores[0][1][kept_indices[0]]
-                    result.pred_attributes = scores[0][2][kept_indices[0]]
-                    result.pred_relations = torch.stack([
-                        torch.cat([
-                            scores[0][3][i*(N_N-1):i*(N_N-1)+i],
-                            torch.zeros([1,scores[0][3].shape[-1]], device=dev),
-                            scores[0][3][i*(N_N-1)+i:(i+1)*(N_N-1)]
-                        ], dim=0)
-                        for i in range(N_N)
-                    ], dim=0)[kept_indices[0]][:,kept_indices[0]]
-                    pred_instances = [result]
-
-                else:
-                    raise ValueError        # Shouldn't happen
+            pred_instances, kept_indices = self.box_predictor.inference(
+                predictions, proposals, boxes_provided=boxes_provided
+            )
                 
             # Filter f_vecs as well with kept_indices
             cls_f_vecs = f_vecs[0][kept_indices[0]]
@@ -546,31 +411,11 @@ class SceneGraphROIHeads(StandardROIHeads):
                 cls_f_vecs, att_f_vecs, rel_f_vecs, box_f_vecs, sem_f_vecs, img_f_vecs
             )
 
+            inc_out = None
             if exs_cached is not None:
-                if inc_out is None:
-                    inc_out = self._forward_box_inc_rels(
-                        features, box_features, proposals_objs, sem_f_vecs, exs_cached
-                    )[0]
-                else:
-                    # Fetch from previously computed values by kept_indices
-                    N_E = len(exs_cached["detections"]); N_N = len(proposals_objs[0])
-                    R = inc_out[0].shape[-1]; D = inc_out[1].shape[-1]
-
-                    # Select relation prediction outputs and reshape
-                    inc_rel_preds = inc_out[0].view(-1, 2, R)
-                    rel_preds_top_right = inc_rel_preds[:,0,:].view(N_E, N_N, -1)
-                    rel_preds_bottom_left = inc_rel_preds[:,1,:].view(N_N, N_E, -1)
-
-                    rel_preds_top_right = rel_preds_top_right[:,kept_indices[0],:].view(-1, R)
-                    rel_preds_bottom_left = rel_preds_bottom_left[kept_indices[0],:,:].view(-1, R)
-                    inc_rel_preds = torch.cat([rel_preds_top_right, rel_preds_bottom_left])
-
-                    # Select relation feature vectors and reshape
-                    rel_f_vecs_top_right = rel_f_vecs_top_right[:,kept_indices[0],:].view(-1, D)
-                    rel_f_vecs_bottom_left = rel_f_vecs_bottom_left[kept_indices[0],:,:].view(-1, D)
-                    inc_rel_f_vecs = torch.cat([rel_f_vecs_top_right, rel_f_vecs_bottom_left])
-                    
-                    inc_out = (inc_rel_preds, inc_rel_f_vecs)
+                inc_out = self._forward_box_inc_rels(
+                    features, box_features, proposals_objs, sem_f_vecs, exs_cached
+                )[0]
 
             return pred_instances, f_vecs, inc_out
 
@@ -680,7 +525,7 @@ class SceneGraphROIHeads(StandardROIHeads):
 
     def forward(
         self, images, features, proposals,
-        targets=None, exs_cached=None, boxes_provided=False, search_specs=None
+        targets=None, exs_cached=None, boxes_provided=False
     ):
         """
         Extended to add proposal pair preparation logic in inference mode + incremental prediction
@@ -705,7 +550,7 @@ class SceneGraphROIHeads(StandardROIHeads):
 
             pred_instances, f_vecs, inc_out = self._forward_box(
                 features, proposals,
-                exs_cached=exs_cached, boxes_provided=boxes_provided, search_specs=search_specs
+                exs_cached=exs_cached, boxes_provided=boxes_provided
             )
             # During inference cascaded prediction is used: the mask and keypoints heads are only
             # applied to the top scoring box detections.

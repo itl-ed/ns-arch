@@ -95,9 +95,10 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         Helper method for computing spatial features for pairs of boxes
         """
         boxes_xyxy = boxes.tensor                       # min/max coordinates normalized by image size
-        boxes_wh = boxes_xyxy[:,2:] - boxes_xyxy[:,:2]  # widths and heights (normlized)
-        boxes_c = boxes.get_centers()                   # center points (normlized)
-        boxes_A = boxes_wh[:,0] * boxes_wh[:,1]         # box areas (normlized)
+        boxes_wh = boxes_xyxy[:,2:] - boxes_xyxy[:,:2]  # widths and heights (normalized)
+        boxes_wh = boxes_wh + EPS                       # prevent underflow
+        boxes_c = boxes.get_centers()                   # center points (normalized)
+        boxes_A = boxes_wh[:,0] * boxes_wh[:,1]         # box areas (normalized)
 
         # Coordinate features
         boxes_xyxy_arg1s = torch.gather(boxes_xyxy, 0, arg1_idxs.expand(-1, 4))
@@ -111,7 +112,7 @@ class SceneGraphRCNNOutputLayers(FastRCNNOutputLayers):
         # Distance features
         dist_f = cat([
             coord_f[:,4:8] - coord_f[:,:4],
-            torch.gather(boxes_c, 0, arg2_idxs.expand(-1, 2)) / \
+            torch.gather(boxes_c, 0, arg2_idxs.expand(-1, 2)) - \
                 torch.gather(boxes_c, 0, arg1_idxs.expand(-1, 2))
         ], dim=-1)
 

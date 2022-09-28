@@ -168,6 +168,13 @@ class AgentCompositeActions:
                             pred for pred in self.agent.lt_mem.kb.entries_by_pred 
                             if pred.startswith("cls")
                         ])
+                        # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
+                        # elegant way in the future...
+                        kb_query_preds = frozenset([
+                            pred for pred in kb_query_preds
+                            if pred == "cls_11" or pred == "cls_12" or pred == "cls_13"
+                        ])
+
                         kb_query_args = tuple(q_lit.args[1:])
                     else:
                         # Literal with fixed predicate, to which can narrow down the KB query

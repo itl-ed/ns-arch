@@ -331,11 +331,15 @@ class Program:
                         )
                         for atoms, unsats in models
                     ]
-                    logZ = reduce(np.logaddexp, [weight for _, weight in models])
-                    models = [(atoms, np.exp(weight-logZ)) for atoms, weight in models]
 
-                    outcomes = [(weight, atoms, None) for atoms, weight in models]
-                    tree = Models(outcomes=outcomes)
+                    if len(models) > 0:
+                        logZ = reduce(np.logaddexp, [weight for _, weight in models])
+                        models = [(atoms, np.exp(weight-logZ)) for atoms, weight in models]
+
+                        outcomes = [(weight, atoms, None) for atoms, weight in models]
+                        tree = Models(outcomes=outcomes)
+                    else:
+                        tree = Models()        # Empty models
                 
                 # Memoize bottom
                 memoized_models[FrozenMultiset(bottom.rules)] = tree
@@ -443,14 +447,16 @@ class Program:
                         )
                         for atoms, unsats in bottom_models
                     ]
-                    logZ = reduce(np.logaddexp, [weight for _, weight in bottom_models])
-                    bottom_models = [
-                        (set(atoms), np.exp(weight-logZ)) for atoms, weight in bottom_models
-                    ]
-                    bottom_models = [
-                        # Positive atoms, negative atoms, probability
-                        (model, bottom_atoms-model, pr) for model, pr in bottom_models
-                    ]
+
+                    if len(bottom_models) > 0:
+                        logZ = reduce(np.logaddexp, [weight for _, weight in bottom_models])
+                        bottom_models = [
+                            (set(atoms), np.exp(weight-logZ)) for atoms, weight in bottom_models
+                        ]
+                        bottom_models = [
+                            # Positive atoms, negative atoms, probability
+                            (model, bottom_atoms-model, pr) for model, pr in bottom_models
+                        ]
 
                 # Solve reduced program top for each discovered model; first compute program
                 # reduction by the common atoms
@@ -573,7 +579,8 @@ class Program:
                 assert len(u_scc) == len(v_scc) == 1
                 u_scc = u_scc.pop(); v_scc = v_scc.pop()
 
-                comp_sd.add_edge(u_scc, v_scc)
+                # Add edge (only if between different SCC nodes)
+                if u_scc != v_scc: comp_sd.add_edge(u_scc, v_scc)
             
             # For each node v in comp prepare values of tree(v) (the set of all nodes that
             # belongs to any SCC v_sd such that there is a path in comp_sd from v_sd to scc(v);

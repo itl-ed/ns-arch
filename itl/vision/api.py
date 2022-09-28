@@ -387,10 +387,10 @@ class VisionModule:
                             ex_vecs = exemplars[(conc_ind, cat_type)]
                             ref_vec_pos = torch.tensor(
                                 ex_vecs["pos"], device=self.model.base_model.device
-                            ).mean(dim=0) if len(ex_vecs["pos"]) > 0 else None
+                            )
                             ref_vec_neg = torch.tensor(
                                 ex_vecs["neg"], device=self.model.base_model.device
-                            ).mean(dim=0) if len(ex_vecs["neg"]) > 0 else None
+                            )
                             ref_vecs = (ref_vec_pos, ref_vec_neg)
 
                             dscr_translated.append((cat_type, arg_handles, ref_vecs))

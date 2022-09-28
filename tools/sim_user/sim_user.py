@@ -9,6 +9,7 @@ import copy
 import random
 from collections import defaultdict
 
+import inflect
 import numpy as np
 from detectron2.structures import BoxMode
 
@@ -21,7 +22,10 @@ class SimulatedTeacher:
         with open("datasets/tabletop/metadata.json") as md_file:
             self.metadata = json.load(md_file)
         with open("tools/sim_user/tabletop_domain.json") as dom_file:
-            self.domain_knowledge = json.load(dom_file)
+            self.domain_knowledge = {
+                concept_string.split(".")[0].replace("_", " "): data
+                for concept_string, data in json.load(dom_file).items()
+            }
         
         self.data_by_img_id = {
             img["image_id"]: img for img in self.data_annotation
@@ -95,6 +99,9 @@ class SimulatedTeacher:
         # History of ITL episode records
         self.episode_records = []
 
+        # Pieces of generic constrastive knowledge taught across episodes
+        self.taught_diffs = set()
+
         # Teacher's strategy on how to give feedback upon student's wrong answer
         # (provided the student has taken initiative for extended ITL interactions
         # by asking further questions after correct answer feedback)
@@ -116,7 +123,7 @@ class SimulatedTeacher:
             "target_concept": concept_string,
             "answered_concept": None,
             "answer_correct": None,
-            "number_of_exemplars": 0       # Exemplars used for learning
+            "number_of_exemplars": 0        # Exemplars used for learning
         }
 
         # Ideally, for situated (robotic) agent, the teacher would simply place an
@@ -144,6 +151,8 @@ class SimulatedTeacher:
 
     def react(self, agent_reaction):
         """ Rule-based pattern matching for handling agent responses """
+        responses = []      # Return value containing response utterances
+
         concept_string = self.current_target_concept.split(".")[0]
         concept_string = concept_string.replace("_", " ")
 
@@ -160,11 +169,11 @@ class SimulatedTeacher:
             self.current_record["answer_correct"] = False
             self.current_record["number_of_exemplars"] += 1
 
-            response = {
+            responses.append({
                 "v_usr_in": "n",
                 "l_usr_in": f"This is a {concept_string}.",
                 "pointing": { "this": [self.current_focus[1]] }
-            }
+            })
 
         elif any(utt.startswith("This is") for utt in agent_utterances):
             # Agent provided an answer what the instance is
@@ -180,18 +189,18 @@ class SimulatedTeacher:
                 self.current_record["answer_correct"] = True
                 self.current_record["number_of_exemplars"] += 0
 
-                response = {
+                responses.append({
                     "v_usr_in": "n",
                     "l_usr_in": "Correct.",
                     "pointing": None
-                }
+                })
             else:
                 # Incorrect answer; reaction branches here depending on teacher's strategy
                 self.current_record["answer_correct"] = False
                 self.current_record["number_of_exemplars"] += 1
 
                 # Minimal feedback; only let the agent know the answer is incorrect
-                response = {
+                result_response = {
                     "v_usr_in": "n",
                     "l_usr_in": f"This is not a {answer_content}.",
                     "pointing": { "this": [self.current_focus[1]] }
@@ -202,26 +211,61 @@ class SimulatedTeacher:
                 taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
                 is_novel_concept = concept_string not in taught_concepts
                 if self.strat_feedback != "min" or is_novel_concept:
-                    response["l_usr_in"] += f" This is a {concept_string}."
-                    response["pointing"]["this"].append(self.current_focus[1])
+                    result_response["l_usr_in"] += f" This is a {concept_string}."
+                    result_response["pointing"]["this"].append(self.current_focus[1])
+
+                responses.append(result_response)
                 
                 # Generic difference between intended concept vs. incorrect answer concept
                 # additionally provided if teacher strategy is 'greater' than [maximal feedback]
+                if self.strat_feedback == "max":
+                    # Give generics only if not given previously
+                    contrast_concepts = frozenset([concept_string, answer_content])
+                    pluralize = inflect.engine().plural
 
-                ## Temp code for prior knowledge injection
-                # if opts.exp1_strat_feedback == "max":
-                #     if i==0:
-                #         # Sample rule injection
-                #         knowledge_inp = {
-                #             "v_usr_in": "n",
-                #             "l_usr_in": f"Brandy glasses have short stems.",
-                #             # "l_usr_in": f"Stems of brandy glasses are short.",
-                #             "pointing": {}
-                #         }
-                #         agent.loop(**knowledge_inp)
-                ## Temp code end
+                    if contrast_concepts not in self.taught_diffs:
+                        target_props = self.domain_knowledge[concept_string]["part_property"]
+                        target_props = {
+                            (part, prop) for part, props in target_props.items() for prop in props
+                        }
+                        answer_props = self.domain_knowledge[answer_content]["part_property"]
+                        answer_props = {
+                            (part, prop) for part, props in answer_props.items() for prop in props
+                        }
+
+                        # For each of two directions of relative differences, synthesize
+                        # appropriate constrastive generic explanations
+                        target_props_diff = defaultdict(set)
+                        target_subject = pluralize(concept_string.capitalize())
+                        for part, prop in target_props - answer_props:
+                            target_props_diff[part].add(prop)
+                        for part, props in target_props_diff.items():
+                            part_name = pluralize(part.split(".")[0])
+                            part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                            generic = f"{target_subject} have {part_descriptor} {part_name}."
+                            responses.append({
+                                "v_usr_in": "n",
+                                "l_usr_in": generic,
+                                "pointing": None
+                            })
+
+                        answer_props_diff = defaultdict(set)
+                        answer_subject = pluralize(answer_content.capitalize())
+                        for part, prop in answer_props - target_props:
+                            answer_props_diff[part].add(prop)
+                        for part, props in answer_props_diff.items():
+                            part_name = pluralize(part.split(".")[0])
+                            part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                            generic = f"{answer_subject} have {part_descriptor} {part_name}."
+                            responses.append({
+                                "v_usr_in": "n",
+                                "l_usr_in": generic,
+                                "pointing": None
+                            })
+
+                        self.taught_diffs.add(contrast_concepts)
 
         else:
             raise NotImplementedError
 
-        return response
+        return responses

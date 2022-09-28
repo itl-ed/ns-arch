@@ -450,11 +450,8 @@ class KnowledgeBase:
                     h_sat_lit = h_sat_lit.substitute(**ism)
                     b_sat_lit = b_sat_lit.substitute(**ism)
 
-                    var_renaming = {
-                        t1[0]: t2[0] for t1, t2 in ism["terms"].items()
-                    }
-                    h_var_signature = [var_renaming[v] for v in h_var_signature]
-                    b_var_signature = [var_renaming[v] for v in b_var_signature]
+                    h_var_signature = [ism["terms"][v] for v in h_var_signature]
+                    b_var_signature = [ism["terms"][v] for v in b_var_signature]
 
                 standardized_outputs.append((
                     h_sat_lit, b_sat_lit, h_var_signature, b_var_signature, grd_probs

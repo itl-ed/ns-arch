@@ -30,7 +30,8 @@ class SemanticParser:
                 "by_handle": {}
             },
             "utt_type": {},
-            "raw": usr_in
+            "raw": usr_in,
+            "conjunct_raw": {}
         }
 
         # For now use the top result
@@ -117,15 +118,36 @@ class SemanticParser:
         
         parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
         
-        # SF supposedly stands for 'sentential force'
-        index_rel = parse["relations"]["by_id"][parsed.index]
-        if index_rel["predicate"] == "implicit_conj":
-            arg1 = index_rel["args"][1]
-            arg2 = index_rel["args"][2]
-            parse["utt_type"][arg1] = parsed.variables[arg1]["SF"]
-            parse["utt_type"][arg2] = parsed.variables[arg2]["SF"]
-        else:
-            parse["utt_type"][parsed.index] = parsed.variables[parsed.index]["SF"]
+        # SF supposedly stands for 'sentential force' -- handle the utterance types
+        # here, along with conjunctions
+        def index_conjuncts_with_SF(rel_id, parent_id):
+            index_rel = parse["relations"]["by_id"][rel_id]
+            if index_rel["predicate"] == "implicit_conj":
+                # Recursively process conjuncts
+                index_conjuncts_with_SF(index_rel["args"][1], rel_id)
+                index_conjuncts_with_SF(index_rel["args"][2], rel_id)
+            else:
+                parse["utt_type"][rel_id] = parsed.variables[rel_id]["SF"]
+
+                # Recover part of original input corresponding to this conjunct by
+                # iteratively expanding set of args covered by this conjunct, then
+                # obtaining min/max of the cranges
+                covered_args = {rel_id}; fixpoint_reached = False
+                while not fixpoint_reached:
+                    prev_size = len(covered_args)
+                    covered_args = set.union(*[
+                        set(args) for args in parse["relations"]["by_args"]
+                        if parent_id not in args and any(a in covered_args for a in args)
+                    ])
+                    fixpoint_reached = len(covered_args) == prev_size
+                covered_cranges = [
+                    parse["relations"]["by_id"][arg]["crange"]
+                    for arg in covered_args if arg in parse["relations"]["by_id"]
+                ]
+                cj_start = min(cfrom for cfrom, _ in covered_cranges)
+                cj_end = max(cto for _, cto in covered_cranges)
+                parse["conjunct_raw"][rel_id] = parse["raw"][cj_start:cj_end]
+        index_conjuncts_with_SF(parsed.index, None)
 
         # Record index (top variable)
         parse["index"] = parsed.index
@@ -608,13 +630,25 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                     else:
                         arg1 = rel_args[2]
                         arg2 = rel_args[1]
+
+                    referential_arg1 = ref_map[arg1]["is_referential"]
+                    referential_arg2 = ref_map[arg2]["is_referential"]
+
+                elif ref_map[rel_args[1]] is None:
+                    # Strong indication of passive participial adjective (e.g. flared)
+                    arg1 = rel_args[2]
+                    arg2 = None
+                    referential_arg1 = ref_map[arg1]["is_referential"]
+                    referential_arg2 = None
+                    rel["pos"] = "a"
+                    rel["predicate"] = parse["raw"][rel["crange"][0]:rel["crange"][1]]
+
                 else:
                     # Default case
                     arg1 = rel_args[1]
                     arg2 = rel_args[2]
-
-                referential_arg1 = ref_map[arg1]["is_referential"]
-                referential_arg2 = ref_map[arg2]["is_referential"]
+                    referential_arg1 = ref_map[arg1]["is_referential"]
+                    referential_arg2 = ref_map[arg2]["is_referential"]
 
             else:
                 # (These won't & shouldn't be referred)

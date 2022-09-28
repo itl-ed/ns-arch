@@ -339,8 +339,8 @@ class ITLAgent:
             #   - Integrate newly provided generic rules into KB
             #   - Identify recognition mismatch btw. user provided vs. agent
             translated = self.theoretical.translate_dialogue_content(dialogue_state)
-            kb_rules_to_add = []
             for ui, (rules, _) in enumerate(translated):
+                kb_rules_to_add = []
                 if rules is not None:
                     for r in rules:
                         # Symbolic knowledge base expansion; for generic rules without

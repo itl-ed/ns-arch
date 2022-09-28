@@ -189,11 +189,12 @@ class Literal:
             lit_matched = False
 
             for hl_o in lits2:
-                potential_mapping = {}; cannot_map_args = False
+                potential_mapping = { "terms": {}, "functions": {} }
+                args_mappable = True
 
                 if hl_s.name != hl_o.name:
                     # Predicate name mismatch
-                    cannot_map_args = True; continue
+                    continue
 
                 for sa, oa in zip(hl_s.args, hl_o.args):
                     sa_term, sa_is_var = sa
@@ -201,27 +202,27 @@ class Literal:
 
                     if sa_is_var != oa_is_var:
                         # Term type mismatch
-                        cannot_map_args = True; break
+                        args_mappable = False; break
 
                     if sa_is_var == oa_is_var == False:
                         if sa_term != oa_term:
                             # Constant term mismatch
-                            cannot_map_args = True; break
+                            args_mappable = False; break
                     else:
                         if type(sa_term) != type(oa_term):
                             # Function vs. non-function term mismatch
-                            cannot_map_args = True; break
+                            args_mappable = False; break
 
                         if type(sa_term) == type(oa_term) == str:
                             # Both args are variable terms
                             if sa_term in isomorphism["terms"]:
                                 if isomorphism["terms"][sa_term] != oa_term:
                                     # Conflict with existing mapping
-                                    cannot_map_args = True; break
+                                    args_mappable = False; break
                             elif sa_term in potential_mapping["terms"]:
                                 if potential_mapping["terms"][sa_term] != oa_term:
                                     # Conflict with existing potential mapping
-                                    cannot_map_args = True; break
+                                    args_mappable = False; break
                             else:
                                 # Record potential mapping
                                 potential_mapping["terms"][sa_term] = oa_term
@@ -232,17 +233,17 @@ class Literal:
 
                             if len(sa_f_args) != len(oa_f_args):
                                 # Function arity mismatch
-                                cannot_map_args = True; break
+                                args_mappable = False; break
 
                             # Function name mismatch
                             if sa_f_name in isomorphism["functions"]:
                                 if isomorphism["functions"][sa_f_name] != oa_f_name:
                                     # Conflict with existing mapping
-                                    cannot_map_args = True; break
+                                    args_mappable = False; break
                             elif sa_f_name in potential_mapping["functions"]:
                                 if potential_mapping["functions"][sa_f_name] != oa_f_name:
                                     # Conflict with existing potential mapping
-                                    cannot_map_args = True; break
+                                    args_mappable = False; break
                             else:
                                 # Record potential mapping
                                 potential_mapping["functions"][sa_f_name] = oa_f_name
@@ -251,11 +252,11 @@ class Literal:
                                 if sfa in isomorphism["terms"]:
                                     if isomorphism["terms"][sfa] != ofa:
                                         # Conflict with existing mapping
-                                        cannot_map_args = True; break
+                                        args_mappable = False; break
                                 elif sfa in potential_mapping["terms"]:
                                     if potential_mapping["terms"][sfa] != ofa:
                                         # Conflict with existing potential mapping
-                                        cannot_map_args = True; break
+                                        args_mappable = False; break
                                 else:
                                     # Both args are variable terms, record potential mapping
                                     potential_mapping["terms"][sfa] = ofa
@@ -263,14 +264,14 @@ class Literal:
                         else:
                             raise NotImplementedError
 
-            if cannot_map_args:
-                # Discard potential mapping and move on
-                continue
-            else:
-                # Update isomorphism
-                lit_matched = True
-                isomorphism["terms"].update(potential_mapping["terms"])
-                isomorphism["functions"].update(potential_mapping["functions"])
+                if args_mappable:
+                    # Update isomorphism
+                    lit_matched = True
+                    isomorphism["terms"].update(potential_mapping["terms"])
+                    isomorphism["functions"].update(potential_mapping["functions"])
+                else:
+                    # Discard potential mapping and move on
+                    continue
 
             # Return None as soon as any literal is found to be unmappable to any
             if not lit_matched: return None

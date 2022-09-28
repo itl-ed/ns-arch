@@ -109,11 +109,18 @@ if __name__ == "__main__":
     oi_offsets = np.cumsum([0] + [len(bboxes) for _, bboxes in source_imgs[:-1]])
     oioj_offsets = np.cumsum([0] + [len(bboxes)**2 for _, bboxes in source_imgs[:-1]])
 
-    # Sampling negative exemplars for class concepts
+    # List negative exemplars for class concepts
     cls_neg_exs = {
         conc: set(range(len(cls_f_vecs_all))) - fv_inds
         for conc, fv_inds in cls_pos_exs.items()
     }       # Negative exemplar sets as complements of respective positive exemplar sets
+
+    # # Downsampling positive & negative exemplars
+    # cls_pos_exs = {
+    #     conc: set(random.sample(list(fv_inds), 100))
+    #         if len(fv_inds) > 100 else fv_inds
+    #     for conc, fv_inds in cls_pos_exs.items()
+    # }
     cls_neg_exs = {
         conc: set(random.sample(list(fv_inds), len(cls_pos_exs[conc])))
         for conc, fv_inds in cls_neg_exs.items()
@@ -215,9 +222,9 @@ if __name__ == "__main__":
     att_f_vecs_all = np.array(att_f_vecs_all, dtype=np.float32)
     rel_f_vecs_all = np.array(rel_f_vecs_all, dtype=np.float32)
 
-    # Sampling negative exemplars for attribute concepts;
-    # Semantics of attributes can be strongly affected by the class identities of the
-    # referents, so subcategorize attribute concepts accordingly
+    # Listing positive/negative exemplars for attribute concepts;
+    # Semantics of attributes can be strongly affected by the class identities of
+    # the referents, so subcategorize attribute concepts accordingly
     att_exs_sub = {
         conc: {
             cls_conc_ind: (cls_pos_exs & fv_inds, cls_pos_exs - fv_inds)
@@ -225,16 +232,20 @@ if __name__ == "__main__":
         }
         for conc, fv_inds in att_pos_exs.items()
     }
-    att_exs_sub = {
-        conc: {
-            cls_conc_ind: (
-                pos_exs_sub,
-                set(random.sample(list(neg_exs_sub), len(pos_exs_sub)))
-            )
-            for cls_conc_ind, (pos_exs_sub, neg_exs_sub) in exs_sub.items()
-        }
-        for conc, exs_sub in att_exs_sub.items()
-    }
+
+    # # Downsampling positive & negative exemplars
+    # att_exs_sub = {
+    #     conc: {
+    #         cls_conc_ind: (
+    #             set(random.sample(list(pos_exs_sub), 100))
+    #                 if len(pos_exs_sub) > 100 else pos_exs_sub,
+    #             set(random.sample(list(neg_exs_sub), 100))
+    #                 if len(neg_exs_sub) > 100 else neg_exs_sub,
+    #         )
+    #         for cls_conc_ind, (pos_exs_sub, neg_exs_sub) in exs_sub.items()
+    #     }
+    #     for conc, exs_sub in att_exs_sub.items()
+    # }
     att_pos_exs = {
         (conc, cls_cond_ind): pos_exs_sub
         for conc, exs_sub in att_exs_sub.items()
@@ -294,15 +305,29 @@ if __name__ == "__main__":
     #     for conc, fv_inds in rel_pos_exs.items()
     # }
 
-    # Sampling negative exemplars for relation concepts
+    # Listing negative exemplars for relation concepts; ensure we don't get too many
+    # 'dummy' instances of non-relations
+    rel_all_pos_exs = set.union(*rel_pos_exs.values())
+    rel_all_nonpos_exs = set(range(len(rel_f_vecs_all))) - rel_all_pos_exs
     rel_neg_exs = {
         conc: set(range(len(rel_f_vecs_all))) - fv_inds
         for conc, fv_inds in rel_pos_exs.items()
     }       # Negative exemplar sets as complements of respective positive exemplar sets
+
+    # # Downsampling positive & negative exemplars
+    # rel_pos_exs = {
+    #     conc: set(random.sample(list(fv_inds), 100))
+    #         if len(fv_inds) > 100 else fv_inds
+    #     for conc, fv_inds in rel_pos_exs.items()
+    # }
     rel_neg_exs = {
         conc: set(random.sample(list(fv_inds), len(rel_pos_exs[conc])))
         for conc, fv_inds in rel_neg_exs.items()
     }       # Sampling down to the same number as positive exemplars
+    # rel_neg_exs = {
+    #     conc: fv_inds | set(random.sample(list(rel_all_nonpos_exs), len(fv_inds)))
+    #     for conc, fv_inds in rel_neg_exs.items()
+    # }       # Mix in non-relations as well
 
     # For space concern, trim away 'vacuous' relation vectors not referenced for any
     # concepts; it would be a huge waste to store all O(n^2) vectors (most of which
@@ -391,5 +416,5 @@ if __name__ == "__main__":
             )
 
     # Save model checkpoint to output dir
-    ckpt_path = os.path.join(agent.opts.output_dir_path, "injected.ckpt")
+    ckpt_path = os.path.join(agent.opts.output_dir_path, f"injected_{opts.exp1_random_seed}.ckpt")
     agent.save_model(ckpt_path)
