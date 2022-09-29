@@ -118,7 +118,7 @@ class ITLAgent:
         # Parts taken from self.comp_actions.prepare_answer_Q(), excluding processing
         # questions in dialogue records
         if len(self.lt_mem.kb.entries) > 0:
-            search_specs = self._search_specs_from_kb(question, models_v)
+            search_specs = self.comp_actions._search_specs_from_kb(question, models_v)
             if len(search_specs) > 0:
                 self.vision.predict(
                     self.vision.last_input, exemplars=self.lt_mem.exemplars,
