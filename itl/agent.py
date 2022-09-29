@@ -8,7 +8,6 @@ import readline
 import rlcompleter
 
 import torch
-import numpy as np
 from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
@@ -74,6 +73,80 @@ class ITLAgent:
         act_out = self._act()
 
         return act_out
+
+    def test_binary(self, v_input, target_bbox, concepts):
+        """
+        Surgically (programmatically) test the agent's performance with an exam question,
+        without having to communicate through full 'natural interactions...
+        """
+        # Run only the backbone to cache image feature maps
+        inp = { "file_name": v_input }
+        inp = [self.vision.dm.mapper_batch["test"](inp)]
+        images = self.vision.model.base_model.preprocess_image(inp)
+        features = self.vision.model.base_model.backbone(images.tensor)
+
+        # Vision module buffer cleanup
+        self.vision.scene = {}
+        self.vision.f_vecs = ({}, {}, {}, {}, {}, features)
+
+        # Make prediction on the designated bbox
+        bboxes = {
+            "o0": {
+                "bbox": target_bbox,
+                "bbox_mode": BoxMode.XYXY_ABS,
+                "objectness_scores": None
+            }
+        }
+        self.vision.predict(
+            v_input, exemplars=self.lt_mem.exemplars, bboxes=bboxes
+        )
+
+        # Inform the language module of the visual context
+        self.lang.situate(self.vision.last_input, self.vision.scene)
+        self.theoretical.refresh()
+
+        # Sensemaking from vision input only
+        exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
+        self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
+        models_v, _, _ = self.theoretical.concl_vis
+
+        # "Question" for probing agent's performance
+        q_vars = (("P", True),)
+        q_rules = [Rule(head=Literal("*_?", wrap_args("P", "o0")))]
+        question = (q_vars, q_rules)
+
+        # Parts taken from self.comp_actions.prepare_answer_Q(), excluding processing
+        # questions in dialogue records
+        if len(self.lt_mem.kb.entries) > 0:
+            search_specs = self._search_specs_from_kb(question, models_v)
+            if len(search_specs) > 0:
+                self.vision.predict(
+                    self.vision.last_input, exemplars=self.lt_mem.exemplars,
+                    specs=search_specs
+                )
+
+            exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
+            self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
+        
+        answers_raw, _ = models_v.query(*question)
+
+        # Collate results with respect to the provided concept set
+        denotations = [
+            "".join(
+                tok.capitalize() if i>0 else tok
+                for i, tok in enumerate(c.split(".")[0].split("_"))
+            )
+            for c in concepts
+        ]
+        denotations = [self.lt_mem.lexicon.s2d[(c, "n")][0] for c in denotations]
+        denotations = [f"{cat_type}_{conc_ind}" for conc_ind, cat_type in denotations]
+
+        agent_answers = {
+            c: True if (d,) in answers_raw and answers_raw[(d,)][1] > 0.5 else False
+            for c, d in zip(concepts, denotations)
+        }
+
+        return agent_answers
 
     def save_model(self, ckpt_path):
         """

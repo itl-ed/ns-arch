@@ -127,33 +127,16 @@ if __name__ == "__main__":
             )[0]
 
             # Binary concept testing mode
+            agent_answers = agent.test_binary(
+                os.path.join(user.image_dir_prefix, img_f),
+                instance_bbox,
+                user.target_concepts["cls"]
+            )
             for conc_test in user.test_exemplars["cls"]:
-                concept_test_string = conc_test.split(".")[0]
-                concept_test_string = concept_test_string.replace("_", " ")
-
-                test_input = {
-                    "v_usr_in": os.path.join(user.image_dir_prefix, img_f),
-                    "l_usr_in": f"Is this a {concept_test_string}?",
-                    "pointing": { "this": [instance_bbox] }
-                }
-
-                agent_reaction = agent.loop(**test_input)
-
-                agent_utterances = [
-                    content for act_type, content in agent_reaction
-                    if act_type == "generate"
-                ]
-
-                if any(utt.startswith("This is a ") for utt in agent_utterances):
-                    # Agent provided an answer what the instance is
+                if agent_answers[conc_test]:
+                    concept_test_string = conc_test.split(".")[0]
+                    concept_test_string = concept_test_string.replace("_", " ")
                     exam_result[concept_string][concept_test_string] += 1
-                
-                elif any(utt.startswith("This is not a ") for utt in agent_utterances):
-                    # Agent provided an answer what the instance is
-                    pass
-                
-                else:
-                    raise NotImplementedError
 
             ## Multiple-choice, pick-one mode
             # test_input = {

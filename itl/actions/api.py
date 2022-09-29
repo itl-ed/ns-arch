@@ -139,7 +139,7 @@ class AgentCompositeActions:
         _, question = translated[ui]
         assert question is not None
 
-        q_vars, q_rules = question
+        q_vars, _ = question
         models_vl, _, _ = self.agent.theoretical.concl_vis_lang
 
         # Ensure it has every ingredient available needed for making most informed judgements
@@ -148,157 +148,11 @@ class AgentCompositeActions:
         # critical influence on the symbolic sensemaking process. Make sure such entities, if
         # actually present, are captured in scene graphs by performing visual search as needed.
         if len(self.agent.lt_mem.kb.entries) > 0:
-            # Queries (in IR sense) to feed into KB for fetching search specs. Represent each
-            # query as a pair of predicates of interest & arg entities of interest
-            kb_queries = set()
-
-            for qr in q_rules:
-                # Inspecting literals in each q_rule for identifying search specs to feed into
-                # visual search calls
-                for q_lit in qr.literals():
-                    if q_lit.name == "*_?":
-                        # Literal whose predicate is question-marked (contained for questions
-                        # like "What is this?", etc.); the first argument term, standing for
-                        # the predicate variable, must be contained in q_vars
-                        assert q_lit.args[0] in q_vars
-
-                        # Assume we are only interested in cls concepts with "What is this?"
-                        # type of questions
-                        kb_query_preds = frozenset([
-                            pred for pred in self.agent.lt_mem.kb.entries_by_pred 
-                            if pred.startswith("cls")
-                        ])
-                        # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
-                        # elegant way in the future...
-                        kb_query_preds = frozenset([
-                            pred for pred in kb_query_preds
-                            if pred == "cls_11" or pred == "cls_12" or pred == "cls_13"
-                        ])
-
-                        kb_query_args = tuple(q_lit.args[1:])
-                    else:
-                        # Literal with fixed predicate, to which can narrow down the KB query
-                        kb_query_preds = frozenset([q_lit.name])
-                        kb_query_args = tuple(q_lit.args)
-                    
-                    kb_queries.add((kb_query_preds, kb_query_args))
-
-            # Query the KB to collect search specs
-            search_spec_cands = []
-            for kb_qr in kb_queries:
-                kb_query_preds, kb_query_args = kb_qr
-
-                for pred in kb_query_preds:
-                    # Relevant KB entries containing predicate of interest
-                    relevant_entries = self.agent.lt_mem.kb.entries_by_pred[pred]
-                    relevant_entries = [
-                        self.agent.lt_mem.kb.entries[entry_id]
-                        for entry_id in relevant_entries
-                    ]
-
-                    # Set of literals for each relevant KB entry
-                    relevant_literals = [
-                        set.union(*[r.literals() for r in entry[0]])
-                        for entry in relevant_entries
-                    ]
-                    # Depending on which literal (with matching predicate name) in literal
-                    # sets to use as 'anchor', there can be multiple choices of search specs
-                    relevant_literals = [
-                        { l: lits-{l} for l in lits if l.name==pred }
-                        for lits in relevant_literals
-                    ]
-
-                    # Collect search spec candidates. We will disregard attribute concepts as
-                    # search spec elements, noticing that it is usually sufficient and generalizable
-                    # to provide object class info only as specs for searching potentially relevant,
-                    # yet unrecognized entities in a scene. This is more of a heuristic for now --
-                    # maybe justify this on good grounds later...
-                    specs = [
-                        {
-                            tgt_lit: (
-                                {rl for rl in rel_lits if not rl.name.startswith("att_")},
-                                {la: qa for la, qa in zip(tgt_lit.args, kb_query_args)}
-                            )
-                            for tgt_lit, rel_lits in lits.items()
-                        }
-                        for lits in relevant_literals
-                    ]
-                    specs = [
-                        {
-                            tgt_lit.substitute(terms=term_map): frozenset({
-                                rl.substitute(terms=term_map) for rl in rel_lits
-                            })
-                            for tgt_lit, (rel_lits, term_map) in spc.items()
-                        }
-                        for spc in specs
-                    ]
-                    search_spec_cands += specs
-
-            # Merge and flatten down to a single layer dict
-            def set_add_merge(d1, d2):
-                for k, v in d2.items(): d1[k].add(v)
-                return d1
-            search_spec_cands = reduce(set_add_merge, [defaultdict(set)]+search_spec_cands)
-
-            # Finalize set of search specs, excluding those which already have satisfying
-            # entities in the current sensemaking output
-            final_specs = []
-            for lits_sets in search_spec_cands.values():
-                for lits in lits_sets:
-                    # Lift any remaining function term args to non-function variable args
-                    all_fn_args = {
-                        a for a in set.union(*[set(l.args) for l in lits])
-                        if type(a[0])==tuple
-                    }
-                    all_var_names = {
-                        t_val for t_val, t_is_var in set.union(*[l.nonfn_terms() for l in lits])
-                        if t_is_var
-                    }
-                    fn_lifting_map = {
-                        fa: (f"X{i+len(all_var_names)}", True)
-                        for i, fa in enumerate(all_fn_args)
-                    }
-
-                    search_vars = all_var_names | {vn for vn, _ in fn_lifting_map.values()}
-                    search_vars = tuple(search_vars)
-                    if len(search_vars) == 0:
-                        # Disregard if there's no variables in search spec (i.e. no search target
-                        # after all)
-                        continue
-
-                    lits = [l.substitute(terms=fn_lifting_map) for l in lits]
-                    lits = frozenset([l for l in lits if any(la_is_var for _, la_is_var in l.args)])
-
-                    # Disregard if there's already an isomorphic literal set
-                    has_isomorphic_spec = any(
-                        Literal.isomorphism_btw(lits, spc[1], None) is not None
-                        for spc in final_specs
-                    )
-                    if has_isomorphic_spec:
-                        continue
-
-                    # Check if the agent is already (visually) aware of the potential search
-                    # targets; if so, disregard this one
-                    check_result, _ = models_vl.query(
-                        tuple((v, False) for v in search_vars),
-                        [Rule(head=l) for l in lits]
-                    )
-                    if len(check_result) > 0:
-                        continue
-
-                    final_specs.append((search_vars, lits))
-
-            # Perform incremental visual search...
-            O = len(self.agent.vision.scene)
-            oi_offsets = np.cumsum([0]+[len(vars) for vars, _ in final_specs][:-1])
-            final_specs = {
-                tuple(f"o{offset+i+O}" for i in range(len(spc[0]))): spc
-                for spc, offset in zip(final_specs, oi_offsets)
-            }
-            if len(final_specs) > 0:
+            search_specs = self._search_specs_from_kb(question, models_vl)
+            if len(search_specs) > 0:
                 self.agent.vision.predict(
                     self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
-                    specs=final_specs
+                    specs=search_specs
                 )
 
                 #  ... and another round of sensemaking
@@ -389,3 +243,161 @@ class AgentCompositeActions:
 
         # Push the translated answer to buffer of utterances to generate
         self.agent.lang.dialogue.to_generate.append(answer_translated)
+
+    def _search_specs_from_kb(self, question, ref_models):
+        """
+        Factored helper method for extracting specifications for visual search,
+        based on the agent's current knowledge-base entries and some sensemaking
+        result provided as a Models instance
+        """
+        q_vars, q_rules = question
+
+        # Queries (in IR sense) to feed into KB for fetching search specs. Represent each
+        # query as a pair of predicates of interest & arg entities of interest
+        kb_queries = set()
+
+        for qr in q_rules:
+            # Inspecting literals in each q_rule for identifying search specs to feed into
+            # visual search calls
+            for q_lit in qr.literals():
+                if q_lit.name == "*_?":
+                    # Literal whose predicate is question-marked (contained for questions
+                    # like "What is this?", etc.); the first argument term, standing for
+                    # the predicate variable, must be contained in q_vars
+                    assert q_lit.args[0] in q_vars
+
+                    # Assume we are only interested in cls concepts with "What is this?"
+                    # type of questions
+                    kb_query_preds = frozenset([
+                        pred for pred in self.agent.lt_mem.kb.entries_by_pred 
+                        if pred.startswith("cls")
+                    ])
+                    # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
+                    # elegant way in the future...
+                    kb_query_preds = frozenset([
+                        pred for pred in kb_query_preds
+                        if pred == "cls_11" or pred == "cls_12" or pred == "cls_13"
+                    ])
+
+                    kb_query_args = tuple(q_lit.args[1:])
+                else:
+                    # Literal with fixed predicate, to which can narrow down the KB query
+                    kb_query_preds = frozenset([q_lit.name])
+                    kb_query_args = tuple(q_lit.args)
+                
+                kb_queries.add((kb_query_preds, kb_query_args))
+
+        # Query the KB to collect search specs
+        search_spec_cands = []
+        for kb_qr in kb_queries:
+            kb_query_preds, kb_query_args = kb_qr
+
+            for pred in kb_query_preds:
+                # Relevant KB entries containing predicate of interest
+                relevant_entries = self.agent.lt_mem.kb.entries_by_pred[pred]
+                relevant_entries = [
+                    self.agent.lt_mem.kb.entries[entry_id]
+                    for entry_id in relevant_entries
+                ]
+
+                # Set of literals for each relevant KB entry
+                relevant_literals = [
+                    set.union(*[r.literals() for r in entry[0]])
+                    for entry in relevant_entries
+                ]
+                # Depending on which literal (with matching predicate name) in literal
+                # sets to use as 'anchor', there can be multiple choices of search specs
+                relevant_literals = [
+                    { l: lits-{l} for l in lits if l.name==pred }
+                    for lits in relevant_literals
+                ]
+
+                # Collect search spec candidates. We will disregard attribute concepts as
+                # search spec elements, noticing that it is usually sufficient and generalizable
+                # to provide object class info only as specs for searching potentially relevant,
+                # yet unrecognized entities in a scene. This is more of a heuristic for now --
+                # maybe justify this on good grounds later...
+                specs = [
+                    {
+                        tgt_lit: (
+                            {rl for rl in rel_lits if not rl.name.startswith("att_")},
+                            {la: qa for la, qa in zip(tgt_lit.args, kb_query_args)}
+                        )
+                        for tgt_lit, rel_lits in lits.items()
+                    }
+                    for lits in relevant_literals
+                ]
+                specs = [
+                    {
+                        tgt_lit.substitute(terms=term_map): frozenset({
+                            rl.substitute(terms=term_map) for rl in rel_lits
+                        })
+                        for tgt_lit, (rel_lits, term_map) in spc.items()
+                    }
+                    for spc in specs
+                ]
+                search_spec_cands += specs
+
+        # Merge and flatten down to a single layer dict
+        def set_add_merge(d1, d2):
+            for k, v in d2.items(): d1[k].add(v)
+            return d1
+        search_spec_cands = reduce(set_add_merge, [defaultdict(set)]+search_spec_cands)
+
+        # Finalize set of search specs, excluding those which already have satisfying
+        # entities in the current sensemaking output
+        final_specs = []
+        for lits_sets in search_spec_cands.values():
+            for lits in lits_sets:
+                # Lift any remaining function term args to non-function variable args
+                all_fn_args = {
+                    a for a in set.union(*[set(l.args) for l in lits])
+                    if type(a[0])==tuple
+                }
+                all_var_names = {
+                    t_val for t_val, t_is_var in set.union(*[l.nonfn_terms() for l in lits])
+                    if t_is_var
+                }
+                fn_lifting_map = {
+                    fa: (f"X{i+len(all_var_names)}", True)
+                    for i, fa in enumerate(all_fn_args)
+                }
+
+                search_vars = all_var_names | {vn for vn, _ in fn_lifting_map.values()}
+                search_vars = tuple(search_vars)
+                if len(search_vars) == 0:
+                    # Disregard if there's no variables in search spec (i.e. no search target
+                    # after all)
+                    continue
+
+                lits = [l.substitute(terms=fn_lifting_map) for l in lits]
+                lits = frozenset([l for l in lits if any(la_is_var for _, la_is_var in l.args)])
+
+                # Disregard if there's already an isomorphic literal set
+                has_isomorphic_spec = any(
+                    Literal.isomorphism_btw(lits, spc[1], None) is not None
+                    for spc in final_specs
+                )
+                if has_isomorphic_spec:
+                    continue
+
+                # Check if the agent is already (visually) aware of the potential search
+                # targets; if so, disregard this one
+                check_result, _ = ref_models.query(
+                    tuple((v, False) for v in search_vars),
+                    [Rule(head=l) for l in lits]
+                )
+                if len(check_result) > 0:
+                    continue
+
+                final_specs.append((search_vars, lits))
+
+        # Perform incremental visual search...
+        O = len(self.agent.vision.scene)
+        oi_offsets = np.cumsum([0]+[len(vars) for vars, _ in final_specs][:-1])
+        final_specs = {
+            tuple(f"o{offset+i+O}" for i in range(len(spc[0]))): spc
+            for spc, offset in zip(final_specs, oi_offsets)
+        }
+
+        return final_specs
