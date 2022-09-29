@@ -1,5 +1,6 @@
 import os
 import re
+import string
 from collections import defaultdict
 
 from delphin import ace, predicate, codecs
@@ -642,6 +643,9 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
                     referential_arg2 = None
                     rel["pos"] = "a"
                     rel["predicate"] = parse["raw"][rel["crange"][0]:rel["crange"][1]]
+                    rel["predicate"] = rel["predicate"].translate(
+                        str.maketrans("", "", string.punctuation)
+                    )       # There may be trailing punctuations, remove them
 
                 else:
                     # Default case

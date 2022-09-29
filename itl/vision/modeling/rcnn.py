@@ -182,7 +182,7 @@ class DualModeRCNN(GeneralizedRCNN):
         # Since the size of unfiltered sets of proposals can be humongous, process
         # chunks of proposals with fixed size iteratively
         comp_scores_all = [[] for _ in range(len(search_conds))]
-        CHUNK_SIZE = 10000
+        CHUNK_SIZE = 8000
         for ci in range(len(all_boxes) // CHUNK_SIZE + 1):
             chunk_start = ci * CHUNK_SIZE
             chunk_end = ci * CHUNK_SIZE + CHUNK_SIZE
