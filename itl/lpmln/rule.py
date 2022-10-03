@@ -30,6 +30,10 @@ class Rule:
         if len(self.head) > 0 and (len(self.head) > 1 or len(self.head[0].conds) > 0):
             return self.str_as_choice()
 
+        if len(self.head)==0 and len(self.body)==0:
+            # Body-less integrity constraint; represents falsity (never satisfiable)
+            return ":-."
+
         head_str = (str(self.head[0]) + (" " if len(self.body) else "")) \
             if self.head else ""
         body_str = \

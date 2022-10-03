@@ -17,11 +17,12 @@ from .rule import Rule
 from .models import Models
 from .topk_subset import topk_subset_gen
 from .utils import logit
+from .utils.polynomial import *
 
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.75     # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.95     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
@@ -44,10 +45,8 @@ class Program:
 
         weight_strs = []; max_ws_len = 0
         for _, r_pr in self.rules:
-            if 1.0 in r_pr:
-                weight_strs.append("a")
-            elif 0.0 in r_pr:
-                weight_strs.append("-a")
+            if r_pr is None:
+                weight_strs.append("A")
             else:
                 if len(r_pr) == 1:
                     r_pr_str = f"logit({r_pr[0]:.3f})"
@@ -100,8 +99,18 @@ class Program:
         for bl in rule.body:
             self._rules_by_atom[bl.as_atom()].add(len(self.rules)-1)
     
-    def add_hard_rule(self, rule):
-        self.add_rule(rule, 1.0)
+    def add_absolute_rule(self, rule):
+        """
+        Add as an 'absolute' rule; apart from all the LP^MLN and probabilistic
+        goodness, these are rather 'definitional' rules such that there's really
+        no point in suspecting them they might not hold after all
+        """
+        self.rules.append((rule, None))
+
+        for hl in rule.head:
+            self._rules_by_atom[hl.as_atom()].add(len(self.rules)-1)
+        for bl in rule.body:
+            self._rules_by_atom[bl.as_atom()].add(len(self.rules)-1)
 
     def solve(self, topk_ratio=TOPK_RATIO, provided_mem=None):
         """ Wraps around self._solve, and exposed as class instance method """
@@ -129,7 +138,14 @@ class Program:
             r.is_fact() and r.is_grounded() for r, _ in self.rules
         ])
         if grounded_facts_only:
-            facts = [(r.head[0], float(r_pr[0]), None) for r, r_pr in self.rules]
+            facts = [
+                (
+                    r.head[0],
+                    logit(float(r_pr[0]),large="a") if r_pr is not None else None,
+                    None
+                )
+                for r, r_pr in self.rules
+            ]
 
             models = Models(factors=facts)
             memoized_models = { FrozenMultiset(self.rules): models }
@@ -149,13 +165,14 @@ class Program:
             for atom in ctl.symbolic_atoms
         }
         atoms_inv_map = {v: k for k, v in atoms_map.items()}
-        aux_i = len(atoms_map)
+        aux_i = max(atoms_map.values()) + 1 if len(atoms_map.values()) > 0 else 0
 
         # All grounded atoms that each occurring atom can instantiate (grounded atom
         # can instantiate only self)
         instantiable_atoms = {
             ra: {
-                ma for ma in atoms_map
+                (ma, tuple((rarg[0], marg[0]) for rarg, marg in zip(ra.args, ma.args)))
+                for ma in atoms_map
                 if ra.name == ma.name and len(ra.args) == len(ma.args) and all([
                     rarg[1] == True or rarg[0] == marg[0]
                     for rarg, marg in zip(ra.args, ma.args)
@@ -175,13 +192,25 @@ class Program:
         for ri, (rule, r_pr) in enumerate(self.rules):
             # All possible grounded rules that may originate from this rule
             gr_head_insts = [instantiable_atoms[hl.as_atom()] for hl in rule.head]
-            gr_head_insts = product(*gr_head_insts)
+            gr_head_insts = [
+                # Make sure literals (weak-)negated in the original rule are
+                # properly flipped
+                {(ghl[0].flip(), ghl[1]) if hl.naf else ghl for ghl in ghls}
+                for ghls, hl in zip(gr_head_insts, rule.head)
+            ]
             gr_body_insts = [instantiable_atoms[bl.as_atom()] for bl in rule.body]
-            gr_body_insts = product(*gr_body_insts)
+            gr_body_insts = [
+                {(gbl[0].flip(), gbl[1]) if bl.naf else gbl for gbl in gbls}
+                for gbls, bl in zip(gr_body_insts, rule.body)
+            ]
+
+            gr_head_insts = list(product(*gr_head_insts))
+            gr_body_insts = list(product(*gr_body_insts))
 
             gr_rule_insts = product(gr_head_insts, gr_body_insts)
             gr_rule_insts = [
-                Rule(head=list(gh), body=list(gb)) for gh, gb in gr_rule_insts
+                Rule(head=[gh for gh, _ in ghs], body=[gb for gb, _ in gbs])
+                for ghs, gbs in gr_rule_insts if _arg_map_unifiable(ghs+gbs)
             ]
             gr_rule_insts = {(gr_rule, r_pr, ri) for gr_rule in gr_rule_insts}
 
@@ -190,12 +219,12 @@ class Program:
         for gr_rule, r_pr, ri in grounded_rules:
             if len(gr_rule.head) > 0:
                 for gh in gr_rule.head:
-                    gh_i = atoms_map[gh]
+                    gh_i = atoms_map[gh.as_atom()]
                     grounded_rules_by_head[gh_i].add((gr_rule, r_pr, ri))
 
                     dep_graph.add_node(gh_i)
                     for gb in gr_rule.body:
-                        gb_i = atoms_map[gb]
+                        gb_i = atoms_map[gb.as_atom()]
                         dep_graph.add_node(gb_i)
                         dep_graph.add_edge(gb_i, gh_i)
             else:
@@ -208,7 +237,7 @@ class Program:
                 atoms_inv_map[aux_i] = aux_lit
 
                 for gb in gr_rule.body:
-                    gb_i = atoms_map[gb]
+                    gb_i = atoms_map[gb.as_atom()]
                     dep_graph.add_node(gb_i)
                     dep_graph.add_node(aux_i)
                     dep_graph.add_edge(gb_i, aux_i)
@@ -301,7 +330,15 @@ class Program:
 
                     # (Assuming only one fact is present with the atom as head)
                     facts = [self.rules[fs.pop()] for fs in facts]
-                    facts = [(f.head[0], float(r_pr[0]), None) for f, r_pr in facts]
+                    facts = [
+                        (
+                            f.head[0],
+                            logit(float(r_pr[0]), large="a")
+                                if r_pr is not None else None,
+                            None
+                        )
+                        for f, r_pr in facts
+                    ]
 
                     tree = Models(factors=facts)
 
@@ -322,21 +359,29 @@ class Program:
                     # Process models to extract true atoms along with model weights
                     models = [
                         ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
-                        for m in models
+                        for m in models if len(m) > 0
                     ]
                     models = [
                         (
                             [Literal.from_clingo_symbol(a) for a in atoms],
-                            sum([-a.arguments[1].number / SCALE_PREC for a in unsats])
+                            reduce(_sum_weights, [
+                                ([0.0, 1.0] if a.arguments[1].positive else [0.0, -1.0])
+                                if a.arguments[1].type == clingo.SymbolType.Function
+                                else [-a.arguments[1].number / SCALE_PREC, 0.0] for a in unsats
+                            ])
                         )
                         for atoms, unsats in models
                     ]
 
                     if len(models) > 0:
-                        logZ = reduce(np.logaddexp, [weight for _, weight in models])
-                        models = [(atoms, np.exp(weight-logZ)) for atoms, weight in models]
+                        # Clear models instance to be fed as top_models. Represents Models
+                        # covering an empty model (caution: instance itself is not empty!)
+                        models_clear = Models(factors=[])
 
-                        outcomes = [(weight, atoms, None) for atoms, weight in models]
+                        outcomes = [
+                            (atoms, weight, models_clear, False)
+                            for atoms, weight in models
+                        ]
                         tree = Models(outcomes=outcomes)
                     else:
                         tree = Models()        # Empty models
@@ -351,74 +396,92 @@ class Program:
                     # If program only consists of grounded choice facts, may bypass clingo and
                     # find models along with probabilities combinatorially, possibly pruning
                     # low-probability models from the bottom.
-                    # (Cannot use factored representation since we need to reduce program top for
-                    # each possible model of the program bottom.)
+                    # (Cannot use factored representation since we need to reduce program top
+                    # for each possible model of the program bottom.)
+                    bottom_models = []
                     
-                    # Only need to consider soft rules (i.e. rules with 0.0 < r_pr < 1.0) when finding
-                    # top-k models with this method
-                    soft_facts = [(rule, r_pr) for rule, r_pr in bottom.rules if 0.0 < r_pr[0] < 1.0]
+                    # Only need to consider soft rules (i.e. rules with 0.0 < r_pr < 1.0) when
+                    # finding top-k models with this method
+                    abs_facts = [rule for rule, r_pr in bottom.rules if r_pr is None]
+                    abs_facts = {rule.head[0] for rule in abs_facts}
+
+                    incid_facts = [(rule, r_pr) for rule, r_pr in bottom.rules if r_pr is not None]
+                    soft_facts = [(rule, r_pr) for rule, r_pr in incid_facts if 0.0 < r_pr[0] < 1.0]
                     hard_facts = [
-                        (rule, r_pr) for rule, r_pr in bottom.rules if r_pr[0] == 0.0 or r_pr[0] == 1.0
+                        (rule, r_pr) for rule, r_pr in incid_facts if r_pr[0] == 0.0 or r_pr[0] == 1.0
                     ]
 
-                    # Aggregate rules with same head atom; probabilities are logsumexp-ed (then exp-ed back)
-                    soft_facts_agg = defaultdict(lambda: float("-inf"))
-                    for rule, r_pr in soft_facts:
-                        soft_facts_agg[rule.head[0]] = np.exp(np.logaddexp(soft_facts_agg[rule.head[0]], np.log(r_pr)))
-                    soft_facts = [(Rule(head=head), r_pr) for head, r_pr in soft_facts_agg.items()]
+                    if len(soft_facts) > 0:
+                        # Aggregate rules with same head atom, combining weights
+                        soft_facts_agg = defaultdict(float)
+                        for rule, r_pr in soft_facts:
+                            soft_facts_agg[rule.head[0]] += logit(r_pr[0])
+                        soft_facts = [(Rule(head=head), w) for head, w in soft_facts_agg.items()]
 
-                    # Rules should be sorted by weights first to apply the algorithm
-                    soft_facts = sorted(soft_facts, key=lambda rw: rw[1][0], reverse=True)
+                        # Rules should be sorted by weights first to apply the algorithm
+                        soft_facts = sorted(soft_facts, key=lambda rw: rw[1], reverse=True)
 
-                    # Using logits of r_pr values as rule weights ensures direct association of the
-                    # rule weights with the marginal probabilities of rule head atoms across all possible
-                    # models (... on the assumption that there are no probabilistic choice rules with the
-                    # same head atoms with non-disjoint body in program)
-                    rule_weights = [logit(r_pr[0], LARGE) for _, r_pr in soft_facts]
+                        # Using logits of r_pr values as rule weights ensures direct association of
+                        # the rule weights with the marginal probabilities of rule head atoms across
+                        # all possible models (... on the assumption that there are no probabilistic
+                        # choice rules with the same head atoms with non-disjoint body in program)
+                        rule_weights = [rw for _, rw in soft_facts]
 
-                    # (Log of) partition function for all the soft rules can be analytically computed as below
-                    logZ = sum([np.log(1+np.exp(w)) for w in rule_weights])
+                        # (Log of) partition function for all the soft rules can be analytically
+                        # computed as below
+                        logZ = sum([np.log(1+np.exp(w)) for w in rule_weights])
 
-                    # Log of total probability mass covered, from the top; need to query models until more than
-                    # aggregate probability mass gets larger than top_k
-                    log_pmass_covered = float("-inf")        # Represents limit(log(x)) as x -> +0
+                        # Log of total probability mass covered, from the top; need to query models
+                        # until more than aggregate probability mass gets larger than top_k
+                        log_pmass_covered = float("-inf")      # Represents limit(log(x)) as x -> +0
 
-                    # Collect most probable possible worlds
-                    subsets = []
-                    subset_generator = topk_subset_gen(rule_weights)
-                    for subset, weight_sum in subset_generator:
-                        # Update pmass_covered with log-sum-exp
-                        log_joint_p = weight_sum - logZ
-                        log_pmass_covered = np.logaddexp(log_pmass_covered, log_joint_p)
+                        # Collect most probable possible worlds
+                        subsets = []
+                        subset_generator = topk_subset_gen(rule_weights)
+                        for subset, weight_sum in subset_generator:
+                            # Update pmass_covered with log-sum-exp
+                            log_joint_p = weight_sum - logZ
+                            log_pmass_covered = np.logaddexp(log_pmass_covered, log_joint_p)
 
-                        # Append model retrieved from the indices in subset along with joint probability
-                        subsets.append((subset, np.exp(log_joint_p)))
-                        
-                        # Break with sufficient coverage
-                        if log_pmass_covered >= np.log(topk_ratio):
-                            break
-                    subset_generator.close()
-
-                    # Translate each subset to explicit representation set of positive/negative
-                    # atoms
-                    bottom_models = [
-                        (
-                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in ss},
-                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in ss},
-                            pr
-                        ) for ss, pr in subsets
-                    ]
-
-                    # Combine the results with hard-weighted facts
-                    bottom_models = [
-                        (
-                            pos_atoms | {hr.head[0] for (hr, r_pr) in hard_facts if r_pr[0]==1.0},
-                            neg_atoms | {hr.head[0] for (hr, r_pr) in hard_facts if r_pr[0]==0.0},
-                            pr
-                        )
-                        for pos_atoms, neg_atoms, pr in bottom_models
-                    ]
-
+                            # Append model retrieved from the indices in subset along with weight
+                            # sum
+                            subsets.append((subset, np.exp(log_joint_p)))
+                            bottom_models.append((
+                                {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in subset},
+                                {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in subset},
+                                [weight_sum, 0.0]
+                            ))
+                            
+                            # Break with sufficient coverage
+                            if log_pmass_covered >= np.log(topk_ratio):
+                                break
+                        subset_generator.close()
+                    
+                    # Add hard-weighted facts
+                    if len(hard_facts) > 0:
+                        if len(bottom_models) == 0:
+                            # Need to add an empty model if no models in list at this point
+                            bottom_models.append((set(), set(), [0.0, 0.0]))
+                        hard_pos_atoms = {hr.head[0] for hr, r_pr in hard_facts if r_pr[0]==1.0}
+                        hard_neg_atoms = {hr.head[0] for hr, r_pr in hard_facts if r_pr[0]==0.0}
+                        bottom_models = [
+                            (
+                                pos_atoms | hard_pos_atoms,
+                                neg_atoms | hard_neg_atoms,
+                                _sum_weights(weight_sum, [0, len(hard_pos_atoms)+len(hard_neg_atoms)])
+                            )
+                            for pos_atoms, neg_atoms, weight_sum in bottom_models
+                        ]
+                    
+                    # Add absolute, definitionally derived facts
+                    if len(abs_facts) > 0:
+                        if len(bottom_models) == 0:
+                            # Need to add an empty model if no models in list at this point
+                            bottom_models.append((set(), set(), [0.0, 0.0]))
+                        bottom_models = [
+                            (pos_atoms | abs_facts, neg_atoms, weight_sum)
+                            for pos_atoms, neg_atoms, weight_sum in bottom_models
+                        ]
                 else:
                     # Solve the bottom (== comp) with clingo and return answer sets (with
                     # associated probabilities)
@@ -443,12 +506,19 @@ class Program:
                     bottom_models = [
                         (
                             [Literal.from_clingo_symbol(a) for a in atoms],
-                            sum([-a.arguments[1].number / SCALE_PREC for a in unsats])
+                            reduce(_sum_weights, [
+                                ([0.0, 1.0] if a.arguments[1].positive else [0.0, -1.0])
+                                if a.arguments[1].type == clingo.SymbolType.Function
+                                else [-a.arguments[1].number / SCALE_PREC, 0.0] for a in unsats
+                            ])
                         )
                         for atoms, unsats in bottom_models
                     ]
 
                     if len(bottom_models) > 0:
+                        # TODO: Not updated to match the updated solving procedure, update
+                        raise NotImplementedError
+
                         logZ = reduce(np.logaddexp, [weight for _, weight in bottom_models])
                         bottom_models = [
                             (set(atoms), np.exp(weight-logZ)) for atoms, weight in bottom_models
@@ -464,8 +534,8 @@ class Program:
                     {(pl, True) for pl in bm[0]} | {(nl, False) for nl in bm[1]}
                     for bm in bottom_models
                 ]
-                atom_commons = set.intersection(*atom_sets)
-                reduced_common = top._reduce(
+                atom_commons = set.intersection(*atom_sets) if len(atom_sets) > 0 else set()
+                reduced_common, base_w_common = top._reduce(
                     {atm for atm, pos in atom_commons if pos},
                     {atm for atm, pos in atom_commons if not pos}
                 )
@@ -474,29 +544,32 @@ class Program:
                 # the atoms, and solve the fully reduced
                 outcomes = []
                 atom_diffs = [a-atom_commons for a in atom_sets]
-                for bi, ((pos_atoms, _, pr), atoms) in enumerate(zip(bottom_models, atom_diffs)):
+                for bi, ((pos_atoms, _, w), atoms) in enumerate(zip(bottom_models, atom_diffs)):
                     # print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
 
                     pos_atoms_diff = {atm for atm, pos in atoms if pos}
                     neg_atoms_diff = {atm for atm, pos in atoms if not pos}
 
-                    reduced_top = reduced_common._reduce(pos_atoms_diff, neg_atoms_diff)
-                    top_models, top_memoized = reduced_top._solve(provided_mem={
-                        **memoized_models, **provided_mem
-                    })
+                    reduced_top, base_w_top = reduced_common._reduce(
+                        pos_atoms_diff, neg_atoms_diff
+                    )
+                    top_models, top_memoized = reduced_top._solve(
+                        provided_mem={ **memoized_models, **provided_mem }
+                    )
 
                     # Memoize reduced top & merge returned memoized models
                     memoized_models.update(top_memoized)
                     memoized_models[FrozenMultiset(reduced_top.rules)] = top_models
 
-                    outcomes.append((pr, pos_atoms, top_models))
+                    final_w = _sum_weights(base_w_common, base_w_top)
+                    final_w = _sum_weights(w, final_w)
+                    outcomes.append((pos_atoms, final_w, top_models, False))
                 tree = Models(outcomes=outcomes)
 
             indep_trees.append(tree)
             # print("A>" + (" "*50), end="\r")
-        
-        models = Models(factors=indep_trees)
 
+        models = Models(factors=indep_trees)
         # Memoize whole
         memoized_models[grounded_rules] = models
 
@@ -556,7 +629,7 @@ class Program:
 
         (Implements paper [[How to Split a Logic Program]] (Ben-Eliyahu-Zohary, 2021).)
         """
-        if len(comp.nodes) == 1:
+        if len(comp.nodes) == 1 or len(grounded_rules_rel) == 1:
             # Don't even bother to split
             found_split = frozenset(comp)
         
@@ -700,16 +773,42 @@ class Program:
         reduced_rules = copy.deepcopy(self.rules)
         rules_to_del = set()
 
+        # Sum of weights harvested by excluding rules whose bodies are rendered
+        # unsatisfiable with this reduction
+        base_weight = [0, 0]        # (zeroth degree of "a", first degree of "a")
+
         for pa in pos_atoms:
             for ri in self._rules_by_atom[pa.as_atom()]:
                 rule = reduced_rules[ri][0]
                 if rule.body_contains(pa.flip()):
                     # Exclude this rule
                     rules_to_del.add(ri)
+
+                    # Harvest weight of this rule as this will be necessarily
+                    # satisfied by this reduction
+                    r_pr = self.rules[ri][1]
+                    if r_pr is None:
+                        # Rule not contributing to weights, don't need to do
+                        # a thing
+                        pass
+                    else:
+                        if len(r_pr) > 1:
+                            # Don't know yet what has to happen here
+                            raise NotImplementedError
+                        else:
+                            assert len(r_pr) == 1
+                            weight = logit(r_pr[0], large="a")
+                            if weight == "a":
+                                base_weight[1] += 1
+                            elif weight == "-a":
+                                base_weight[1] -= 1
+                            else:
+                                base_weight[0] += weight
+
                     continue
 
-                # Remove positive appearance
-                rule.body.remove(pa)
+                # Remove positive appearance if exists
+                if pa in rule.body: rule.body.remove(pa)
 
         for na in neg_atoms:
             for ri in self._rules_by_atom[na.as_atom()]:
@@ -717,22 +816,38 @@ class Program:
                 if rule.body_contains(na):
                     # Exclude this rule
                     rules_to_del.add(ri)
+
+                    # Harvest weight of this rule as this will be necessarily
+                    # satisfied by this reduction
+                    r_pr = self.rules[ri][1]
+                    if r_pr is None:
+                        # Rule not contributing to weights, don't need to do
+                        # a thing
+                        pass
+                    else:
+                        if len(r_pr) > 1:
+                            # Don't know yet what has to happen here
+                            raise NotImplementedError
+                        else:
+                            assert len(r_pr) == 1
+                            weight = logit(r_pr[0], large="a")
+                            if weight == "a":
+                                base_weight[1] += 1
+                            elif weight == "-a":
+                                base_weight[1] -= 1
+                            else:
+                                base_weight[0] += weight
+
                     continue
 
-                # Remove negative appearance
-                rule.body.remove(na.flip())
+                # Remove negative appearance if exists
+                if na.flip() in rule.body: rule.body.remove(na.flip())
 
         reduced_rules = [
             r for i, r in enumerate(reduced_rules) if i not in rules_to_del
         ]
 
-        # Filter possible empty rules, generated by reducing headless integrity
-        # constraints
-        reduced_rules = [
-            r for r in reduced_rules if len(r[0].head) > 0 or len(r[0].body) > 0
-        ]
-
-        return Program(reduced_rules)
+        return Program(reduced_rules), base_weight
 
     def _pure_ASP_str(self, unsats=False):
         """
@@ -749,39 +864,54 @@ class Program:
         as_str = ""
 
         for ri, (rule, r_pr) in enumerate(self.rules):
-            if len(rule.head) <= 1:
-                if r_pr[0] == 1.0:
-                    # Add as-is
-                    as_str += str(rule) + "\n"
-                elif r_pr[0] == 0.0:
-                    # Turn into corresponding integrity constraint and add
-                    as_str += "".join(str(nr)+"\n" for nr in rule.negate())
-                else:
-                    if len(rule.head) == 1:
-                        as_str += rule.str_as_choice() + "\n"
+            if r_pr is None:
+                # No point in casting these 'absolute' rules as choice rules,
+                # simply add them as rule string as it stands
+                as_str += str(rule) + "\n"
+                continue
 
-                        if unsats:
-                            # Add rule with unsat atom which is derived whenever
-                            # rule head is not true
-                            weight = int(logit(r_pr[0], LARGE) * SCALE_PREC)
-                            unsat_args = [(ri, False), (weight, False)]
-                            unsat_rule = Rule(
-                                head=Literal("unsat", unsat_args),
-                                body=[rule.head[0].flip()]
-                            )
-                            as_str += str(unsat_rule) + "\n"
+            if unsats:
+                if len(rule.head) <= 1:
+                    if len(rule.head) == 1:
+                        # Add rule with unsat atom which is derived whenever
+                        # rule head is not true
+                        weight = logit(r_pr[0], large="a")
+                        if type(weight)!=str:
+                            weight = int(weight * SCALE_PREC)
+
+                        unsat_args = [(ri, False), (weight, False)]
+                        unsat_rule = Rule(
+                            head=Literal("unsat", unsat_args),
+                            body=[rule.head[0].flip()]
+                        )
+                        as_str += str(unsat_rule) + "\n"
                     else:
-                        if unsats:
-                            # Add a modified rule with the same body but unsat atom
-                            # as head, which is satisfied whenever constraint body is
-                            # true
-                            weight = int(logit(r_pr[0], LARGE) * SCALE_PREC)
-                            unsat_args = [(ri, False), (weight, False)]
-                            unsat_rule = Rule(
-                                head=Literal("unsat", unsat_args),
-                                body=rule.body
-                            )
-                            as_str += str(unsat_rule) + "\n"
+                        # Add a modified rule with the same body but unsat atom
+                        # as head, which is satisfied whenever constraint body is
+                        # true
+                        weight = logit(r_pr[0], large="a")
+                        if type(weight)!=str:
+                            weight = int(weight * SCALE_PREC)
+
+                        unsat_args = [(ri, False), (weight, False)]
+                        unsat_rule = Rule(
+                            head=Literal("unsat", unsat_args),
+                            body=rule.body
+                        )
+                        as_str += str(unsat_rule) + "\n"
+                else:
+                    raise NotImplementedError
+            else:
+                if len(rule.head) <= 1:
+                    if r_pr[0] == 1.0:
+                        # Add as-is
+                        as_str += str(rule) + "\n"
+                    elif r_pr[0] == 0.0:
+                        # Turn into corresponding integrity constraint and add
+                        as_str += "".join(str(nr)+"\n" for nr in rule.negate())
+                    else:
+                        if len(rule.head) == 1:
+                            as_str += rule.str_as_choice() + "\n"
                         else:
                             # Even when unsats=False, should add a modified rule with
                             # an auxiliary atom as head when body contains more than
@@ -794,19 +924,40 @@ class Program:
                                     body=rule.body
                                 )
                                 as_str += str(aux_rule) + "\n"
-            else:
-                # Choice rules with multiple head literals
-                as_str += rule.str_as_choice() + "\n"
-
-                if unsats:
-                    raise NotImplementedError
+                else:
+                    # Choice rules with multiple head literals
+                    as_str += rule.str_as_choice() + "\n"
 
         return as_str
 
 
 class _Observer:
-    """For tracking added grounded rules"""
+    """ For tracking added grounded rules """
     def __init__(self):
         self.rules = []
     def rule(self, choice, head, body):
         self.rules.append((head, body, choice))
+
+
+def _arg_map_unifiable(g_lits):
+    """ Test if all argument mappings are unifiable """
+    arg_maps = sum([map for _, map in g_lits], ())
+    mapping = {}
+    for ra, ma in arg_maps:
+        if ra in mapping:
+            if mapping[ra] != ma:
+                return False
+        else:
+            mapping[ra] = ma
+
+    return True
+
+
+def _sum_weights(w1, w2):
+    """
+    Sum of weight sums, each represented as a binomial consisting of a zeroth
+    degree term and first degree term (for "a"), represented as iterable of
+    number with length of 2
+    """
+    assert len(w1) == 2 and len(w2) == 2
+    return [w1[0]+w2[0], w1[1]+w2[1]]

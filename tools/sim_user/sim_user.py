@@ -143,10 +143,41 @@ class SimulatedTeacher:
 
         self.current_focus = (img_f, instance_bbox)
 
+        # Temporary code for preparing 'cheat sheet', for checking whether logical
+        # reasoners perform better if the agent's poor vision module's performance 
+        # is replaced by oracle ground truths about object parts and their properties
+        instance_parts = [
+            r for r in sampled_img["annotations"][sampled_instance]["relations"]
+            if "have.v.01" in [self.metadata["relations"][ri] for ri in r["relation"]]
+        ]
+        instance_parts = [
+            sampled_img["annotations"][r["object_id"]] for r in instance_parts
+        ]
+        instance_parts = [
+            (obj, [self.metadata["classes"][ci] for ci in obj["classes"]])
+            for obj in instance_parts
+        ]
+        cheat_sheet = [
+            (
+                BoxMode.convert(
+                    np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
+                )[0],
+                classes[0].split(".")[0],
+                [
+                    self.metadata["attributes"][ai].split(".")[0] + \
+                        "/" + classes[0].split(".")[0]
+                    for ai in obj["attributes"]
+                ]
+            )
+            for obj, classes in instance_parts
+            if "bowl.n.01" in classes or "stem.n.03" in classes
+        ]
+
         return {
             "v_usr_in": os.path.join(self.image_dir_prefix, img_f),
             "l_usr_in": "What is this?",
-            "pointing": { "this": [instance_bbox] }
+            "pointing": { "this": [instance_bbox] },
+            "cheat_sheet": cheat_sheet
         }
 
     def react(self, agent_reaction):

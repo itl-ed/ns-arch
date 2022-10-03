@@ -1,6 +1,8 @@
 """
 Miscellaneous utility methods that don't classify into other files in utils
 """
+import re
+
 import numpy as np
 
 
@@ -31,15 +33,19 @@ def logit(p, large=float("inf")):
     if p == 1:
         return large
     elif p == 0:
-        return -large
+        if type(large)==str:
+            return f"-{large}"
+        else:
+            assert type(large)==float
+            return -large
     else:
-        return np.log(p/(1-p))
+        return float(np.log(p/(1-p)))
 
 def sigmoid(l):
     """ Compute probability of the logit value l """
-    if l == float("inf"):
+    if l == float("inf") or l == "a":
         return 1
-    elif l == float("-inf"):
+    elif l == float("-inf") or l == "-a":
         return 0
     else:
-        return 1 / (1 + np.exp(-l))
+        return float(1 / (1 + np.exp(-l)))

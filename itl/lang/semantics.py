@@ -3,6 +3,7 @@ import re
 import string
 from collections import defaultdict
 
+import inflect
 from delphin import ace, predicate, codecs
 
 
@@ -72,6 +73,13 @@ class SemanticParser:
                     # MRS POS code
                     if pos.startswith("n"):
                         pos = "n"
+
+                        # Ensure singularized lemma
+                        singularized = inflect.engine().singular_noun(lemma)
+                        if singularized:
+                            # singular_noun() returns False if already singular. Weird
+                            # behavior, but welp
+                            lemma = singularized
                     elif pos.startswith("j"):
                         pos = "a"
                     elif pos.startswith("v"):

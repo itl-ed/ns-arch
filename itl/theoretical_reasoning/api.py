@@ -25,13 +25,13 @@ from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import wrap_args
 
 
-TAB = "\t"             # For use in format strings
+TAB = "\t"              # For use in format strings
 
-EPS = 1e-10            # Value used for numerical stabilization
-U_IN_PR = 1.0          # How much the agent values information provided by the user
-SCORE_THRES = 0.75     # Only consider recognised categories with category score higher
-                       # than this value, unless focused attention warranted by KB
-LOWER_THRES = 0.5      # Lower threshold for predicates that deserve closer look
+EPS = 1e-10             # Value used for numerical stabilization
+U_IN_PR = 1.0           # How much the agent values information provided by the user
+SCORE_THRES = 0.75      # Only consider recognised categories with category score higher
+                        # than this value, unless focused attention warranted by KB
+LOWER_THRES = 0.3       # Lower threshold for predicates that deserve closer look
 
 class TheoreticalReasonerModule:
 
@@ -114,7 +114,7 @@ class TheoreticalReasonerModule:
 
                         pprog.add_rule(rule, r_pr)
 
-        # Solve with clingo to find the best K_M models of the program
+        # Solve with clingo to find the best models of the program
         prog = pprog + inference_prog
         if self.concl_vis is not None:
             _, memoized_v, _ = self.concl_vis
@@ -140,37 +140,46 @@ class TheoreticalReasonerModule:
         # Find the best estimate of referent value assignment
         aprog = Program()
 
-        # Environmental entities & recognized visual concepts
-        if self.concl_vis is not None:
-            models_v, _, _ = self.concl_vis
-            marginals_v, _ = models_v.marginals()
-
-            vis_concepts = defaultdict(float)
-            for atom, pr in marginals_v.items():
-                if atom.name == "object":
-                    aprog.add_hard_rule(Rule(head=Literal("env", atom.args)))
-                else:
-                    # Collect 'priming intensity' by recognized concepts
-                    vis_concepts[atom.name] += pr
-            
-            for vc, score in vis_concepts.items():
-                aprog.add_hard_rule(Rule(
-                    head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
-                ))
+        # Environmental referents
+        occurring_atoms = set()
+        for ent in dialogue_state["referents"]["env"]:
+            if ent not in occurring_atoms:
+                aprog.add_absolute_rule(Rule(head=Literal("env", wrap_args(ent))))
+                occurring_atoms.add(ent)
 
         # Discourse referents
         for rf, v in dialogue_state["referents"]["dis"].items():
             if not (v["is_univ_quantified"] or v["is_wh_quantified"]):
-                aprog.add_hard_rule(Rule(head=Literal("dis", wrap_args(rf))))
+                aprog.add_absolute_rule(Rule(head=Literal("dis", wrap_args(rf))))
                 if v["is_referential"]:
-                    aprog.add_hard_rule(Rule(head=Literal("referential", wrap_args(rf))))
+                    aprog.add_absolute_rule(Rule(head=Literal("referential", wrap_args(rf))))
 
         # Hard assignments by pointing, etc.
         for ref, env in dialogue_state["assignment_hard"].items():
-            aprog.add_hard_rule(Rule(head=Literal("env", wrap_args(env))))
-            aprog.add_hard_rule(
+            aprog.add_absolute_rule(Rule(head=Literal("env", wrap_args(env))))
+            aprog.add_absolute_rule(
                 Rule(body=[Literal("assign", [(ref, False), (env, False)], naf=True)])
             )
+
+        # Add priming effect by recognized visual concepts
+        if self.concl_vis is not None:
+            models_v, _, _ = self.concl_vis
+            marginals_v, _ = models_v.compute_marginals()
+
+            if marginals_v is not None:
+                vis_concepts = defaultdict(float)
+                for atom, pr in marginals_v.items():
+                    is_cls = atom.name.startswith("cls")
+                    is_att = atom.name.startswith("att")
+                    is_rel = atom.name.startswith("rel")
+                    if is_cls or is_att or is_rel:
+                        # Collect 'priming intensity' by recognized concepts
+                        vis_concepts[atom.name] += pr
+
+                for vc, score in vis_concepts.items():
+                    aprog.add_absolute_rule(Rule(
+                        head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
+                    ))
 
         # Understood dialogue record contents
         occurring_preds = set()
@@ -191,7 +200,7 @@ class TheoreticalReasonerModule:
 
                             sym = f"{p[1]}_{p[0].split('/')[0]}"
                             tok_loc = f"u{ui}_r{ri}_{c}{pi}"
-                            aprog.add_hard_rule(
+                            aprog.add_absolute_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
                             )
 
@@ -250,7 +259,7 @@ class TheoreticalReasonerModule:
                                         for bi, d in enumerate(body_vcs)
                                     ]
 
-                                aprog.add_hard_rule(Rule(head=c_head, body=c_body))
+                                aprog.add_absolute_rule(Rule(head=c_head, body=c_body))
             
             if question is not None:
                 _, q_rules = question
@@ -270,7 +279,7 @@ class TheoreticalReasonerModule:
 
                             sym = f"{p[1]}_{p[0].split('/')[0]}"
                             tok_loc = f"u{ui}_q{qi}_{c}{pi}"
-                            aprog.add_hard_rule(
+                            aprog.add_absolute_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
                             )
 
@@ -292,15 +301,15 @@ class TheoreticalReasonerModule:
 
                     den = f"{vc[1]}_{vc[0]}"
 
-                    aprog.add_hard_rule(
+                    aprog.add_absolute_rule(
                         Rule(head=Literal("may_denote", wrap_args(sym, den)))
                     )
-                    aprog.add_hard_rule(
+                    aprog.add_absolute_rule(
                         Rule(head=Literal("d_freq", wrap_args(den, lexicon.d_freq[vc])))
                     )
             else:
                 # Predicate symbol not found in lexicon: unresolved neologism
-                aprog.add_hard_rule(
+                aprog.add_absolute_rule(
                     Rule(head=Literal("may_denote", wrap_args(sym, "_neo")))
                 )
 
@@ -345,7 +354,7 @@ class TheoreticalReasonerModule:
         ))
 
         # 'Base cost' for cases where no assignments are any better than others
-        aprog.add_hard_rule(Rule(head=Literal("zero_p", [])))
+        aprog.add_absolute_rule(Rule(head=Literal("zero_p", [])))
 
         # By querying for the optimal assignment, essentially we are giving the user a 'benefit
         # of doubt', such that any statements made by the user are considered as True, and the

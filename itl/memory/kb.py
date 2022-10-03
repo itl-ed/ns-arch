@@ -10,7 +10,7 @@ from ..lpmln.utils import logit, sigmoid, wrap_args
 
 
 P_C = 0.01          # Catchall hypothesis probability
-LOWER_THRES = 0.5   # Lower threshold for predicates that deserve closer look (see
+LOWER_THRES = 0.3   # Lower threshold for predicates that deserve closer look (see
                     # ../theoretical_reasoning/api.py)
 
 class KnowledgeBase:
@@ -270,10 +270,10 @@ class KnowledgeBase:
                 for ft in b_fn_terms
             ]
 
-            inference_prog.add_hard_rule(
+            inference_prog.add_absolute_rule(
                 Rule(head=h_sat_lit, body=h_sat_conds_pure+h_fn_assign)
             )
-            inference_prog.add_hard_rule(
+            inference_prog.add_absolute_rule(
                 Rule(head=b_sat_lit, body=b_sat_conds_pure+b_fn_assign)
             )
 
@@ -311,7 +311,7 @@ class KnowledgeBase:
 
             # Rule violation flag
             r_unsat_lit = Literal(f"deduc_viol_{i}", wrap_args(*b_var_signature))
-            inference_prog.add_hard_rule(Rule(
+            inference_prog.add_absolute_rule(Rule(
                 head=r_unsat_lit, body=[h_sat_lit.flip(), b_sat_lit]
             ))
 
@@ -467,7 +467,7 @@ class KnowledgeBase:
 
             for s_out in standardized_outputs:
                 # coll_h_sat_lit holds when any (and all) of the heads hold
-                inference_prog.add_hard_rule(Rule(head=coll_h_sat_lit, body=s_out[0]))
+                inference_prog.add_absolute_rule(Rule(head=coll_h_sat_lit, body=s_out[0]))
 
             # Flag holding when the explanandum (head) is not explained by any of
             # the explanantia (bodies), and thus evoke 'catchall' hypothesis
@@ -478,7 +478,7 @@ class KnowledgeBase:
             # r_catchall_lit holds when coll_H_sat_lit holds but none of the
             # explanantia (bodies) hold
             unexpl_lits = [s_out[1].flip() for s_out in standardized_outputs]
-            inference_prog.add_hard_rule(Rule(
+            inference_prog.add_absolute_rule(Rule(
                 head=coll_h_catchall_lit, body=[coll_h_sat_lit]+unexpl_lits
             ))
 

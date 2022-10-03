@@ -5,7 +5,6 @@ scene graph generation & classification given bbox), few-shot registration of ne
 concepts
 """
 import os
-import copy
 import logging
 from itertools import chain, permutations, product
 
@@ -35,6 +34,8 @@ from .utils.visualize import visualize_sg_predictions
 
 __all__ = ["VisionModule"]
 
+
+V_MAX_CAP = 0.95        # Set max limit to beliefs from visual perception
 
 logger = logging.getLogger("vision.module")
 logger.setLevel(logging.INFO)
@@ -529,7 +530,7 @@ class VisionModule:
 
                             # Final few-shot prediction by weighted neighbor voting
                             fs_score = (F.softmax(-dists) * ex_labels).sum()
-                            fs_score = torch.clamp(fs_score, min=0, max=1).item()
+                            fs_score = torch.clamp(fs_score, min=0, max=V_MAX_CAP).item()
 
                             # Fill in the scene graph with the score
                             if field_name in self.scene[oi]:
@@ -555,7 +556,7 @@ class VisionModule:
 
                             # Final few-shot prediction by weighted neighbor voting
                             fs_score = (F.softmax(-dists) * ex_labels).sum()
-                            fs_score = torch.clamp(fs_score, min=0, max=1).item()
+                            fs_score = torch.clamp(fs_score, min=0, max=V_MAX_CAP).item()
 
                             # Fill in the scene graph with the score
                             if field_name in self.scene[oi]:
@@ -576,6 +577,36 @@ class VisionModule:
             self.summ = visualize_sg_predictions(
                 self.last_raw, self.scene, self.predicates
             )
+
+    @has_model
+    def extract_feature_map(self, image):
+        """
+        Run only up to backbone to obtain feature map from the input image
+        """
+        self.dm.setup("test")
+        self.model.eval()
+
+        # Image data
+        if isinstance(image, str):
+            inp = { "file_name": image }
+            self.last_input = image
+        else:
+            image = image[:, :, [2,1,0]]
+            inp = { "image": image }
+            self.last_input = image
+
+        inp = [self.dm.mapper_batch["test"](inp)]
+        images = self.model.base_model.preprocess_image(inp)
+        features = self.model.base_model.backbone(images.tensor)
+
+        # Reformat & resize input image
+        img = convert_image_to_rgb(inp[0]["image"].permute(1, 2, 0), "BGR")
+        img = cv2.resize(img, dsize=(inp[0]["width"], inp[0]["height"]))
+
+        # Store in case they are needed later
+        self.last_raw = img
+
+        return features
 
     def reshow_pred(self):
         assert self.summ is not None, "No predictions have been made yet"

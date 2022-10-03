@@ -48,6 +48,7 @@ class LanguageModule:
                 "bbox": bbox,
                 "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
             }
+            self.dialogue.referent_names[oi] = oi
         
         # Register these indices as names, for starters
         self.dialogue.referent_names = {i: i for i in self.dialogue.referents["env"]}
