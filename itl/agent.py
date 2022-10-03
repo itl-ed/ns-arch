@@ -98,6 +98,64 @@ class ITLAgent:
             v_input, exemplars=self.lt_mem.exemplars, bboxes=bboxes
         )
 
+        # Temporary injection of ground-truth object parts and their attributes
+        if cheat_sheet is not None and len(cheat_sheet) > 0:
+            ent_map = [
+                f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
+            ]
+            bboxes = {}
+            for i, (bbox, _, _) in enumerate(cheat_sheet):
+                bboxes[ent_map[i]] = {
+                    "bbox": bbox,
+                    "bbox_mode": BoxMode.XYXY_ABS,
+                    "objectness_scores": None
+                }
+                self.lang.dialogue.referents["env"][ent_map[i]] = {
+                    "bbox": bbox,
+                    "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
+                }
+                self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
+
+            # Incrementally predict on the designated bbox
+            self.vision.predict(
+                self.vision.last_input, exemplars=self.lt_mem.exemplars,
+                bboxes=bboxes
+            )
+
+            # Ensure scores are high enough for appropriate classes, attributes
+            # and relations that should be positive, and low enough for ones 
+            # that should be negative
+            HIGH_SCORE = 0.95
+            for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
+                ent_preds = self.vision.scene[ent_map[i]]
+                whole_preds = self.vision.scene["o0"]
+
+                # Object part class scores
+                gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
+                for ci, score in enumerate(ent_preds["pred_classes"]):
+                    if ci == gt_c and score < HIGH_SCORE:
+                        ent_preds["pred_classes"][ci] = HIGH_SCORE
+                    if ci != gt_c and score > 1-HIGH_SCORE:
+                        ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
+
+                # Object part attribute scores
+                gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
+                for ai, score in enumerate(ent_preds["pred_attributes"]):
+                    if ai in gt_as and score < HIGH_SCORE:
+                        ent_preds["pred_attributes"][ai] = HIGH_SCORE
+                    if ai not in gt_as and score > 1-HIGH_SCORE:
+                        ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
+
+                # Object part relation score w.r.t. o0
+                if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
+                    whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
+                if whole_preds["pred_relations"][ent_map[i]][1] > 1-HIGH_SCORE:
+                    whole_preds["pred_relations"][ent_map[i]][1] = 1-HIGH_SCORE
+                if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
+                    ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
+                if ent_preds["pred_relations"]["o0"][1] < HIGH_SCORE:
+                    ent_preds["pred_relations"]["o0"][1] = HIGH_SCORE
+
         # Inform the language module of the visual context
         self.lang.situate(self.vision.last_input, self.vision.scene)
         self.theoretical.refresh()
@@ -378,7 +436,7 @@ class ITLAgent:
                     )
                 
                 # Temporary injection of ground-truth object parts and their attributes
-                if cheat_sheet is not None:
+                if cheat_sheet is not None and len(cheat_sheet) > 0:
                     ent_map = [
                         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
                     ]
