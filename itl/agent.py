@@ -12,7 +12,6 @@ from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
 from .vision import VisionModule
-from .vision.utils.completer import DatasetImgsCompleter
 from .lang import LanguageModule
 from .theoretical_reasoning import TheoreticalReasonerModule
 from .practical_reasoning import PracticalReasonerModule
@@ -20,6 +19,7 @@ from .actions import AgentCompositeActions
 from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
 from .path_manager import PathManager
+from .utils.completer import DatasetImgsCompleter
 
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
@@ -35,8 +35,8 @@ class ITLAgent:
         self.path_manager = PathManager
 
         # Initialize component modules
-        self.vision = VisionModule(opts)
-        self.lang = LanguageModule(opts)
+        self.vision = VisionModule(opts.vision_model_path)
+        self.lang = LanguageModule(opts.grammar_image_path, opts.ace_binary_path)
         self.theoretical = TheoreticalReasonerModule()
         self.practical = PracticalReasonerModule()
         self.lt_mem = LongTermMemoryModule()
@@ -46,13 +46,14 @@ class ITLAgent:
         self.comp_actions = AgentCompositeActions(self)
 
         # Load agent model from specified path
-        self.load_model()
+        if opts.agent_model_path is not None:
+            self.load_model(opts.agent_model_path)
 
         # Show visual UI and plots
         self.vis_ui_on = True
 
         # Image file selection CUI
-        self.dcompleter = DatasetImgsCompleter()
+        self.dcompleter = DatasetImgsCompleter(opts.data_dir_path)
         readline.parse_and_bind("tab: complete")
 
     def __call__(self):
@@ -222,9 +223,7 @@ class ITLAgent:
         """
         ckpt = {
             "vision": {
-                "state_dict": self.vision.model.state_dict(),
-                "predicates": self.vision.predicates,
-                "predicates_freq": self.vision.predicates_freq
+                "inventories": self.vision.inventories
             },
             "lt_mem": {
                 "exemplars": vars(self.lt_mem.exemplars),
@@ -234,15 +233,15 @@ class ITLAgent:
         }
         torch.save(ckpt, ckpt_path)
 
-    def load_model(self):
+    def load_model(self, agent_model_path):
         """
         Load from a torch checkpoint to initialize the agent; the checkpoint may contain
         a snapshot of agent knowledge obtained as an output of self.save_model() evoked
         previously, or just pre-trained weights of the vision module only (likely generated
         as output of the vision module's training API)
         """
-        # Resolve path to checkpoint (Use vision cfg default if not provided)
-        ckpt_path = self.opts.load_checkpoint_path or self.vision.cfg.MODEL.WEIGHTS
+        # Resolve path to checkpoint
+        ckpt_path = agent_model_path
         if not os.path.isfile(ckpt_path):
             local_ckpt_path = self.path_manager.get_local_path(ckpt_path)
             assert os.path.isfile(local_ckpt_path), \
