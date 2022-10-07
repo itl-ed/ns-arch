@@ -132,7 +132,7 @@ if __name__ == "__main__":
             ind_map_c2o = { v: k for k, v in ind_map_o2c.items() }
 
             # Process with OwL-ViT to obtain boxes and embeddings for image patches
-            results, output, input_img = agent.vision.owlvit_process(
+            results, output, input_img, _ = agent.vision.owlvit_process(
                 image_path, label_texts=label_texts
             )
             patch_boxes = clip_boxes_to_image(
@@ -283,6 +283,11 @@ if __name__ == "__main__":
         pointers_att_exm[conc_ind] = (
             att_pos_exs[(conc, cls_conc_ind)], att_neg_exs[(conc, cls_conc_ind)]
         )
+
+    # Don't forget to register the "have" relation concept, though it is not neurally
+    # predicted at this point and no exemplars are to be added
+    conc_ind = agent.vision.add_concept("rel")
+    agent.lt_mem.lexicon.add(("have", "v"), (conc_ind, "rel"))
 
     # Finally add all the exemplars
     agent.lt_mem.exemplars.add_exs(

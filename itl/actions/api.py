@@ -56,12 +56,12 @@ class AgentCompositeActions:
 
                 # Fetch current score for the asserted fact
                 if cat_type == "cls":
-                    f_vec = self.agent.vision.f_vecs[0][args[0]]
+                    f_vec = self.agent.vision.f_vecs[args[0]]
                 elif cat_type == "att":
-                    f_vec = self.agent.vision.f_vecs[1][args[0]]
+                    f_vec = self.agent.vision.f_vecs[args[0]]
                 else:
                     assert cat_type == "rel"
-                    f_vec = self.agent.vision.f_vecs[2][args[0]][args[1]]
+                    raise NotImplementedError   # Step back for relation prediction...
 
                 # Add new concept exemplars to memory, as feature vectors at the
                 # penultimate layer right before category prediction heads
@@ -69,17 +69,10 @@ class AgentCompositeActions:
                 pointers_exm = { conc_ind: exm_pointer }
 
                 self.agent.lt_mem.exemplars.add_exs(
-                    sources=[(self.agent.vision.last_raw, ex_bboxes)],
-                    f_vecs={ cat_type: f_vec[None,:].cpu().numpy() },
+                    sources=[(np.asarray(self.agent.vision.last_input), ex_bboxes)],
+                    f_vecs={ cat_type: f_vec[None,:] },
                     pointers_src={ cat_type: pointers_src },
                     pointers_exm={ cat_type: pointers_exm }
-                )
-
-                # Update the category code parameter in the vision model's predictor
-                # head using the new set of exemplars
-                imperfect_concept = (conc_ind, cat_type)
-                self.agent.vision.update_concept(
-                    imperfect_concept, self.agent.lt_mem.exemplars[imperfect_concept]
                 )
 
                 # This now shouldn't strike the agent as surprise, at least in this
@@ -140,7 +133,7 @@ class AgentCompositeActions:
         assert question is not None
 
         q_vars, _ = question
-        models_vl, _, _ = self.agent.theoretical.concl_vis_lang
+        models_vl, _ = self.agent.theoretical.concl_vis_lang
 
         # Ensure it has every ingredient available needed for making most informed judgements
         # on computing the best answer to the question. Specifically, scene graph outputs from
@@ -151,8 +144,8 @@ class AgentCompositeActions:
             search_specs = self._search_specs_from_kb(question, models_vl)
             if len(search_specs) > 0:
                 self.agent.vision.predict(
-                    self.agent.vision.last_input, exemplars=self.agent.lt_mem.exemplars,
-                    specs=search_specs
+                    None, label_exemplars=self.agent.lt_mem.exemplars,
+                    specs=search_specs, visualize=False, lexicon=self.agent.lt_mem.lexicon
                 )
 
                 #  ... and another round of sensemaking
@@ -160,6 +153,8 @@ class AgentCompositeActions:
                 self.agent.theoretical.sensemake_vis(self.agent.vision.scene, exported_kb)
                 self.agent.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
                 self.agent.theoretical.sensemake_vis_lang(dialogue_state)
+
+                models_vl, _ = self.agent.theoretical.concl_vis_lang
 
         # Compute raw answer candidates by appropriately querying current world models
         answers_raw, _ = models_vl.query(*question)

@@ -9,8 +9,8 @@ from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import logit, sigmoid, wrap_args
 
 
-P_C = 0.01          # Catchall hypothesis probability
-LOWER_THRES = 0.3   # Lower threshold for predicates that deserve closer look (see
+P_C = 0.05          # Catchall hypothesis probability
+LOWER_THRES = 0.5   # Lower threshold for predicates that deserve closer look (see
                     # ../theoretical_reasoning/api.py)
 
 class KnowledgeBase:
@@ -301,10 +301,9 @@ class KnowledgeBase:
                     ]
                     inference_prog.add_rule(Rule(
                         head=Literal(
-                            f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[ft_lifted],
-                            conds=rel_conds
+                            f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[ft_lifted]
                         ),
-                        ub=1
+                        body=rel_conds
                     ))
             add_assignment_choices(h_fn_terms, h_sat_conds)
             add_assignment_choices(b_fn_terms, b_sat_conds)

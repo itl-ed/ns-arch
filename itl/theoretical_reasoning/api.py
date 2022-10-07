@@ -29,7 +29,7 @@ TAB = "\t"              # For use in format strings
 
 EPS = 1e-10             # Value used for numerical stabilization
 U_IN_PR = 1.0           # How much the agent values information provided by the user
-SCORE_THRES = 0.75      # Only consider recognised categories with category score higher
+SCORE_THRES = 0.5      # Only consider recognised categories with category score higher
                         # than this value, unless focused attention warranted by KB
 LOWER_THRES = 0.3       # Lower threshold for predicates that deserve closer look
 
@@ -116,14 +116,10 @@ class TheoreticalReasonerModule:
 
         # Solve with clingo to find the best models of the program
         prog = pprog + inference_prog
-        if self.concl_vis is not None:
-            _, memoized_v, _ = self.concl_vis
-        else:
-            memoized_v = None
-        models_v, memoized_v = prog.solve(provided_mem=memoized_v)
+        models_v = prog.solve()
 
         # Store sensemaking result as module state
-        self.concl_vis = models_v, memoized_v, prog
+        self.concl_vis = models_v, prog
     
     def resolve_symbol_semantics(self, dialogue_state, lexicon):
         """
@@ -163,23 +159,24 @@ class TheoreticalReasonerModule:
 
         # Add priming effect by recognized visual concepts
         if self.concl_vis is not None:
-            models_v, _, _ = self.concl_vis
-            marginals_v, _ = models_v.compute_marginals()
+            models_v, _ = self.concl_vis
+            ## TODO: uncomment after updating compute_marginals
+            # marginals_v = models_v.compute_marginals()
 
-            if marginals_v is not None:
-                vis_concepts = defaultdict(float)
-                for atom, pr in marginals_v.items():
-                    is_cls = atom.name.startswith("cls")
-                    is_att = atom.name.startswith("att")
-                    is_rel = atom.name.startswith("rel")
-                    if is_cls or is_att or is_rel:
-                        # Collect 'priming intensity' by recognized concepts
-                        vis_concepts[atom.name] += pr
+            # if marginals_v is not None:
+            #     vis_concepts = defaultdict(float)
+            #     for atom, pr in marginals_v.items():
+            #         is_cls = atom.name.startswith("cls")
+            #         is_att = atom.name.startswith("att")
+            #         is_rel = atom.name.startswith("rel")
+            #         if is_cls or is_att or is_rel:
+            #             # Collect 'priming intensity' by recognized concepts
+            #             vis_concepts[atom.name] += pr[0]
 
-                for vc, score in vis_concepts.items():
-                    aprog.add_absolute_rule(Rule(
-                        head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
-                    ))
+            #     for vc, score in vis_concepts.items():
+            #         aprog.add_absolute_rule(Rule(
+            #             head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
+            #         ))
 
         # Understood dialogue record contents
         occurring_preds = set()
@@ -515,7 +512,7 @@ class TheoreticalReasonerModule:
                 manager
         """
         dprog = Program()
-        models_v, memoized_v, prog = self.concl_vis
+        models_v, prog = self.concl_vis
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking
@@ -536,9 +533,9 @@ class TheoreticalReasonerModule:
         # Finally, reasoning with all visual+language info
         if len(dprog) > 0:
             prog += dprog
-            models_vl, memoized_vl = prog.solve(provided_mem=memoized_v)
+            models_vl = prog.solve()
         else:
-            models_vl, memoized_vl = models_v, memoized_v
+            models_vl = models_v
 
         # Store sensemaking result as module state
-        self.concl_vis_lang = models_vl, memoized_vl, prog
+        self.concl_vis_lang = models_vl, prog

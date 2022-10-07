@@ -3,6 +3,7 @@ from itertools import product, chain, combinations
 from collections import defaultdict
 
 from ..rule import Rule
+from ..utils.polynomial import poly_ratio_at_limit
 
 
 def query(models, q_vars, event, per_assignment=True, per_partition=False):
@@ -88,7 +89,7 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
         }
 
     # For normalizing covered probabilitiy masses
-    models_pmass = models.compute_marginals()[1]
+    models_pmass = models.compute_Z()
 
     ## This method can provide answers to the question in two ways:
     #   1) Filtered models per assignment: Filter models so that we have model sets
@@ -133,11 +134,11 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
         per_assig = dict(filtered_models)
         per_assig = {
             assig: (
-                models,
-                sum([m.compute_marginals()[1] for m in models]) / models_pmass
-                    if models_pmass > 0 else 0.0
+                fms,
+                sum([poly_ratio_at_limit(m.compute_Z(), models_pmass) for m in fms])
+                    if models_pmass != {} else 0.0
             )
-            for assig, models in per_assig.items()
+            for assig, fms in per_assig.items()
         }
     else:
         per_assig = None

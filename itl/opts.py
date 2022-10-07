@@ -8,7 +8,7 @@ def parse_arguments():
     ## General agent-level options ##
     parser.add_argument("-dp", "--data_dir_path",
         type=str,
-        default="./datasets/visual_genome",
+        default="./datasets",
         help="Path to directory where data is downloaded and stored (Default: ./datasets)")
     parser.add_argument("-ap", "--agent_model_path",
         type=str,

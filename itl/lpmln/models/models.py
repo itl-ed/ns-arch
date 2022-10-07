@@ -3,6 +3,7 @@ from itertools import product
 from collections import defaultdict
 from functools import reduce
 
+from .unnorm_mass import compute_Z
 from .compute_marginals import compute_marginals
 from .filter import filter
 from .query import query
@@ -200,12 +201,17 @@ class Models:
 
         raise ValueError("Invalid Models instance")
 
-    def compute_marginals(self, norm=True):
+    def compute_Z(self):
         """
-        Compute and return marginals for atoms covered by this instance, total
-        probability mass covered, and the partition function Z
+        Compute and return total unnormalized probability mass covered by this instance
         """
-        return compute_marginals(self, norm)
+        return compute_Z(self)[1]
+
+    def compute_marginals(self):
+        """
+        Compute and return marginals for atoms covered by this instance
+        """
+        return compute_marginals(self)
 
     def filter(self, literals):
         """

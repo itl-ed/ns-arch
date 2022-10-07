@@ -157,27 +157,11 @@ class SimulatedTeacher:
             (obj, [self.metadata["classes"][ci] for ci in obj["classes"]])
             for obj in instance_parts
         ]
-        cheat_sheet = [
-            (
-                BoxMode.convert(
-                    np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
-                )[0],
-                classes[0].split(".")[0],
-                [
-                    self.metadata["attributes"][ai].split(".")[0] + \
-                        "/" + classes[0].split(".")[0]
-                    for ai in obj["attributes"]
-                ]
-            )
-            for obj, classes in instance_parts
-            if "bowl.n.01" in classes or "stem.n.03" in classes
-        ]
 
         return {
-            "v_usr_in": os.path.join(self.image_dir_prefix, img_f),
+            "v_usr_in": os.path.join(".", self.image_dir_prefix, img_f),
             "l_usr_in": "What is this?",
-            "pointing": { "this": [instance_bbox] },
-            "cheat_sheet": cheat_sheet
+            "pointing": { "this": [instance_bbox] }
         }
 
     def react(self, agent_reaction):

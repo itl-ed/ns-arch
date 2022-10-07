@@ -8,6 +8,7 @@ import readline
 import rlcompleter
 
 import torch
+import numpy as np
 from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
@@ -24,7 +25,7 @@ from .utils.completer import DatasetImgsCompleter
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
 SR_THRES = -math.log(0.5)    # Mismatch surprisal threshold
-U_IN_PR = 1.0                # How much the agent values information provided by the user
+U_IN_PR = 1.00               # How much the agent values information provided by the user
 EPS = 1e-10                  # Value used for numerical stabilization
 TAB = "\t"                   # For use in format strings
 
@@ -63,99 +64,44 @@ class ITLAgent:
         while True:
             self.loop()
 
-    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, cheat_sheet=None):
+    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None):
         """
         Single agent activity loop. Provide usr_in for programmatic execution; otherwise,
         prompt user input on command line REPL
         """
         self._vis_inp(usr_in=v_usr_in)
         self._lang_inp(usr_in=l_usr_in)
-        self._update_belief(pointing=pointing, cheat_sheet=cheat_sheet)
+        self._update_belief(pointing=pointing)
         act_out = self._act()
 
         return act_out
 
-    def test_binary(self, v_input, target_bbox, concepts, cheat_sheet=None):
+    def test_binary(self, v_input, target_bbox, concepts):
         """
         Surgically (programmatically) test the agent's performance with an exam question,
         without having to communicate through full 'natural interactions...
         """
-        # Run only the backbone to cache image feature maps
-        features = self.vision.extract_feature_map(v_input)
-
         # Vision module buffer cleanup
         self.vision.scene = {}
-        self.vision.f_vecs = ({}, {}, {}, {}, {}, features)
+        self.vision.f_vecs = {}
 
-        # Make prediction on the designated bbox
+        # First, ensemble prediction
+        self.vision.predict(
+            v_input, label_exemplars=self.lt_mem.exemplars,
+            visualize=False, lexicon=self.lt_mem.lexicon
+        )
+
+        # Make prediction on the designated bbox if needed
         bboxes = {
             "o0": {
                 "bbox": target_bbox,
-                "bbox_mode": BoxMode.XYXY_ABS,
-                "objectness_scores": None
+                "bbox_mode": BoxMode.XYXY_ABS
             }
         }
         self.vision.predict(
-            v_input, exemplars=self.lt_mem.exemplars, bboxes=bboxes
+            None, label_exemplars=self.lt_mem.exemplars,
+            bboxes=bboxes, visualize=False
         )
-
-        # Temporary injection of ground-truth object parts and their attributes
-        if cheat_sheet is not None and len(cheat_sheet) > 0:
-            ent_map = [
-                f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-            ]
-            bboxes = {}
-            for i, (bbox, _, _) in enumerate(cheat_sheet):
-                bboxes[ent_map[i]] = {
-                    "bbox": bbox,
-                    "bbox_mode": BoxMode.XYXY_ABS,
-                    "objectness_scores": None
-                }
-                self.lang.dialogue.referents["env"][ent_map[i]] = {
-                    "bbox": bbox,
-                    "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-                }
-                self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
-
-            # Incrementally predict on the designated bbox
-            self.vision.predict(
-                self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                bboxes=bboxes
-            )
-
-            # Ensure scores are high enough for appropriate classes, attributes
-            # and relations that should be positive, and low enough for ones 
-            # that should be negative
-            HIGH_SCORE = 0.95
-            for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-                ent_preds = self.vision.scene[ent_map[i]]
-                whole_preds = self.vision.scene["o0"]
-
-                # Object part class scores
-                gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-                for ci, score in enumerate(ent_preds["pred_classes"]):
-                    if ci == gt_c and score < HIGH_SCORE:
-                        ent_preds["pred_classes"][ci] = HIGH_SCORE
-                    if ci != gt_c and score > 1-HIGH_SCORE:
-                        ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
-
-                # Object part attribute scores
-                gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-                for ai, score in enumerate(ent_preds["pred_attributes"]):
-                    if ai in gt_as and score < HIGH_SCORE:
-                        ent_preds["pred_attributes"][ai] = HIGH_SCORE
-                    if ai not in gt_as and score > 1-HIGH_SCORE:
-                        ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
-
-                # Object part relation score w.r.t. o0
-                if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-                    whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-                if whole_preds["pred_relations"][ent_map[i]][1] > 1-HIGH_SCORE:
-                    whole_preds["pred_relations"][ent_map[i]][1] = 1-HIGH_SCORE
-                if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-                    ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
-                if ent_preds["pred_relations"]["o0"][1] < HIGH_SCORE:
-                    ent_preds["pred_relations"]["o0"][1] = HIGH_SCORE
 
         # Inform the language module of the visual context
         self.lang.situate(self.vision.last_input, self.vision.scene)
@@ -164,7 +110,7 @@ class ITLAgent:
         # Sensemaking from vision input only
         exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
         self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
-        models_v, _, _ = self.theoretical.concl_vis
+        models_v, _ = self.theoretical.concl_vis
 
         # "Question" for probing agent's performance
         q_vars = (("P", True),)
@@ -177,8 +123,8 @@ class ITLAgent:
             search_specs = self.comp_actions._search_specs_from_kb(question, models_v)
             if len(search_specs) > 0:
                 self.vision.predict(
-                    self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                    specs=search_specs
+                    None, label_exemplars=self.lt_mem.exemplars,
+                    specs=search_specs, visualize=False
                 )
 
             exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
@@ -256,20 +202,16 @@ class ITLAgent:
             with open(local_ckpt_path, "rb") as f:
                 ckpt = pickle.load(f)
 
-        if "vision" in ckpt:
-            # Likely a checkpoint saved with self.save_model(); first load the vision
-            # module
-            self.vision.load_model(ckpt["vision"])
-
-            # Fill in long-term memory components with loaded data
-            for mem_component, mem_data in ckpt["lt_mem"].items():
-                for component_prop, component_data in mem_data.items():
-                    component = getattr(self.lt_mem, mem_component)
-                    setattr(component, component_prop, component_data)
-        else:
-            # Likely a checkpoint only containing pre-trained vision model weights;
-            # pass the dict directly to self.vision.load_model()
-            self.vision.load_model(ckpt)
+        # Fill in module components with loaded data
+        for module_name, module_data in ckpt.items():
+            for module_component, component_data in module_data.items():
+                if isinstance(component_data, dict):
+                    for component_prop, prop_data in component_data.items():
+                        component = getattr(getattr(self, module_name), module_component)
+                        setattr(component, component_prop, prop_data)
+                else:
+                    module = getattr(self, module_name)
+                    setattr(module, module_component, component_data)
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
@@ -356,7 +298,7 @@ class ITLAgent:
                 else:
                     print(f"Sys> {e.args[0]}")
 
-    def _update_belief(self, pointing=None, cheat_sheet=None):
+    def _update_belief(self, pointing=None):
         """ Form beliefs based on visual and/or language input """
 
         if not (self.vision.new_input or self.lang.new_input):
@@ -367,7 +309,7 @@ class ITLAgent:
         # Lasting storage of pointing info
         if pointing is None:
             pointing = {}
-        
+
         # For showing visual UI on only the first time
         vis_ui_on = self.vis_ui_on
 
@@ -376,26 +318,20 @@ class ITLAgent:
 
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
-        vision_model_updated = False    # Whether learning happened at neural-level
-        kb_updated = False              # Whether learning happened at symbolic-level
+        xb_updated = False      # Whether learning happened at neural-level (in exemplar base)
+        kb_updated = False      # Whether learning happened at symbolic-level (in knowledge base)
         while True:
             ###################################################################
             ##                  Processing perceived inputs                  ##
             ###################################################################
 
-            if self.vision.new_input is not None or vision_model_updated:
-                # # Ground raw visual perception with scene graph generation module
-                # self.vision.predict(
-                #     self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                #     visualize=vis_ui_on
-                # )
-                # vis_ui_on = False
-                # We don't really need ensemble prediction for now, so let's just run
-                # the more lightweight self.vision.extract_feature_map() instead of
-                # full self.vision.predict()...
-                features = self.vision.extract_feature_map(self.vision.last_input)
-                self.vision.scene = {}
-                self.vision.f_vecs = ({}, {}, {}, {}, {}, features)
+            if self.vision.new_input is not None or xb_updated:
+                # Ground raw visual perception with scene graph generation module
+                self.vision.predict(
+                    self.vision.last_input, label_exemplars=self.lt_mem.exemplars,
+                    visualize=vis_ui_on, lexicon=self.lt_mem.lexicon
+                )
+                vis_ui_on = False
 
             if self.vision.new_input is not None:
                 # Inform the language module of the visual context
@@ -430,68 +366,9 @@ class ITLAgent:
 
                     # Incrementally predict on the designated bbox
                     self.vision.predict(
-                        self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                        bboxes=bboxes
+                        None, label_exemplars=self.lt_mem.exemplars,
+                        bboxes=bboxes, visualize=False
                     )
-                
-                # Temporary injection of ground-truth object parts and their attributes
-                if cheat_sheet is not None and len(cheat_sheet) > 0:
-                    ent_map = [
-                        f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-                    ]
-                    bboxes = {}
-                    for i, (bbox, _, _) in enumerate(cheat_sheet):
-                        bboxes[ent_map[i]] = {
-                            "bbox": bbox,
-                            "bbox_mode": BoxMode.XYXY_ABS,
-                            "objectness_scores": None
-                        }
-                        self.lang.dialogue.referents["env"][ent_map[i]] = {
-                            "bbox": bbox,
-                            "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-                        }
-                        self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
-
-                    # Incrementally predict on the designated bbox
-                    self.vision.predict(
-                        self.vision.last_input, exemplars=self.lt_mem.exemplars,
-                        bboxes=bboxes
-                    )
-
-                    # Ensure scores are high enough for appropriate classes, attributes
-                    # and relations that should be positive, and low enough for ones 
-                    # that should be negative
-                    HIGH_SCORE = 0.95
-                    for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-                        ent_preds = self.vision.scene[ent_map[i]]
-                        whole_preds = self.vision.scene["o0"]
-
-                        # Object part class scores
-                        gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-                        for ci, score in enumerate(ent_preds["pred_classes"]):
-                            if ci == gt_c and score < HIGH_SCORE:
-                                ent_preds["pred_classes"][ci] = HIGH_SCORE
-                            if ci != gt_c and score > 1-HIGH_SCORE:
-                                ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
-
-                        # Object part attribute scores
-                        gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-                        for ai, score in enumerate(ent_preds["pred_attributes"]):
-                            if ai in gt_as and score < HIGH_SCORE:
-                                ent_preds["pred_attributes"][ai] = HIGH_SCORE
-                            if ai not in gt_as and score > 1-HIGH_SCORE:
-                                ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
-
-                        # Object part relation score w.r.t. o0
-                        if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-                            whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-                        if whole_preds["pred_relations"][ent_map[i]][1] > 1-HIGH_SCORE:
-                            whole_preds["pred_relations"][ent_map[i]][1] = 1-HIGH_SCORE
-                        if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-                            ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
-                        if ent_preds["pred_relations"]["o0"][1] < HIGH_SCORE:
-                            ent_preds["pred_relations"]["o0"][1] = HIGH_SCORE
-                        
 
             ###################################################################
             ##       Sensemaking via synthesis of perception+knowledge       ##
@@ -499,7 +376,7 @@ class ITLAgent:
 
             dialogue_state = self.lang.dialogue.export_as_dict()
 
-            if self.vision.new_input is not None or vision_model_updated or kb_updated:
+            if self.vision.new_input is not None or xb_updated or kb_updated:
                 # Sensemaking from vision input only
                 exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
                 self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
@@ -519,7 +396,7 @@ class ITLAgent:
             ###################################################################
 
             # Resetting flags
-            vision_model_updated = False
+            xb_updated = False
             kb_updated = False
 
             # Process translated dialogue record to do the following:
@@ -546,7 +423,7 @@ class ITLAgent:
                                 continue
 
                             # Make a yes/no query to obtain the likelihood of content
-                            models_v, _, _ = self.theoretical.concl_vis
+                            models_v, _ = self.theoretical.concl_vis
                             q_response, _ = models_v.query(None, r)
                             ev_prob = q_response[()][1]
 
@@ -588,9 +465,6 @@ class ITLAgent:
 
                     # Acquire novel concept by updating lexicon (and vision.predicates)
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
-                    # self.vision.predicates[cat_type].append(
-                    #     f"{name}.{pos}.0{len(self.lt_mem.lexicon.s2d[(name, pos)])}"
-                    # )
 
                     ui = int(tok[0].strip("u"))
                     ri = int(tok[1].strip("r"))
@@ -608,29 +482,25 @@ class ITLAgent:
                         ]
 
                         if cat_type == "cls":
-                            f_vec = self.vision.f_vecs[0][args[0]]
+                            f_vec = self.vision.f_vecs[args[0]]
                         elif cat_type == "att":
-                            f_vec = self.vision.f_vecs[1][args[0]]
+                            f_vec = self.vision.f_vecs[args[0]]
                         else:
                             assert cat_type == "rel"
-                            f_vec = self.vision.f_vecs[2][args[0]][args[1]]
+                            raise NotImplementedError   # Step back for relation prediction...
                         
                         pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
                         pointers_exm = { concept_ind: ({0}, set()) }
 
                         self.lt_mem.exemplars.add_exs(
-                            sources=[(self.vision.last_raw, ex_bboxes)],
-                            f_vecs={ cat_type: f_vec[None,:].cpu().numpy() },
+                            sources=[(np.asarray(self.vision.last_input), ex_bboxes)],
+                            f_vecs={ cat_type: f_vec[None,:] },
                             pointers_src={ cat_type: pointers_src },
                             pointers_exm={ cat_type: pointers_exm }
                         )
 
-                        # Update the category code parameter in the vision model's predictor
-                        # head using the new set of exemplars
-                        self.vision.update_concept(
-                            novel_concept, self.lt_mem.exemplars[novel_concept], mix_ratio=1.0
-                        )
-                        vision_model_updated = True
+                        # Set flag that XB is updated
+                        xb_updated = True
 
                         # This now shouldn't strike the agent as surprise, at least in this
                         # loop (Ideally this doesn't need to be enforced this way, if the
@@ -643,7 +513,7 @@ class ITLAgent:
                     self.lang.unresolved_neologisms.add((sym, tok))
 
             # Terminate the loop when 'equilibrium' is reached
-            if not (vision_model_updated or kb_updated):
+            if not (xb_updated or kb_updated):
                 break
 
         # self.vision.reshow_pred()

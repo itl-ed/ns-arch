@@ -5,12 +5,22 @@ given bbox and visual search by concept exemplars). Implemented using publicly
 released model of OWL-ViT.
 """
 from PIL import Image
+from itertools import product
 
 import torch
+import numpy as np
+import torch.nn.functional as F
+from torchvision.ops import clip_boxes_to_image, nms, box_iou, box_area
 from transformers import OwlViTProcessor, OwlViTForObjectDetection
+from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput
+
+from .utils.visualize import visualize_sg_predictions
 
 
 class VisionModule:
+
+    K = 0               # Top-k detections to leave in ensemble prediction mode
+    NMS_THRES = 0.5     # IoU threshold for post-detection NMS
 
     def __init__(self, model_path):
         """
@@ -18,15 +28,16 @@ class VisionModule:
             opts: argparse.Namespace, from parse_argument()
         """
         self.scene = None
+        self.f_vecs = None
         self.last_input = None
-        self.last_raw = None
+        self.last_output = None
 
         # Inventory of distinct visual concepts that the module (and thus the agent
         # equipped with this module) is aware of, one per concept category. Right now
         # I cannot think of any specific type of information that has to be stored in
         # this module (exemplars are stored in long term memory), so let's just keep
         # only integer sizes of inventories for now...
-        self.inventories = { "cls": 0, "att": 0, "rel": 0 }
+        self.inventories = VisualConceptInventory()
 
         # Load a pre-trained OwL-ViT processor & model from path (huggingface hub
         # model id or local path) provided in opts
@@ -45,9 +56,6 @@ class VisionModule:
         Process image using OwL-ViT model, with label space defined by either
         label_texts or label_exemplars (but not both).
         """
-        # Must provide either set of label texts, or set of exemplars of concepts
-        assert label_texts is not None or label_exemplars is not None
-
         if isinstance(image, str):
             # Read image data from path
             image = Image.open(image)
@@ -59,30 +67,112 @@ class VisionModule:
             for k, v in input.data.items():
                 input.data[k] = v.to("cuda")
 
-        # Feed processed input to model to obtain output
-        output = self.model(**input)
+        if label_texts is not None:
+            # Feed processed input to model to obtain output
+            output = self.model(**input)
+        else:
+            assert label_exemplars is not None
+            # transformer's OwL-ViT implementation doesn't directly provide API for
+            # exemplar-based one-shot detection (we wouldn't provide raw image patches
+            # as exemplar after all though). Implement exemplar-based detection by
+            # combining & chaining appropriate calls to OwL-ViT component submodules,
+            # preparing appropriate label space from the exemplars.
+
+            # Extract per-token visual feature vectors
+            vision_outputs = self.model.owlvit.vision_model(
+                input.pixel_values, use_hidden_state=False
+            )
+            image_embeds = self.model.owlvit.vision_model.post_layernorm(vision_outputs[0])
+
+            # Resize class token
+            new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))
+            class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)
+
+            # Merge image embedding with class tokens
+            image_embeds = image_embeds[:, 1:, :] * class_token_out
+            image_embeds = self.model.layer_norm(image_embeds)
+
+            # Resize to [batch_size, num_patches, num_patches, hidden_size]
+            new_size = (
+                image_embeds.shape[0],
+                int(np.sqrt(image_embeds.shape[1])),
+                int(np.sqrt(image_embeds.shape[1])),
+                image_embeds.shape[-1],
+            )
+            image_embeds = image_embeds.reshape(new_size)
+
+            # Also need flattened version of image_embeds as input (B,N,N,D => B,N^2,D)
+            batch_size, num_patches, num_patches, hidden_dim = image_embeds.shape
+            image_embeds_flattened = torch.reshape(
+                image_embeds, (batch_size, num_patches * num_patches, hidden_dim)
+            )
+
+            # Prepare query embeddings from provided label exemplars; use mean prototype
+            # vectors as queries?
+            query_embeds = []; query_mask = []; label_concepts = []
+            for conc_ind, cat_type in label_exemplars.concepts_covered_gen():
+                # Track indices for each concept for future reference
+                label_concepts.append((conc_ind, cat_type))
+
+                # Compose query embeddings as mean prototypes
+                ex_vecs = label_exemplars[(conc_ind, cat_type)]
+                pos_exs = torch.tensor(ex_vecs["pos"], device=image_embeds.device)
+                neg_exs = torch.tensor(ex_vecs["neg"], device=image_embeds.device)
+                all_exs = torch.cat([pos_exs, neg_exs])
+
+                if len(pos_exs) > 0:
+                    pos_proto = pos_exs.mean(dim=0)
+                    query_mask.append(True)
+                else:
+                    pos_proto = torch.zeros_like(all_exs[0])
+                    query_mask.append(False)
+
+                if len(neg_exs) > 0:
+                    neg_proto = neg_exs.mean(dim=0)
+                    query_mask.append(True)
+                else:
+                    neg_proto = torch.zeros_like(all_exs[0])
+                    query_mask.append(False)
+
+                # Add to query embedding matrix, pos and neg
+                query_embeds += [pos_proto, neg_proto]
+
+            query_embeds = torch.stack(query_embeds)
+            query_embeds = query_embeds.reshape(batch_size, -1, query_embeds.shape[-1])
+            query_mask = torch.tensor(query_mask, device=image_embeds.device)
+
+            # Predict object classes [batch_size, num_patches, num_queries+1]
+            pred_logits, class_embeds = self.model.class_predictor(
+                image_embeds_flattened, query_embeds, query_mask
+            )
+
+            # Predict object boxes
+            pred_boxes = self.model.box_predictor(image_embeds_flattened, image_embeds)
+
+            output = OwlViTObjectDetectionOutput(
+                image_embeds=image_embeds,
+                text_embeds=query_embeds,
+                pred_boxes=pred_boxes,
+                logits=pred_logits,
+                class_embeds=class_embeds
+            )
 
         # Post-process model output into intelligible formats
         image_size = torch.Tensor([image.size[::-1]])
         results = self.post_process(outputs=output, target_sizes=image_size)
 
-        return results, output, image
+        # Clip boxes to image size
+        for res in results:
+            res["boxes"] = clip_boxes_to_image(
+                res["boxes"], (image.height, image.width)
+            )
 
-    def add_concept(self, cat_type):
-        """
-        Register a novel visual concept to the model, expanding the concept inventory of
-        corresponding category type (class/attribute/relation). Note that visual concepts
-        are not inseparably attached to some linguistic symbols; such connections are rather
-        incidental and should be established independently (consider synonyms, homonyms).
-        Plus, this should allow more flexibility for, say, multilingual agents, though there
-        is no plan to address that for now...
+        return results, output, image, label_texts or label_concepts
 
-        Returns the index of the newly added concept.
-        """
-        self.inventories[cat_type] += 1
-        return self.inventories[cat_type]
-
-    def predict(self, image, label_texts=None, label_exemplars=None, bboxes=None, specs=None):
+    def predict(
+        self, image, label_texts=None, label_exemplars=None,
+        bboxes=None, specs=None, visualize=True, lexicon=None
+    ):
         """
         Model inference in either one of three modes:
             1) full scene graph generation mode, where the module is only given an image
@@ -98,25 +188,340 @@ class VisionModule:
         """
         # Must provide either set of label texts, or set of exemplars of concepts
         assert label_texts is not None or label_exemplars is not None
-
-        # Prediction modes
         if bboxes is None and specs is None:
-            # Full (ensemble) prediction
-            results, output, input_img = self.owlvit_process(
-                image, label_texts=label_texts, label_exemplars=label_exemplars
-            )
-            self.last_input = input_img
+            assert image is not None    # Image must be provided for ensemble prediction
 
-            print(0)
+        with torch.no_grad():
+            # Prediction modes
+            if bboxes is None and specs is None:
+                # Full (ensemble) prediction
+                results, output, input_img, label_concepts = self.owlvit_process(
+                    image, label_texts=label_texts, label_exemplars=label_exemplars
+                )
+                self.last_input = input_img
+                self.last_output = (results, output, label_concepts)
 
-        else:
-            if bboxes is not None:
-                # Instance classification mode
-                print(0)
+                label_concepts_per_catType = {
+                    cat_type: {
+                        conc_ind: i
+                        for i, (conc_ind, this_cat_type) in enumerate(label_concepts)
+                        if this_cat_type==cat_type
+                    }
+                    for cat_type in ["cls", "att"]
+                }
+
+                patch_boxes = results[0]["boxes"]
+                patch_embs = output.class_embeds[0]
+
+                # They say we don't need NMS with OwL-ViT, but it turns out there are many
+                # duplicate detection boxes when ranked by objectness score. Maybe they meant
+                # NMS is not needed for training... Anyhow, here goes NMS
+                kept_indices = nms(patch_boxes, results[0]["scores"], self.NMS_THRES)
+
+                # Newly compose a scene graph with the output; filter patches to leave top-k
+                # detections
+                topk_inds = [int(i) for i in kept_indices][:self.K]
+                topk_detections = [
+                    {
+                        "bbox": patch_boxes[i].cpu().numpy(),
+                        "score": float(results[0]["scores"][i]),
+                        "conc_pos_logits": output.logits[0,i,::2].cpu().numpy(),
+                        "conc_neg_logits": output.logits[0,i,1::2].cpu().numpy()
+                    }
+                    for i in topk_inds
+                ]
+                self.scene = {
+                    f"o{i}": {
+                        "pred_boxes": det_data["bbox"],
+                        "pred_objectness": det_data["score"],
+                        "pred_classes": np.zeros(self.inventories.cls),
+                        "pred_attributes": np.zeros(self.inventories.att),
+                        "pred_relations": {
+                            f"o{j}": np.zeros(self.inventories.rel)
+                            for j in range(len(topk_detections)) if i != j
+                        }
+                    }
+                    for i, det_data in enumerate(topk_detections)
+                }
+                self.f_vecs = {
+                    oi: patch_embs[i].cpu().numpy()
+                    for oi, i in zip(self.scene, topk_inds)
+                }
+
+                # Fill in per-concept scores from logits
+                for (oi, obj), det_data in zip(self.scene.items(), topk_detections):
+                    # Class concepts
+                    cls_logits = {
+                        conc_ind: (
+                            det_data["conc_pos_logits"][i],
+                            det_data["conc_neg_logits"][i]
+                        )
+                        for conc_ind, i in label_concepts_per_catType["cls"].items()
+                    }
+                    for conc_ind, (p_logit, n_logit) in cls_logits.items():
+                        score = F.softmax(torch.tensor([p_logit, n_logit]))[0].item()
+                        obj["pred_classes"][conc_ind] = score
+
+                    # Attribute concepts
+                    att_logits = {
+                        conc_ind: (
+                            det_data["conc_pos_logits"][i],
+                            det_data["conc_neg_logits"][i]
+                        )
+                        for conc_ind, i in label_concepts_per_catType["att"].items()
+                    }
+                    for conc_ind, (p_logit, n_logit) in att_logits.items():
+                        score = F.softmax(torch.tensor([p_logit, n_logit]))[0].item()
+                        obj["pred_attributes"][conc_ind] = score
+
+                    # Relation concepts (Only for "have" concept, manually determined
+                    # by the geomtrics of the bounding boxes; note that this is quite
+                    # an abstraction. In distant future, relation concepts may also be
+                    # open-vocabulary and neurally predicted...)
+                    for oj, det_data2 in zip(self.scene, topk_detections):
+                        if oi==oj: continue     # Dismiss self-self object pairs
+                        x1_int, y1_int, x2_int, y2_int = _box_intersection(
+                            det_data["bbox"], det_data2["bbox"]
+                        )
+
+                        bbox_intersection = (x2_int - x1_int) * (y2_int - y1_int) \
+                            if x2_int > x1_int and y2_int > y1_int else 0.0
+                        bbox2_A = (det_data2["bbox"][2] - det_data2["bbox"][0]) * \
+                            (det_data2["bbox"][3] - det_data2["bbox"][1])
+
+                        obj["pred_relations"][oj][0] = bbox_intersection / bbox2_A
+
             else:
-                assert specs is not None
-                # Instance search mode
-                print(0)
+                # Incremental scene graph expansion
+                results, output, label_concepts = self.last_output
+
+                label_concepts_per_catType = {
+                    cat_type: {
+                        conc_ind: i
+                        for i, (conc_ind, this_cat_type) in enumerate(label_concepts)
+                        if this_cat_type==cat_type
+                    }
+                    for cat_type in ["cls", "att"]
+                }
+
+                if bboxes is not None:
+                    # Instance classification mode
+
+                    # Find existing detections with highest overlap (IoU) w.r.t. the
+                    # provided bounding boxes, disregarding their objectness scores
+                    all_bboxes = torch.stack([
+                        torch.tensor(obj["bbox"]) for obj in bboxes.values()
+                    ]).to(device=results[0]["boxes"].device)
+                    ious = box_iou(all_bboxes, results[0]["boxes"])
+
+                    best_indices = ious.max(dim=1).indices
+
+                else:
+                    assert specs is not None
+                    # Instance search mode
+
+                    # Mapping between existing entity IDs and their numeric indexing
+                    exs_idx_map = { i: ent for i, ent in enumerate(self.scene) }
+                    exs_idx_map_inv = { ent: i for i, ent in enumerate(self.scene) }
+
+                    # Cast search specs into appropriate testing criteria and find the
+                    # best matching image patches
+                    best_indices = []
+                    for s_vars, dscr in specs.values():
+                        # Per-candidate "compatibility scores" for each search spec, to be
+                        # aggregated at the end
+                        patch_compatibilities = []
+
+                        for d_lit in dscr:
+                            cat_type, conc_ind = d_lit.name.split("_")
+                            conc_ind = int(conc_ind)
+
+                            if cat_type == "cls" or cat_type == "att":
+                                # For now we will only consider cases where ensemble prediction
+                                # has been made with all known concepts as query labels already,
+                                # and additional concept tests are not needed. This may have to
+                                # be relaxed later for cases when inventories of visual concepts
+                                # grow too large and some sort of restriction of query label space
+                                # has to happen (i.e. don't consider parts, rare concepts, etc.).
+                                assert conc_ind in label_concepts_per_catType[cat_type]
+
+                                query_ind = label_concepts_per_catType[cat_type][conc_ind]
+
+                                conc_pos_logits = output.logits[0,:,::2][:,query_ind]
+                                conc_neg_logits = output.logits[0,:,1::2][:,query_ind]
+
+                                comp_scores = torch.stack([conc_pos_logits, conc_neg_logits])
+                                comp_scores = F.softmax(comp_scores, dim=0)[0]
+                            else:
+                                # Cannot process relations other than "have" for now...
+                                assert cat_type == "rel" and conc_ind == 0
+
+                                # Cannot process search specs with more than one variables for
+                                # now (not planning to address that for a good while!)
+                                assert len(s_vars) == 1
+
+                                # Handles to literal args; either search target variable or
+                                # previously identified entity
+                                arg_handles = [
+                                    ("v", s_vars.index(a[0]))
+                                        if a[0] in s_vars
+                                        else ("e", exs_idx_map_inv[a[0]])
+                                    for a in d_lit.args
+                                ]
+
+                                # Bounding boxes for all candidates
+                                cand_bboxes = results[0]["boxes"]
+                                cand_bboxes_A = box_area(cand_bboxes)
+
+                                # Fetch bbox of reference entity, against which bbox area
+                                # ratios will be calculated among candidates
+                                reference_ent = [
+                                    arg_ind for arg_type, arg_ind in arg_handles
+                                    if arg_type=="e"
+                                ][0]
+                                reference_ent = exs_idx_map[reference_ent]
+                                reference_bbox = self.scene[reference_ent]["pred_boxes"]
+                                reference_bbox = torch.tensor(
+                                    reference_bbox, device=cand_bboxes.device
+                                )
+
+                                # Compute IoUs between the reference box and all patches
+                                x1_ints = torch.max(cand_bboxes[:,0], reference_bbox[0])
+                                y1_ints = torch.max(cand_bboxes[:,1], reference_bbox[1])
+                                x2_ints = torch.min(cand_bboxes[:,2], reference_bbox[2])
+                                y2_ints = torch.min(cand_bboxes[:,3], reference_bbox[3])
+                                cand_intersections = torch.stack([
+                                    x1_ints, y1_ints, x2_ints, y2_ints
+                                ], dim=-1)
+                                ints_invalid = torch.logical_or(
+                                    x1_ints > x2_ints, y1_ints > y2_ints
+                                )
+
+                                cand_intersections_A = box_area(cand_intersections)
+                                cand_intersections_A[ints_invalid] = 0.0
+
+                                comp_scores = cand_intersections_A / cand_bboxes_A
+
+                            # Collect compatibility scores obtained
+                            patch_compatibilities.append(comp_scores)
+
+                        # Aggregate compatibility scores as product across search specs
+                        patch_compatibilities = torch.stack(patch_compatibilities).prod(dim=0)
+
+                        # Append best candidate for this search spec
+                        best_indices.append(patch_compatibilities.max(dim=0).indices.item())
+
+                # Incrementally update the existing scene graph with the output with the
+                # detections best complying with the conditions provided
+                best_detections = [
+                    {
+                        "bbox": results[0]["boxes"][i].cpu().numpy(),
+                        "score": float(results[0]["scores"][i]),
+                        "conc_pos_logits": output.logits[0,i,::2].cpu().numpy(),
+                        "conc_neg_logits": output.logits[0,i,1::2].cpu().numpy()
+                    }
+                    for i in best_indices
+                ]
+
+                existing_objs = list(self.scene)
+                if bboxes is not None:
+                    new_objs = list(bboxes)
+                else:
+                    new_objs = sum(list(specs), ())
+
+                for oi, oj in product(existing_objs, new_objs):
+                    # Add new relation score slots for existing objects
+                    self.scene[oi]["pred_relations"][oj] = np.zeros(self.inventories.rel)
+
+                for oi, det_data in zip(new_objs, best_detections):
+                    # Register new objects into the existing scene
+                    self.scene[oi] = {
+                        "pred_boxes": det_data["bbox"],
+                        "pred_objectness": det_data["score"],
+                        "pred_classes": np.zeros(self.inventories.cls),
+                        "pred_attributes": np.zeros(self.inventories.att),
+                        "pred_relations": {
+                            **{
+                                oj: np.zeros(self.inventories.rel)
+                                for oj in existing_objs
+                            },
+                            **{
+                                oj: np.zeros(self.inventories.rel)
+                                for oj in new_objs if oi != oj
+                            }
+                        }
+                    }
+                    obj = self.scene[oi]
+
+                    # Class concepts
+                    cls_logits = {
+                        conc_ind: (
+                            det_data["conc_pos_logits"][i],
+                            det_data["conc_neg_logits"][i]
+                        )
+                        for conc_ind, i in label_concepts_per_catType["cls"].items()
+                    }
+                    for conc_ind, (p_logit, n_logit) in cls_logits.items():
+                        score = F.softmax(torch.tensor([p_logit, n_logit]))[0].item()
+                        obj["pred_classes"][conc_ind] = score
+
+                    # Attribute concepts
+                    att_logits = {
+                        conc_ind: (
+                            det_data["conc_pos_logits"][i],
+                            det_data["conc_neg_logits"][i]
+                        )
+                        for conc_ind, i in label_concepts_per_catType["att"].items()
+                    }
+                    for conc_ind, (p_logit, n_logit) in att_logits.items():
+                        score = F.softmax(torch.tensor([p_logit, n_logit]))[0].item()
+                        obj["pred_attributes"][conc_ind] = score
+
+                    # Relation concepts (Within new detections)
+                    for oj, det_data2 in zip(new_objs, best_detections):
+                        if oi==oj: continue     # Dismiss self-self object pairs
+                        x1_int, y1_int, x2_int, y2_int = _box_intersection(
+                            det_data["bbox"], det_data2["bbox"]
+                        )
+
+                        bbox_intersection = (x2_int - x1_int) * (y2_int - y1_int) \
+                            if x2_int > x1_int and y2_int > y1_int else 0.0
+                        bbox2_A = (det_data2["bbox"][2] - det_data2["bbox"][0]) * \
+                            (det_data2["bbox"][3] - det_data2["bbox"][1])
+
+                        obj["pred_relations"][oj][0] = bbox_intersection / bbox2_A
+                    
+                    # Relation concepts (Between existing detections)
+                    for oj in existing_objs:
+                        oj_bbox = self.scene[oj]["pred_boxes"]
+                        x1_int, y1_int, x2_int, y2_int = _box_intersection(
+                            det_data["bbox"], oj_bbox
+                        )
+
+                        bbox_intersection = (x2_int - x1_int) * (y2_int - y1_int) \
+                            if x2_int > x1_int and y2_int > y1_int else 0.0
+                        bbox1_A = (det_data["bbox"][2] - det_data["bbox"][0]) * \
+                            (det_data["bbox"][3] - det_data["bbox"][1])
+                        bbox2_A = (oj_bbox[2] - oj_bbox[0]) * (oj_bbox[3] - oj_bbox[1])
+
+                        obj["pred_relations"][oj][0] = bbox_intersection / bbox2_A
+                        self.scene[oj]["pred_relations"][oi][0] = bbox_intersection / bbox1_A
+
+                self.f_vecs.update({
+                    oi: output.class_embeds[0][i].cpu().numpy()
+                    for oi, i in zip(new_objs, best_indices)
+                })
+
+        if visualize:
+            if lexicon is not None:
+                lexicon = {
+                    cat_type: {
+                        ci: lexicon.d2s[(ci, cat_type)][0][0].split("/")[0]
+                        for ci in range(getattr(self.inventories, cat_type))
+                    }
+                    for cat_type in ["cls", "att"]
+                }
+            self.summ = visualize_sg_predictions(self.last_input, self.scene, lexicon)
 
     def post_process(self, outputs, target_sizes):
         """
@@ -146,6 +551,26 @@ class VisionModule:
         results = [{"scores": s, "labels": l, "boxes": b} for s, l, b in zip(scores, labels, boxes)]
 
         return results
+    
+    def add_concept(self, cat_type):
+        """
+        Register a novel visual concept to the model, expanding the concept inventory of
+        corresponding category type (class/attribute/relation). Note that visual concepts
+        are not inseparably attached to some linguistic symbols; such connections are rather
+        incidental and should be established independently (consider synonyms, homonyms).
+        Plus, this should allow more flexibility for, say, multilingual agents, though there
+        is no plan to address that for now...
+
+        Returns the index of the newly added concept.
+        """
+        C = getattr(self.inventories, cat_type)
+        setattr(self.inventories, cat_type, C+1)
+        return C
+
+
+class VisualConceptInventory:
+    def __init__(self):
+        self.cls = self.att = self.rel = 0
 
 
 def _center_to_corners_format(x):
@@ -155,3 +580,12 @@ def _center_to_corners_format(x):
     x_center, y_center, width, height = x.unbind(-1)
     boxes = [(x_center - 0.5 * width), (y_center - 0.5 * height), (x_center + 0.5 * width), (y_center + 0.5 * height)]
     return torch.stack(boxes, dim=-1)
+
+def _box_intersection(box1, box2):
+    """ Helper method for obtaining intersection of two boxes (xyxy format) """
+    x1_int = max(box1[0], box2[0])
+    y1_int = max(box1[1], box2[1])
+    x2_int = min(box1[2], box2[2])
+    y2_int = min(box1[3], box2[3])
+
+    return x1_int, y1_int, x2_int, y2_int
