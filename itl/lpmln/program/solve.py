@@ -96,81 +96,76 @@ def recursive_solve(prog, topk_ratio, scale_prec):
             for gbls, bl in zip(gr_body_insts, rule.body)
         ]
 
-        # Check whether any grounding of this rule would turn out to be never
-        # satisfiable because there exists ungroundable positive body atom; in
-        # such cases, unsat will never fire for this rule, and we can dismiss
-        # this rule altogether without consequences on weight sums
-        ungroundable_positive_body_lits = [
-            gbls for gbls, bl in zip(gr_body_insts, rule.body)
-            if len(gbls)==0 and bl.naf==False
-        ]
-        if len(ungroundable_positive_body_lits) > 0: continue
+        # Possible mappings from variables to constants worth considering
+        if len(gr_head_insts+gr_body_insts) > 0:
+            possible_substs = set.union(*[
+                set.union(*[set(gl[1]) for gl in gls]) if len(gls)>0 else set()
+                for gls in gr_head_insts+gr_body_insts
+            ])          # All var-cons pair witnessed
+            possible_substs = {
+                t1_1: {t2_2 for t1_2, t2_2 in possible_substs if t1_1==t1_2}
+                for t1_1, _ in possible_substs
+            }           # Collect by variable
+            possible_substs = [
+                # t1!=t2 ensures t1 is a variable
+                {t1: t2 for t1, t2 in zip(possible_substs, cs) if t1!=t2}
+                for cs in product(*possible_substs.values())
+            ]           # Flatten products into list of all possible groundings
+        else:
+            possible_substs = []
         
-        # Now get rid of all ungroundable negative body atoms from the body,
-        # as they will be trivially checked off in all answer sets
-        without_ungroundable_negative_body_lits = [
-            gbls for gbls, bl in zip(gr_body_insts, rule.body)
-            if bl.naf==False or (len(gbls)>0 and bl.naf==True)
-        ]
+        for subst in possible_substs:
+            # For each possible grounding of this rule
+            subst = { (v, True): (c, False) for v, c in subst.items() }
+            gr_rule = rule.substitute(terms=subst)
 
-        # If rule body becomes empty after removing all ungroundable negative
-        # body atoms, and there doesn't exist any groundable rule head atom,
-        # this rule will be always violated (i.e. unsat will always fire) and
-        # can be dismissed as well, but after harvesting weight from the unsat
-        groundable_positive_head_lits = [
-            ghls for ghls, hl in zip(gr_head_insts, rule.head)
-            if len(ghls)>0 and hl.naf==False
-        ]
-        body_always_sat = len(without_ungroundable_negative_body_lits) == 0
-        head_always_unsat = len(groundable_positive_head_lits) == 0
-        if body_always_sat and head_always_unsat:
-            continue
+            gr_head_pos = [ghl for ghl in gr_rule.head if ghl.naf==False]
+            gr_body_pos = [gbl for gbl in gr_rule.body if gbl.naf==False]
+            gr_body_neg = [gbl for gbl in gr_rule.body if gbl.naf==True]
 
-        # Add all grounded instances of rules that successfully reached here
-        # without getting dismissed (unsat weight harvested or not)
-        gr_head_insts = list(product(*groundable_positive_head_lits))
-        gr_body_insts = list(product(*without_ungroundable_negative_body_lits))
-        assert len(gr_head_insts) > 0 and len(gr_body_insts) > 0
-
-        gr_rule_insts_by_body = [
-            [
-                # 2) Then check for any unifiable rule head+body combinations
-                (ghs, gbs) for ghs in gr_head_insts
-                if _arg_map_unifiable(ghs+gbs)
-            ]
-            # 1) First collect by rule body; non-unifiable bodies can be dismissed
-            for gbs in gr_body_insts if _arg_map_unifiable(gbs)
-        ]
-        for insts_per_body in gr_rule_insts_by_body:
-            if len(insts_per_body) == 0:
-                # Body groundable but no unifiable head groundings that would prevent
-                # unsat firing; harvest weight and don't add to grounded_rules
+            # Check whether this grounded rule would turn out to be never satisfiable
+            # because there exists ungroundable positive body atom; in such cases,
+            # unsat will never fire, and we can dismiss the rule
+            if any(gbl not in atoms_map for gbl in gr_body_pos):
                 continue
-            else:
-                # Both head and body groundable, add to grounded_rules
-                grounded_rules |= {
-                    (
-                        Rule(
-                            head=[gh for gh, _ in ghs],
-                            body=[gb for gb, _ in gbs]
-                        ),
-                        r_pr,
-                        ri
-                    )
-                    for ghs, gbs in insts_per_body
-                }
+
+            # Negative rule body after dismissing ungroundable atoms; ungroundable
+            # atoms in negative body can be ignored as they are trivially satisfied
+            # (always reduced as all models will not have occurrence of the atom)
+            gr_body_neg_filtered = [
+                gbl for gbl in gr_body_neg if gbl.as_atom() in atoms_map
+            ]
+            gr_body_filtered = gr_body_pos + gr_body_neg_filtered
+
+            # If rule body becomes empty after the filtering of ungroundable body atoms
+            # in gr_body_neg, and rule head atom is not groundable, this grounded rule
+            # will be always violated; in such cases will always fire, and we can dismiss
+            # the rule
+            body_always_sat = len(gr_body_filtered) == 0
+            head_always_unsat = not any(ghl in atoms_map for ghl in gr_head_pos)
+            if body_always_sat and head_always_unsat:
+                continue
+            
+            # Add this grounded rule to the list with r_pr and index
+            gr_rule = Rule(head=gr_rule.head, body=gr_body_filtered)
+            grounded_rules.add((gr_rule, r_pr, ri))
 
     for gr_rule, r_pr, ri in grounded_rules:
         if len(gr_rule.head) > 0:
-            for gh in gr_rule.head:
-                gh_i = atoms_map[gh.as_atom()]
-                grounded_rules_by_head[gh_i].add((gr_rule, r_pr, ri))
+            for ghl in gr_rule.head:
+                if ghl.as_atom() not in atoms_map:
+                    aux_i += 1
+                    atoms_map[ghl.as_atom()] = aux_i
+                    atoms_inv_map[aux_i] = ghl.as_atom()
 
-                dep_graph.add_node(gh_i)
-                for gb in gr_rule.body:
-                    gb_i = atoms_map[gb.as_atom()]
-                    dep_graph.add_node(gb_i)
-                    dep_graph.add_edge(gb_i, gh_i)
+                ghl_i = atoms_map[ghl.as_atom()]
+                grounded_rules_by_head[ghl_i].add((gr_rule, r_pr, ri))
+
+                dep_graph.add_node(ghl_i)
+                for gbl in gr_rule.body:
+                    gbl_i = atoms_map[gbl.as_atom()]
+                    dep_graph.add_node(gbl_i)
+                    dep_graph.add_edge(gbl_i, ghl_i)
         else:
             # Integrity constraint; add rule-specific auxiliary atom
             aux_i += 1
@@ -180,11 +175,11 @@ def recursive_solve(prog, topk_ratio, scale_prec):
             atoms_map[aux_lit] = aux_i
             atoms_inv_map[aux_i] = aux_lit
 
-            for gb in gr_rule.body:
-                gb_i = atoms_map[gb.as_atom()]
-                dep_graph.add_node(gb_i)
+            for gbl in gr_rule.body:
+                gbl_i = atoms_map[gbl.as_atom()]
+                dep_graph.add_node(gbl_i)
                 dep_graph.add_node(aux_i)
-                dep_graph.add_edge(gb_i, aux_i)
+                dep_graph.add_edge(gbl_i, aux_i)
 
     grounded_rules = FrozenMultiset([(gr_rule, r_pr) for gr_rule, r_pr, _ in grounded_rules])
 
@@ -478,20 +473,6 @@ class _Observer:
         self.rules = []
     def rule(self, choice, head, body):
         self.rules.append((head, body, choice))
-
-
-def _arg_map_unifiable(g_lits):
-    """ Test if all argument mappings are unifiable """
-    arg_maps = sum([map for _, map in g_lits], ())
-    mapping = {}
-    for ra, ma in arg_maps:
-        if ra in mapping:
-            if mapping[ra] != ma:
-                return False
-        else:
-            mapping[ra] = ma
-
-    return True
 
 
 def _sum_weights(w1, w2):

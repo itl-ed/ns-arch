@@ -5,6 +5,7 @@ to be registered to an ITLAgent instance provided as __init__ arg first (thus
 forming circular reference), and later evoked by plans fetched from the practical
 reasoning module.
 """
+import random
 from functools import reduce
 from collections import defaultdict
 
@@ -175,7 +176,10 @@ class AgentCompositeActions:
 
         # Pick out an answer to deliver; maximum confidence
         if len(answers_raw) > 0:
-            answer_selected = max(answers_raw, key=lambda a: answers_raw[a][1])
+            max_score = max(s[1] for s in answers_raw.values())
+            answer_selected = random.choice([
+                a for (a, (_, s)) in answers_raw.items() if s == max_score
+            ])
             _, ev_prob = answers_raw[answer_selected]
         else:
             answer_selected = (None,) * len(q_vars)

@@ -14,7 +14,7 @@ from ..utils import logit
 
 LARGE = 2e1           # Sufficiently large logit to use in place of, say, float('inf')
 SCALE_PREC = 3e2      # For preserving some float weight precision
-TOPK_RATIO = 0.5      # Percentage of answer sets to cover, by probability mass
+TOPK_RATIO = 0.75     # Percentage of answer sets to cover, by probability mass
 
 class Program:
     """ Probabilistic ASP program, implemented as a list of weighted ASP rules. """
