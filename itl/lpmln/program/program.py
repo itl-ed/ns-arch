@@ -106,9 +106,7 @@ class Program:
 
     def solve(self, topk_ratio=TOPK_RATIO):
         """ Wraps around recursive_solve, and exposed as class instance method """
-        return recursive_solve(
-            self, topk_ratio=topk_ratio, scale_prec=SCALE_PREC
-        )
+        return recursive_solve(self, scale_prec=SCALE_PREC)
 
     def optimize(self, statements):
         """
@@ -122,9 +120,9 @@ class Program:
         """
         return optimize(self, statements)
         
-    def reduce(self, pos_atoms, neg_atoms):
+    def reduce(self, atoms):
         """ Return the program obtained by reducing self with given values of atoms """
-        return reduce_program(self, pos_atoms, neg_atoms)
+        return reduce_program(self, atoms)
 
     @staticmethod
     def split(comp, atoms_map, grounded_rules_rel):

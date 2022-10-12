@@ -114,7 +114,7 @@ class ITLAgent:
 
         # "Question" for probing agent's performance
         q_vars = (("P", True),)
-        q_rules = [Rule(head=Literal("*_?", wrap_args("P", "o0")))]
+        q_rules = frozenset([Rule(head=Literal("*_?", wrap_args("P", "o0")))])
         question = (q_vars, q_rules)
 
         # Parts taken from self.comp_actions.prepare_answer_Q(), excluding processing

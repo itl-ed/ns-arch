@@ -1,8 +1,6 @@
 """
 Miscellaneous utility methods that don't classify into other files in utils
 """
-import re
-
 import numpy as np
 
 
@@ -49,3 +47,18 @@ def sigmoid(l):
         return 0
     else:
         return float(1 / (1 + np.exp(-l)))
+
+def cacheable(fn):
+    """ Class method decorator that caches output values by input params """
+    fn_name = fn.__name__
+
+    def wrapper(*args, **kwargs):
+        instance = args[0]
+        if args[1:] in instance.cache[fn_name]:
+            return instance.cache[fn_name][args[1:]]
+        else:
+            result = fn(*args, **kwargs)
+            instance.cache[fn_name][args[1:]] = result
+            return result
+
+    return wrapper

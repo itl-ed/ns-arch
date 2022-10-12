@@ -161,13 +161,6 @@ class AgentCompositeActions:
         answers_raw, _ = models_vl.query(*question)
 
         if q_vars is not None:
-            # (Temporary) For now, let's limit our answer to "what is X" questions to nouns:
-            # i.e. object class categories...
-            answers_raw = {
-                ans: val for ans, val in answers_raw.items()
-                if any(not is_pred or a.startswith("cls") for a, (_, is_pred) in zip(ans, q_vars))
-            }
-
             # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
             # elegant way in the future...
             for ans in list(answers_raw.keys()):
@@ -384,7 +377,7 @@ class AgentCompositeActions:
                 # targets; if so, disregard this one
                 check_result, _ = ref_models.query(
                     tuple((v, False) for v in search_vars),
-                    [Rule(head=l) for l in lits]
+                    frozenset([Rule(head=l) for l in lits])
                 )
                 if len(check_result) > 0:
                     continue

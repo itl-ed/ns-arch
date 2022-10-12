@@ -299,12 +299,14 @@ class KnowledgeBase:
                         cl for cl in sat_conds
                         if ft_lifted in cl.args or any(fa in cl.args for fa in fn_args)
                     ]
-                    inference_prog.add_rule(Rule(
-                        head=Literal(
-                            f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[ft_lifted]
-                        ),
-                        body=rel_conds
-                    ))
+                    inference_prog.add_absolute_rule(
+                        Rule(
+                            head=Literal(
+                                f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[ft_lifted]
+                            ),
+                            body=rel_conds
+                        )
+                    )
             add_assignment_choices(h_fn_terms, h_sat_conds)
             add_assignment_choices(b_fn_terms, b_sat_conds)
 

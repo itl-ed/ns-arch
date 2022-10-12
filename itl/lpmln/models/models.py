@@ -4,10 +4,11 @@ from collections import defaultdict
 from functools import reduce
 
 from .unnorm_mass import compute_Z
-from .compute_marginals import compute_marginals
-from .filter import filter
+from .filter import filter_models
 from .query import query
 from ..literal import Literal
+from ..polynomial import Polynomial
+from ..utils import cacheable
 
 
 class Models:
@@ -21,26 +22,20 @@ class Models:
     def __init__(self, factors=None, outcomes=None):
         assert not ((factors is not None) and (outcomes is not None)), \
             "Do not provide both factors & outcomes as arg"
-
         if factors is not None:
-            # Can flatten factors that are factored Models themselves
-            fm_factors = [
-                f for f in factors
-                if isinstance(f, Models) and hasattr(f, "factors")
-            ]
+            # Can flatten factors that are themselves single-factor Models instances
+            while any(_is_single_factor_models(f) for f in factors):
+                factors_flattened = []
+                for f in factors:
+                    if _is_single_factor_models(f):
+                        factors_flattened.append(f.factors[0])
+                    else:
+                        factors_flattened.append(f)
+                factors = factors_flattened
 
-            if len(fm_factors) > 1:
-                flattened = sum([f.factors for f in fm_factors], [])
-                non_fm_factors = [
-                    f for f in factors
-                    if not (isinstance(f, Models) and hasattr(f, "factors"))
-                ]
-
-                factors = flattened + non_fm_factors
-            
             if len(factors) > 1:
-                # Aggregate literals; probabilities are summed in logit-space and then
-                # sigmoid-ed back to probability space
+                # Aggregate literal factors with same head; weights are summed in
+                # log-space
                 lit_factors = [
                     f for f in factors
                     if type(f) == tuple and isinstance(f[0], Literal)
@@ -50,46 +45,49 @@ class Models:
                     if not (type(f) == tuple and isinstance(f[0], Literal))
                 ]
 
-                lits_agg = defaultdict(lambda: (0, None))
+                lits_agg = defaultdict(lambda: (Polynomial(float_val=1.0), None))
                 for lit, w, coll in lit_factors:
-                    w_agg = _sum_weights(lits_agg[lit][0], w)
+                    if w is not None:
+                        # Non-absolute (incidental) rule weight
+                        w_agg = lits_agg[lit][0] * Polynomial.from_primitive(w)
+                    else:
+                        # Absolute rule weight
+                        w_agg = None
                     coll_agg = lits_agg[lit][1] if coll is None else coll
                     lits_agg[lit] = (w_agg, coll_agg)
 
                 factors = [
-                    (lit, w, coll) for lit, (w, coll) in lits_agg.items()
+                    (lit, w.primitivize() if w is not None else None, coll)
+                    for lit, (w, coll) in lits_agg.items()
                 ] + non_lit_factors
 
-        if factors is not None:
-            # Can remove empty Models-factor without any effect
-            factors = [
-                f for f in factors
-                if not (isinstance(f, Models) and f.is_empty())
-            ]
             self.factors = factors
         if outcomes is not None:
             self.outcomes = outcomes
 
         # If single-factor instance and the single factor is itself a Models
         # instance, flatten the layer
-        while hasattr(self, "factors") and \
-            len(self.factors) == 1 and \
-            isinstance(self.factors[0], Models):
-
+        while _is_single_factor_models(self) and isinstance(self.factors[0], Models):
             if hasattr(self.factors[0], "factors"):
                 self.factors = self.factors[0].factors
             elif hasattr(self.factors[0], "outcomes"):
                 self.outcomes = self.factors[0].outcomes
                 delattr(self, "factors")
 
+        self.cache = {
+            method: {} for method in dir(self)
+            if callable(getattr(self, method)) and not method.startswith("__")
+        }
+
     def __repr__(self):
         descr = ""
         if hasattr(self, "factors"):
             descr = f"factors(len={len(self.factors)})"
         if hasattr(self, "outcomes"):
-            descr = f"outcomes(len={len(self.outcomes)})"
+            descr = f"outcomes(len={len(self.outcomes[1]) if self.outcomes[1] is not None else '*'})"
         return f"Models({descr})"
-    
+
+    @cacheable
     def is_empty(self):
         """
         Models instance is empty if it doesn't cover any models
@@ -122,7 +120,12 @@ class Models:
                     factors_enums.append(set(f.enumerate()))
                 else:
                     # Base case; independent atoms with probability
-                    assert len(f) == 3 and isinstance(f[0], Literal)
+                    assert len(f) == 3
+                    if f[0] is None:
+                        # Signals violation of integrity constraint; disregard
+                        continue
+
+                    assert isinstance(f[0], Literal)
 
                     lit_p = (frozenset([f[0]]), f[1])
                     lit_n = (frozenset(), 1-f[1])
@@ -161,6 +164,7 @@ class Models:
                     for top_model, top_pr in top_models.enumerate():
                         yield (frozenset(bottom_model | top_model), bottom_pr*top_pr)
 
+    @cacheable
     def atoms(self):
         """ Return all atoms occurring in models covered by instance """
         if self.is_empty():
@@ -175,44 +179,51 @@ class Models:
                     atoms |= f.atoms()
                 else:
                     # Base case; independent atoms with probability
-                    assert len(f) == 3 and isinstance(f[0], Literal)
+                    assert len(f) == 3
+                    if f[0] is None:
+                        # Signals violation of integrity constraint; disregard
+                        continue
+
+                    assert isinstance(f[0], Literal)
                     if f[2] is None or f[2] == True:
                         atoms.add(f[0])
             
             return atoms
 
         if hasattr(self, "outcomes"):
-            atoms = set()
-            for o in self.outcomes:
-                # Each outcome entry is a tuple of a model for some program bottom in
-                # the splitting sequence of the program (tree actually), a weight sum
-                # applied to the bottom model, a Models instance for some program top,
-                # and a boolean flag denoting whether this outcome branch is filtered
-                # out and thus shouldn't contribute to 'covered' probability mass
-                bottom_model, _, top_models, filtered_out = o
-                if filtered_out:
-                    # Disregard this outcome branch
-                    continue
+            bottom_models, branch_consequences = self.outcomes
 
-                atoms |= set(bottom_model)
-                atoms |= top_models.atoms() if top_models is not None else set()
-            
+            if branch_consequences is None:
+                atoms = bottom_models.atoms()
+            else:
+                atoms = set()
+                for bc in branch_consequences:
+                    # Each outcome entry is a tuple of a model for some program bottom in
+                    # the splitting sequence of the program (tree actually), a weight sum
+                    # applied to the bottom model, a Models instance for some program top,
+                    # and a boolean flag denoting whether this outcome branch is filtered
+                    # out and thus shouldn't contribute to 'covered' probability mass
+                    branch_event, bm_filtered, _, _, top_models, filtered_out = bc
+                    if filtered_out:
+                        # Disregard this outcome branch
+                        continue
+
+                    atoms |= bm_filtered.atoms()
+                    atoms |= {l for l in branch_event if l.naf==False}
+                    atoms |= top_models.atoms() if top_models is not None else set()
+
             return atoms
 
         raise ValueError("Invalid Models instance")
 
+    @cacheable
     def compute_Z(self):
         """
         Compute and return total unnormalized probability mass covered by this instance
         """
         return compute_Z(self)[1]
 
-    def compute_marginals(self):
-        """
-        Compute and return marginals for atoms covered by this instance
-        """
-        return compute_marginals(self)
-
+    @cacheable
     def filter(self, literals):
         """
         Filter the Models instance to return a new Models instance representing the
@@ -220,8 +231,9 @@ class Models:
         literals, so that formulas in conjunctive normal form can be processed with
         a chain of calls to filter.
         """
-        return filter(self, literals)
+        return filter_models(self, literals)
 
+    @cacheable
     def query(self, q_vars, event, per_assignment=True, per_partition=False):
         """
         Query the tree structure to estimate the likelihood of each possible answer
@@ -237,73 +249,6 @@ class Models:
         return query(self, q_vars, event, per_assignment, per_partition)
 
 
-def _sum_weights(w1, w2):
-    """ Combine two weights, appropriately handling soft/hard ones """
-    if w1 is None or w2 is None:
-        # Either is absolute rule; treat aggregate as absolute as well
-        return None
-
-    if (type(w1)==float or type(w1)==int) and (type(w2)==float or type(w2)==int):
-        # Sum of pure number weights
-        return w1+w2
-
-    elif type(w1)==str and type(w2)==str:
-        # Sum of pure (multiples of) hard weights
-        w1_parse = re.match("(-?)(\d*)(.+)", w1)
-        w2_parse = re.match("(-?)(\d*)(.+)", w2)
-        w1_sign, w1_mult, w1_hardRep = w1_parse.groups()
-        w2_sign, w2_mult, w2_hardRep = w2_parse.groups()
-
-        assert w1_hardRep == w2_hardRep
-        w1_mult = int(w1_mult) if len(w1_mult)>0 else 1
-        w2_mult = int(w2_mult) if len(w2_mult)>0 else 1
-        w1_coeff = w1_mult if len(w1_sign)==0 else -w1_mult
-        w2_coeff = w2_mult if len(w2_sign)==0 else -w2_mult
-
-        sum_coeff = w1_coeff + w2_coeff
-        if sum_coeff == 0:
-            return 0
-        elif sum_coeff == 1:
-            return w1_hardRep
-        elif sum_coeff == -1:
-            return f"-{w1_hardRep}"
-        else:
-            return f"{sum_coeff}{w1_hardRep}"
-
-    else:
-        # Otherwise, cast w1 and w2 into generic tuple forms and compute sum
-        w1 = _generalize_weight(w1)
-        w2 = _generalize_weight(w2)
-        assert w1[2] is None or w2[2] is None or w1[2]==w2[2]
-
-        sum = (w1[0]+w2[0], w1[1]+w2[1], w1[2] or w2[2])
-        if sum[0] == 0:
-            return sum[1]
-        elif sum[1] == 0:
-            if sum[0] == 1:
-                return sum[2]
-            elif sum[0] == -1:
-                return f"-{sum[2]}"
-            else:
-                return f"{sum[0]}{sum[2]}"
-        else:
-            return sum
-
-def _generalize_weight(w):
-    """
-    Cast weight value into generic tuple form: (Hard weight multiplier, soft weight,
-    hard weight representation (e.g. "a" for alpha))
-    """
-    if type(w)==float or type(w)==int:
-        return (0, w, None)
-    elif type(w)==str:
-        w_parse = re.match("(-?)(\d*)(.+)", w)
-        w_sign, w_mult, w_hardRep = w_parse.groups()
-
-        w_mult = int(w_mult) if len(w_mult)>0 else 1
-        w_coeff = w_mult if len(w_sign)==0 else -w_mult
-
-        return (w_coeff, 0, w_hardRep)
-    else:
-        assert type(w)==tuple       # Already in generic form
-        return w
+def _is_single_factor_models(f):
+    """ Tests if f is a factors-Models instance with only a single factor """
+    return isinstance(f, Models) and hasattr(f, "factors") and len(f.factors)==1

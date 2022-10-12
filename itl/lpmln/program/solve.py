@@ -1,21 +1,22 @@
 """ Recursive Program().solve() subroutine factored out """
-from itertools import product
+from itertools import product, chain, combinations
 from functools import reduce
 from multiset import FrozenMultiset
 from collections import defaultdict
 
 import clingo
-import numpy as np
 import networkx as nx
 
 from ..literal import Literal
 from ..rule import Rule
 from ..models import Models
+from ..models.filter import filter_models
 from ..topk_subset import topk_subset_gen
 from ..utils import logit
+from ..utils.logic import cnf_to_dnf, simplify_cnf
 
 
-def recursive_solve(prog, topk_ratio, scale_prec):
+def recursive_solve(prog, scale_prec):
     """
     Recursively find program solve results, and return as a set of independent
     decision trees. Each child of a node in a tree represents a possible answer
@@ -27,23 +28,301 @@ def recursive_solve(prog, topk_ratio, scale_prec):
     from .program import Program
 
     # Can take shortcut if program consists only of grounded facts
-    grounded_facts_only = all([
-        r.is_fact() and r.is_grounded() for r, _ in prog.rules
-    ])
-    if grounded_facts_only:
-        facts = [
-            (
-                r.head[0],
-                logit(float(r_pr[0]),large="a") if r_pr is not None else None,
-                None
-            )
-            for r, r_pr in prog.rules
+    if _grounded_facts_only([r for r, _ in prog.rules]):
+        return _models_from_rule_heads(prog.rules)
+
+    grounded_rules_by_head, comps, atoms_map, atoms_inv_map = _ground_and_factorize(prog)
+
+    indep_trees = []
+    for comp in comps:
+        # If subprogram corresponding to this component only consists of grounded facts,
+        # things get much easier
+        gr_comp_prog = set.union(*[grounded_rules_by_head[a] for a in comp])
+
+        if _grounded_facts_only([r for r, _, _ in gr_comp_prog]):
+            # Directly return the factored representation of individual probabilistic
+            # choices
+
+            # (Assuming only one fact is present with the atom as head)
+            facts = [
+                prog._rules_by_atom[atoms_inv_map[v]] for v in comp.nodes
+                if atoms_inv_map[v] in prog._rules_by_atom
+            ]
+            facts = [prog.rules[list(fs)[0]] for fs in facts]
+
+            comp_models = _models_from_rule_heads(facts)
+            indep_trees.append(comp_models)
+            continue
+
+        # Otherwise, need proper attempt to solve the subprogram - see it how factorizes
+        # for more efficient solving and treat accordingly. The code below implements an
+        # algorithm for finding best factorization of program solving process, which would
+        # lead to minimal total amount of computation required for this component; for
+        # optimizing solution of combinatorially demanding programs
+
+        # Find condensation of the component where strongly connected components are
+        # reduced into single vertices (if component is already DAG, condensation will
+        # be topologically equivalent to original component)
+        comp_condensed = nx.condensation(comp)
+        scc_members = nx.get_node_attributes(comp_condensed, "members")
+
+        # Locate all source & sink nodes in the condensed component
+        sources = [n for n, deg in comp_condensed.in_degree if deg==0]
+        sinks = [n for n, deg in comp_condensed.out_degree if deg==0]
+
+        # Initialize frontier as singleton list containing a dummy node, which depends
+        # on all sink nodes in the condensed component. Note that the frontier is defined
+        # at the condensation level, where each node corresponds to independently solvable
+        # subprograms given values of condensation-parent nodes.
+        comp_condensed.add_node(-1)
+        for sn in sinks:
+            comp_condensed.add_edge(sn, -1)
+        frontier = [frozenset([-1])]
+
+        # Indexing each node in condensed component by their bottom sources
+        node_sources = {
+            cn: frozenset((nx.ancestors(comp_condensed, cn) | {cn}) & set(sources))
+            for cn in comp_condensed.nodes
+        }
+
+        # Then continue expanding the frontier downward by replacing each node with its
+        # parent nodes, based on the following criteria:
+        # 0) (Trivial) Always expand the topmost dummy node
+        # 1) (Trivial) Stop expanding if reached a source node
+        # 2) If length of parent node sets (grouped by any overlap of source nodes covered)
+        #    is one, always expand
+        # 3) Else, expand only if it is expected to reduce the total amount of computation
+        #    required for solving (sub)programs covering this component
+        unexplored_frontier = True; frontier_final = []; backtrack_paths = {}
+        while unexplored_frontier:
+            expanded = []; new_frontier_nodes = []
+            for fns in frontier:
+                # Group parent nodes by source overlap
+                parent_node_sets = {}
+                fns_parents = frozenset([
+                    parent for fn in fns for parent, _ in comp_condensed.in_edges(fn)
+                ])
+                for parent in fns_parents:
+                    # Safely disregard dependency within fns
+                    if parent in fns: continue
+
+                    parent_sources = node_sources[parent]
+                    overlapping_parents = [
+                        srcs for srcs in parent_node_sets
+                        if len(srcs & parent_sources) > 0
+                    ]
+
+                    if len(overlapping_parents) > 0:
+                        # Merge with existing record, then del existing key
+                        to_merge = frozenset.union(*[
+                            parent_node_sets[srcs] for srcs in overlapping_parents
+                        ])
+                        for srcs in overlapping_parents: del parent_node_sets[srcs]
+                        merged_sources = frozenset.union(*overlapping_parents)
+                        merged_sources |= parent_sources
+                        parent_node_sets[merged_sources] = frozenset({parent} | to_merge)
+                    else:
+                        # New entry
+                        parent_node_sets[parent_sources] = frozenset({parent})
+
+                if fns == frozenset([-1]):
+                    # Case 0); first iteration with dummy node
+                    new_frontier_nodes += list(parent_node_sets.values())
+                    backtrack_paths[fns] = list(parent_node_sets.values())
+                    expanded.append(fns)
+                    continue
+
+                if fns_parents <= fns:
+                    # Case 1); all parent nodes already expanded (if any), no more
+                    # nodes to expand
+                    frontier_final.append(fns)
+                    continue
+
+                if len(parent_node_sets) == 1:
+                    # Case 2); single branching
+                    new_frontier_nodes += list(parent_node_sets.values())
+                    backtrack_paths[fns] = list(parent_node_sets.values())
+                    expanded.append(fns)
+                    continue
+
+                # If current frontier is not expanded, 2**(# source nodes for fns) enumeration
+                # expected
+                cost_if_unexp = 2**len(frozenset.union(*[pns for pns in parent_node_sets]))
+
+                # If current frontier is expanded, 2**(# source nodes for pns) enumeration
+                # expected for each (memoizable) parent node set pns, plus 2 ** (# branches)
+                cost_if_exp = 2**len(parent_node_sets) + \
+                    sum(2**len(pns) for pns in set(parent_node_sets))
+
+                if cost_if_unexp > cost_if_exp:
+                    # Case 3); branching expected to decrease total amount of computation
+                    # required
+                    new_frontier_nodes += list(parent_node_sets.values())
+                    backtrack_paths[fns] = list(parent_node_sets.values())
+                    expanded.append(fns)
+                else:
+                    # Expansion not expected to bring computation save; add to final frontier
+                    frontier_final.append(fns)
+
+            # Update frontier and test if further (tests for) expansions are necessary
+            unexplored_frontier = len(expanded) > 0
+            if unexplored_frontier:
+                frontier = new_frontier_nodes
+        del backtrack_paths[frozenset([-1])]    # Dummy not needed, shouldn't be iterated over
+
+        # For each node set in the finalized frontier, find the subgraph and then (grounded)
+        # subprogram such that estimation of probabilities for the node set can be obtained
+        # by solving the subprogram
+        models_per_node_set = {}
+        for fns in frontier_final:
+            # Appropriate subgraph for a frontier node set is defined by the set of ancestor
+            # nodes and self
+            ancestors_and_me = set.union(*[
+                nx.ancestors(comp_condensed, fn) | {fn} for fn in fns
+            ])
+            subgraph = comp_condensed.subgraph(ancestors_and_me)
+
+            # Extract the grounded subprogram to solve that corresponds to the subgraph;
+            # first recover set of original component nodes from the condensed subgraph
+            # nodes, then use it to synthesize the desired subprogram
+            orig_nodes = set.union(*[mems for _, mems in subgraph.nodes(data="members")])
+            gr_subprog = set.union(*[grounded_rules_by_head[a] for a in orig_nodes])
+            subcomp = comp.subgraph(orig_nodes)
+
+            # Solve this subprogram; how it will be achieved depends on the result of
+            # splitting this subprogram
+            bottom, top, found_split = Program.split(subcomp, atoms_map, gr_subprog)
+            bottom_gr_facts_only = _grounded_facts_only([r for r, _ in bottom.rules])
+            is_trivial_split = top is None
+
+            if is_trivial_split:
+                # Empty program top (i.e. recursion base case)
+                if bottom_gr_facts_only:
+                    # (Assuming only one fact is present with the atom as head)
+                    subprog_models = _models_from_rule_heads(bottom.rules)
+                else:
+                    raise NotImplementedError
+                    # Solve the bottom with clingo and return answer sets (with associated
+                    # probabilities)
+                    bottom_atoms = {atoms_inv_map[n] for n in found_split}
+
+                    ctl = clingo.Control(["--warn=none"])
+                    ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
+                    ctl.ground([("base", [])])
+                    ctl.configuration.solve.models = 0
+
+                    bottom_models = []
+                    with ctl.solve(yield_=True) as solve_gen:
+                        for m in solve_gen:
+                            bottom_models.append(m.symbols(atoms=True))
+                            if solve_gen.get().unsatisfiable: break
+
+                    # Process models to extract true atoms along with model weights
+                    bottom_models = [
+                        ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
+                        for m in bottom_models
+                    ]
+                    bottom_models = [
+                        (
+                            [Literal.from_clingo_symbol(a) for a in atoms],
+                            reduce(_sum_weights, [
+                                ([0.0, -1.0] if a.arguments[1].positive else [0.0, 1.0])
+                                if a.arguments[1].type == clingo.SymbolType.Function
+                                else [-a.arguments[1].number / scale_prec, 0.0] for a in unsats
+                            ])
+                        )
+                        for atoms, unsats in bottom_models
+                    ]
+            else:
+                # Solve the bottom for models, obtain & solve the reduced top for
+                # each bottom model
+                if bottom_gr_facts_only:
+                    bottom_factors = [
+                        Models(factors=[(
+                            f.head[0] if len(f.head)>0 else None,
+                            logit(float(r_pr[0]), large="a")
+                                if r_pr is not None else None,
+                            None
+                        )])
+                        for f, r_pr in bottom.rules
+                    ]
+                    bottom_nodes_covered = [{br[0].head[0]} for br in bottom.rules]
+
+                    subprog_models = _models_from_bottom_factors_and_top(
+                        bottom_factors, bottom_nodes_covered, top, scale_prec
+                    )
+                else:
+                    raise NotImplementedError
+
+            models_per_node_set[fns] = subprog_models
+
+        # Based on the results for the frontier node sets, build final results in a
+        # bottom-up manner, until all atoms covered by this original component are
+        # accounted for
+        while len(backtrack_paths) > 0:
+            cnss_to_process = [
+                cns for cns, pnss in backtrack_paths.items()
+                if all(pns in models_per_node_set for pns in pnss)
+            ]
+            for cns in cnss_to_process:
+                cns_nodes_covered = set.union(*[scc_members[cn] for cn in cns])
+
+                # Fetch relevant grounded rules, attach handles to respective rule bodies
+                # (dividing positive/negative parts)
+                relevant_rules = [
+                    gr[:2] for n in cns_nodes_covered for gr in grounded_rules_by_head[n]
+                ]
+
+                # Collect models for subprograms corresponding to the parents of this node,
+                # enumerate possible outcomes abstracted with respect to parts of bodies of
+                # relevant rules, gathering unnormalized probability masses for each branch
+                # along with common partition function Z
+                cns_parent_sets = backtrack_paths.pop(cns)
+
+                bottom_factors = [models_per_node_set[pns] for pns in cns_parent_sets]
+                bottom_nodes_covered = [
+                    {atoms_inv_map[n] for n in set.union(*[scc_members[pn] for pn in pns])}
+                    for pns in cns_parent_sets
+                ]
+                top_program = Program(relevant_rules)
+
+                models_per_node_set[cns] = _models_from_bottom_factors_and_top(
+                    bottom_factors, bottom_nodes_covered, top_program, scale_prec
+                )
+
+        # By now all sink nodes in the condensed component should have been solved
+        # and assigned some Models instance. Construct an outcomes-Models instance
+        # as the final representation of probabilistic answer sets engendered by
+        # this component; 'bottom' models should contain models for all sink nodes,
+        # where per-choice consequences are not defined (no further ASP rule to follow).
+        sink_nodes_models = [
+            ms for cns, ms in models_per_node_set.items()
+            if all(cn in sinks for cn in cns)
         ]
+        sink_nodes_models = Models(factors=sink_nodes_models)
+        comp_models = Models(outcomes=(sink_nodes_models, None))
+        indep_trees.append(comp_models)
 
-        models = Models(factors=facts)
+    models = Models(factors=indep_trees)
 
-        return models
+    return models
 
+
+class _Observer:
+    """ For tracking added grounded rules """
+    def __init__(self):
+        self.rules = []
+    def rule(self, choice, head, body):
+        self.rules.append((head, body, choice))
+
+
+def _ground_and_factorize(prog):
+    """
+    Ground program, construct a directed graph reflecting dependency between grounded
+    atoms (by program rules), find independent graph component factors. Return the
+    grounded rules indexed by their heads, component graphs, and mappings between
+    grounded atoms and their integer indices.
+    """
     # Feed compiled program string to clingo.Control object and ground program
     rules_obs = _Observer()
     ctl = clingo.Control(["--warn=none"])
@@ -192,287 +471,139 @@ def recursive_solve(prog, topk_ratio, scale_prec):
         comps = [dep_graph]
     else:
         comps = [dep_graph.subgraph(nodes) for nodes in comps]
-    
-    # Grounded rule sets for each component
-    grounded_rules_per_comp = [
-        set.union(*[grounded_rules_by_head[a] for a in comp.nodes()])
-        for comp in comps
-    ]
 
-    indep_trees = []
-    for ci, comp in enumerate(comps):
-        # print(f"A> Let me see... ({ci+1}/{len(comps)})", end="\r")
+    return grounded_rules_by_head, comps, atoms_map, atoms_inv_map
 
-        # Find possibly relevant rules for each component, ignoring grounded rules that
-        # do not overlap at all
-        grounded_rules_relevant = grounded_rules_per_comp[ci]
 
-        # Try splitting the program component
-        bottom, top, found_split = Program.split(
-            comp, atoms_map, grounded_rules_relevant
+def _grounded_facts_only(rules):
+    """ Test if set of rules consists only of grounded facts """
+    return all(r.is_fact() and r.is_grounded() for r in rules)
+
+
+def _models_from_rule_heads(rules):
+    """
+    Compose a factors-Models instance from set of (grounded) rules using their heads
+    """
+    rules_factors = [
+        (
+            f.head[0] if len(f.head)>0 else None,
+            logit(float(r_pr[0]), large="a")
+                if r_pr is not None else None,
+            None
         )
-        is_trivial_split = top is None
+        for f, r_pr in rules
+    ]
+    return Models(factors=rules_factors)
 
-        # Check whether the split bottom only consists of body-less grounded rules
-        grounded_facts_only = all([
-            r.is_fact() and r.is_grounded() for r, _ in bottom.rules
-        ])
 
-        if is_trivial_split:
-            # Empty program top (i.e. recursion base case)
-            if grounded_facts_only:
-                # If the bottom (== comp) consists only of grounded choices without rule
-                # body, may directly return the factored representation of individual
-                # probabilistic choices -- no pruning needed
-                facts = [
-                    prog._rules_by_atom[atoms_inv_map[v]] for v in comp.nodes
-                    if atoms_inv_map[v] in prog._rules_by_atom
-                ]
-
-                # (Assuming only one fact is present with the atom as head)
-                facts = [prog.rules[fs.pop()] for fs in facts]
-                facts = [
-                    (
-                        f.head[0],
-                        logit(float(r_pr[0]), large="a")
-                            if r_pr is not None else None,
-                        None
-                    )
-                    for f, r_pr in facts
-                ]
-
-                tree = Models(factors=facts)
-
-            else:
-                # Solve the bottom (== comp) with clingo and return answer sets (with
-                # associated probabilities)
-                ctl = clingo.Control(["--warn=none"])
-                ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
-                ctl.ground([("base", [])])
-                ctl.configuration.solve.models = 0
-
-                models = []
-                with ctl.solve(yield_=True) as solve_gen:
-                    for m in solve_gen:
-                        models.append(m.symbols(atoms=True))
-                        if solve_gen.get().unsatisfiable: break
-
-                # Process models to extract true atoms along with model weights
-                models = [
-                    ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
-                    for m in models if len(m) > 0
-                ]
-                models = [
-                    (
-                        [Literal.from_clingo_symbol(a) for a in atoms],
-                        reduce(_sum_weights, [
-                            ([0.0, -1.0] if a.arguments[1].positive else [0.0, 1.0])
-                            if a.arguments[1].type == clingo.SymbolType.Function
-                            else [-a.arguments[1].number / scale_prec, 0.0] for a in unsats
-                        ])
-                    )
-                    for atoms, unsats in models
-                ]
-
-                if len(models) > 0:
-                    # Clear models instance to be fed as top_models. Represents Models
-                    # covering an empty model (caution: instance itself is not empty!)
-                    models_clear = Models(factors=[])
-
-                    outcomes = [
-                        (atoms, weight, models_clear, False)
-                        for atoms, weight in models
-                    ]
-                    tree = Models(outcomes=outcomes)
-                else:
-                    tree = Models()        # Empty models
-
-        else:
-            # Solve the bottom for possible models with probabilities, obtain & solve the
-            # reduced top for each model
-            if grounded_facts_only:
-                # If program only consists of grounded choice facts, may bypass clingo and
-                # find models along with probabilities combinatorially, possibly pruning
-                # low-probability models from the bottom.
-                # (Cannot use factored representation since we need to reduce program top
-                # for each possible model of the program bottom.)
-                bottom_models = []
-                
-                # Only need to consider soft rules (i.e. rules with 0.0 < r_pr < 1.0) when
-                # finding top-k models with this method
-                abs_facts = [rule for rule, r_pr in bottom.rules if r_pr is None]
-                abs_facts = {rule.head[0] for rule in abs_facts}
-
-                incid_facts = [(rule, r_pr) for rule, r_pr in bottom.rules if r_pr is not None]
-                soft_facts = [(rule, r_pr) for rule, r_pr in incid_facts if 0.0 < r_pr[0] < 1.0]
-                hard_facts = [
-                    (rule, r_pr) for rule, r_pr in incid_facts if r_pr[0] == 0.0 or r_pr[0] == 1.0
-                ]
-
-                if len(soft_facts) > 0:
-                    # Aggregate rules with same head atom, combining weights
-                    soft_facts_agg = defaultdict(float)
-                    for rule, r_pr in soft_facts:
-                        soft_facts_agg[rule.head[0]] += logit(r_pr[0])
-                    soft_facts = [(Rule(head=head), w) for head, w in soft_facts_agg.items()]
-
-                    # Rules should be sorted by weights first to apply the algorithm
-                    soft_facts = sorted(soft_facts, key=lambda rw: rw[1], reverse=True)
-
-                    # Using logits of r_pr values as rule weights ensures direct association of
-                    # the rule weights with the marginal probabilities of rule head atoms across
-                    # all possible models (... on the assumption that there are no probabilistic
-                    # choice rules with the same head atoms with non-disjoint body in program)
-                    rule_weights = [rw for _, rw in soft_facts]
-
-                    # (Log of) partition function for all the soft rules can be analytically
-                    # computed as below
-                    logZ = sum([np.log(1+np.exp(w)) for w in rule_weights])
-
-                    # Log of total probability mass covered, from the top; need to query models
-                    # until more than aggregate probability mass gets larger than top_k
-                    log_pmass_covered = float("-inf")      # Represents limit(log(x)) as x -> +0
-
-                    # Collect most probable possible worlds
-                    subsets = []
-                    subset_generator = topk_subset_gen(rule_weights)
-                    for subset, weight_sum in subset_generator:
-                        # Update pmass_covered with log-sum-exp
-                        log_joint_p = weight_sum - logZ
-                        log_pmass_covered = np.logaddexp(log_pmass_covered, log_joint_p)
-
-                        # Append model retrieved from the indices in subset along with weight
-                        # sum
-                        subsets.append((subset, np.exp(log_joint_p)))
-                        bottom_models.append((
-                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i in subset},
-                            {sr.head[0] for i, (sr, _) in enumerate(soft_facts) if i not in subset},
-                            [weight_sum, 0.0]
-                        ))
-                        
-                        # Break with sufficient coverage
-                        if log_pmass_covered >= np.log(topk_ratio):
-                            break
-                    subset_generator.close()
-                
-                # Add hard-weighted facts
-                if len(hard_facts) > 0:
-                    if len(bottom_models) == 0:
-                        # Need to add an empty model if no models in list at this point
-                        bottom_models.append((set(), set(), [0.0, 0.0]))
-                    hard_pos_atoms = {hr.head[0] for hr, r_pr in hard_facts if r_pr[0]==1.0}
-                    hard_neg_atoms = {hr.head[0] for hr, r_pr in hard_facts if r_pr[0]==0.0}
-                    bottom_models = [
-                        (
-                            pos_atoms | hard_pos_atoms,
-                            neg_atoms | hard_neg_atoms,
-                            _sum_weights(weight_sum, [0, len(hard_pos_atoms)+len(hard_neg_atoms)])
-                        )
-                        for pos_atoms, neg_atoms, weight_sum in bottom_models
-                    ]
-                
-                # Add absolute, definitionally derived facts
-                if len(abs_facts) > 0:
-                    if len(bottom_models) == 0:
-                        # Need to add an empty model if no models in list at this point
-                        bottom_models.append((set(), set(), [0.0, 0.0]))
-                    bottom_models = [
-                        (pos_atoms | abs_facts, neg_atoms, weight_sum)
-                        for pos_atoms, neg_atoms, weight_sum in bottom_models
-                    ]
-            else:
-                # Solve the bottom (== comp) with clingo and return answer sets (with
-                # associated probabilities)
-                bottom_atoms = {atoms_inv_map[n] for n in found_split}
-
-                ctl = clingo.Control(["--warn=none"])
-                ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
-                ctl.ground([("base", [])])
-                ctl.configuration.solve.models = 0
-
-                bottom_models = []
-                with ctl.solve(yield_=True) as solve_gen:
-                    for m in solve_gen:
-                        bottom_models.append(m.symbols(atoms=True))
-                        if solve_gen.get().unsatisfiable: break
-
-                # Process models to extract true atoms along with model weights
-                bottom_models = [
-                    ([a for a in m if a.name != "unsat"], [a for a in m if a.name == "unsat"])
-                    for m in bottom_models
-                ]
-                bottom_models = [
-                    (
-                        [Literal.from_clingo_symbol(a) for a in atoms],
-                        reduce(_sum_weights, [
-                            ([0.0, -1.0] if a.arguments[1].positive else [0.0, 1.0])
-                            if a.arguments[1].type == clingo.SymbolType.Function
-                            else [-a.arguments[1].number / scale_prec, 0.0] for a in unsats
-                        ])
-                    )
-                    for atoms, unsats in bottom_models
-                ]
-
-                if len(bottom_models) > 0:
-                    # TODO: Not updated to match the updated solving procedure, update
-                    raise NotImplementedError
-
-                    logZ = reduce(np.logaddexp, [weight for _, weight in bottom_models])
-                    bottom_models = [
-                        (set(atoms), np.exp(weight-logZ)) for atoms, weight in bottom_models
-                    ]
-                    bottom_models = [
-                        # Positive atoms, negative atoms, probability
-                        (model, bottom_atoms-model, pr) for model, pr in bottom_models
-                    ]
-
-            # Solve reduced program top for each discovered model; first compute program
-            # reduction by the common atoms
-            atom_sets = [
-                {(pl, True) for pl in bm[0]} | {(nl, False) for nl in bm[1]}
-                for bm in bottom_models
-            ]
-            atom_commons = set.intersection(*atom_sets) if len(atom_sets) > 0 else set()
-            reduced_common, base_w_reduc_com = top.reduce(
-                {atm for atm, pos in atom_commons if pos},
-                {atm for atm, pos in atom_commons if not pos}
+def _models_from_bottom_factors_and_top(
+        bottom_factors, bottom_nodes_covered_per_factor, top_program, scale_prec
+    ):
+    bottom_indep_branches = []
+    top_rule_bodies = [
+        (
+            {gbl for gbl in gr.body if gbl.naf==False},
+            {gbl for gbl in gr.body if gbl.naf==True}
+        )
+        for gr, _ in top_program.rules
+    ]
+    for factor, nodes_covered in zip(bottom_factors, bottom_nodes_covered_per_factor):
+        assert isinstance(factor, Models)
+        
+        # For each relevant top rule found, prepare representation of the event
+        # that corresponding body parts of the rule are satisfied, as a formula
+        # in conjunctive normal form (list of sets here); will be used to filter
+        # cached_models for each possible outcome branch later
+        filter_events = [
+            (
+                body_pos & nodes_covered,
+                body_neg & {gl.flip() for gl in nodes_covered}
             )
+            for body_pos, body_neg in top_rule_bodies
+        ]
+        filter_events = [
+            (
+                [{gl} for gl in body_pos | body_neg],           # Body sat
+                [{gl.flip() for gl in body_pos | body_neg}]     # Body unsat
+            )
+            for body_pos, body_neg in filter_events
+        ]
+        relevant_influx_rules = {
+            i for i, (ev_conj_sat, _) in enumerate(filter_events)
+            if len(ev_conj_sat) > 0
+        }
 
-            # Now for each bottom model reduce the common reduction with the remainder of
-            # the atoms, and solve the fully reduced
-            outcomes = []
-            atom_diffs = [a-atom_commons for a in atom_sets]
-            for bi, ((pos_atoms, _, w), atoms) in enumerate(zip(bottom_models, atom_diffs)):
-                # print(f"A> Let me see... ({bi+1}/{len(bottom_models)})", end="\r")
+        # All possible outcome branches with respect to whether each relevant
+        # rule body parts are satisfied or not, along with indices of rules for
+        # which corresponding body parts are satisfied
+        branches = []
+        for rule_inds in _powerset(relevant_influx_rules):
+            branch = []
+            for ri in rule_inds:
+                ev_conj_sat, _ = filter_events[ri]
+                branch += ev_conj_sat
+            for ri in relevant_influx_rules-set(rule_inds):
+                _, ev_conj_unsat = filter_events[ri]
+                branch += ev_conj_unsat
+            branch = simplify_cnf(branch)
 
-                pos_atoms_diff = {atm for atm, pos in atoms if pos}
-                neg_atoms_diff = {atm for atm, pos in atoms if not pos}
+            if all(len(cjct) > 0 for cjct in branch):
+                # If any conjunct is an empty disjunction, this branch event is
+                # logically impossible
+                branches.append(branch)
 
-                reduced_top, base_w_reduc_top = reduced_common.reduce(
-                    pos_atoms_diff, neg_atoms_diff
-                )
-                top_models = recursive_solve(
-                    reduced_top, topk_ratio, scale_prec
-                )
+        bottom_indep_branches.append(branches)
 
-                final_w = reduce(_sum_weights, [w, base_w_reduc_com, base_w_reduc_top])
-                outcomes.append((pos_atoms, final_w, top_models, False))
-            tree = Models(outcomes=outcomes)
+    bottom_models = Models(factors=bottom_factors)
 
-        indep_trees.append(tree)
-        # print("A>" + (" "*50), end="\r")
+    # Process each full specification of independent branch cases and
+    # aggregate total (unnormalized) probability mass
+    consequences_per_choice = []
+    for branch_choice in product(*bottom_indep_branches):
+        total_ev_conj = sum([bc for bc in branch_choice], [])
 
-    models = Models(factors=indep_trees)
+        # Converting CNF to DNF, so that we can process each possible
+        # disjunct case (each disjunct, which is conjunction of atoms,
+        # will be used to reduce top program)
+        total_ev_disj = cnf_to_dnf(total_ev_conj)
 
-    return models
+        # For each disjunct, filter bottom_models with corresponding event and
+        # obtain unnormalized probability for the branch
+        bottom_models_filtered = [
+            reduce(filter_models, [bottom_models]+[{lit} for lit in djct])
+            for djct in total_ev_disj
+        ]
+        unnorm_pmasses = [
+            bm_filtered.compute_Z()
+            for bm_filtered in bottom_models_filtered
+        ]
 
+        # Weed out branch with zero possibility (i.e. zero probability mass)
+        total_ev_disj = [
+            (djct, bm_filtered, pmass)
+            for djct, bm_filtered, pmass
+            in zip(total_ev_disj, bottom_models_filtered, unnorm_pmasses)
+            if not pmass.is_zero()
+        ]
 
-class _Observer:
-    """ For tracking added grounded rules """
-    def __init__(self):
-        self.rules = []
-    def rule(self, choice, head, body):
-        self.rules.append((head, body, choice))
+        reduced_top_programs = [
+            top_program.reduce(djct) for djct, _, _ in total_ev_disj
+        ]
+
+        # Add results of reducing top program with the branch event(s) and
+        # solving to list of consequences per branch event
+        consequences_per_choice += [
+            (
+                djct, bm_filtered, pmass, base_w,
+                recursive_solve(reduced_prog, scale_prec), False
+            )
+            for (djct, bm_filtered, pmass), (reduced_prog, base_w)
+            in zip(total_ev_disj, reduced_top_programs)
+        ]
+
+    # Collate the result into an outcomes-Models instance
+    outcomes = (bottom_models, consequences_per_choice)
+    return Models(outcomes=outcomes)
 
 
 def _sum_weights(w1, w2):
@@ -483,3 +614,9 @@ def _sum_weights(w1, w2):
     """
     assert len(w1) == 2 and len(w2) == 2
     return [w1[0]+w2[0], w1[1]+w2[1]]
+
+
+def _powerset(iterable):
+    """ Set of all subsets of iterable """
+    s = list(iterable)
+    return chain.from_iterable(combinations(s, r) for r in range(len(s)+1))

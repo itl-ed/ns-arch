@@ -1,11 +1,13 @@
 """ Models().filter() factored out """
+import operator
 from itertools import product
 from functools import reduce
 
 from ..literal import Literal
+from ..polynomial import Polynomial
 
 
-def filter(models, literals):
+def filter_models(models, literals):
     """
     Filter the Models instance to return a new Models instance representing the
     subset of models satisfying the condition specified by the *disjunction* of
@@ -16,14 +18,14 @@ def filter(models, literals):
         # Empty Models instance
         return models
 
-    if type(literals) != set:
+    if type(literals) != frozenset:
         try:
             # Treat as set
-            literals = set(literals)
+            literals = frozenset(literals)
         except TypeError:
             # Accept single-literal disjunction and wrap in a set
             assert isinstance(literals, Literal)
-            literals = {literals}
+            literals = frozenset([literals])
 
     if hasattr(models, "factors"):
         return _filter_factors(models, literals)
@@ -35,7 +37,7 @@ def filter(models, literals):
 
 def _filter_factors(models, literals):
     """
-    Factorizing out submethod to be called by filter(), for factors-Models
+    Factorizing out submethod to be called by filter_models(), for factors-Models
     instances
     """
     assert hasattr(models, "factors")
@@ -93,10 +95,15 @@ def _filter_factors(models, literals):
             # Factor needs filtering by the covered literals
             if isinstance(f, Models):
                 # Recurse; another Models instance
-                filtered_factors.append((filter(f, covered_lits), i))
+                filtered_factors.append((filter_models(f, covered_lits), i))
             else:
                 # Base case; independent atoms with probability
-                assert len(f) == 3 and isinstance(f[0], Literal)
+                assert len(f) == 3
+                if f[0] is None:
+                    # Signals violation of integrity constraint; disregard
+                    continue
+
+                assert isinstance(f[0], Literal)
                 assert len(covered_lits) == 1
                 lit = covered_lits.pop()
                 collapse_val = not lit.naf     # Recall naf==True means negated literal
@@ -119,25 +126,36 @@ def _filter_factors(models, literals):
         # (Not that it can be avoided -- it's still the best we can do!)
         assert len(filtered_factors) > 1
 
-        # This part has not been updated to comply with recent changes, and we don't know
-        # what would happen here...
-        raise NotImplementedError
-
         # Method that returns (frozen)set of models covered by a factor enumerated
         def enum_f(f):
             if isinstance(f, Models):
                 return set(f.enumerate())
             else:
-                lit_p = (frozenset([f[0]]), f[1])
-                lit_n = (frozenset(), 1-f[1])
+                f_lit, f_w, f_coll = f
+                if f_w is not None:
+                    # Non-absolute incidental rule, hard or soft
+                    f_w_poly = Polynomial.from_primitive(f_w)
+                    lit_p = (frozenset([f_lit]), f_w_poly)
+                    lit_n = (frozenset(), Polynomial(float_val=1.0))
 
-                if f[2] is None:
-                    return {lit_p, lit_n}
+                    if f_coll is None:
+                        return {lit_p, lit_n}
+                    else:
+                        if f_coll:
+                            return {lit_p}
+                        else:
+                            return {lit_n}
                 else:
-                    if f[2]:
+                    # Absolute rule that doesn't allow failure to derive f_lit
+                    lit_p = (frozenset([f_lit]), Polynomial(float_val=1.0))
+
+                    if f_coll is None:
                         return {lit_p}
                     else:
-                        return {lit_n}
+                        if f_coll:
+                            return {lit_p}
+                        else:
+                            return set()
 
         # Models enumerated for each filtered factor, and their complements with respect
         # to the model enumeration for the original factor before filtering. Required for
@@ -147,13 +165,13 @@ def _filter_factors(models, literals):
             (ms, enum_f(models.factors[i])-ms) for ms, i in f_enum_models
         ]
 
-        # Enumeration all possible models from which set of models not satisfying the
+        # Enumeration of all possible models from which set of models not satisfying the
         # disjunction will be subtracted
         all_enum_models = set.union(*[
             {
                 (
-                    frozenset.union(*[mc[0] for mc in model_choices]),
-                    reduce(lambda p1,p2: p1*p2, [mc[1] for mc in model_choices])
+                    frozenset.union(*[model for model, _ in model_choices]),
+                    reduce(operator.mul, [ws for _, ws in model_choices])
                 )
                 for model_choices in product(*bin_choices)
             }
@@ -163,97 +181,139 @@ def _filter_factors(models, literals):
         # Enumeration of models that fail to satisfy the disjunction
         unsat_enum_models = {
             (
-                frozenset.union(*[mc[0] for mc in model_choices]),
-                reduce(lambda p1,p2: p1*p2, [mc[1] for mc in model_choices])
+                frozenset.union(*[model for model, _ in model_choices]),
+                reduce(operator.mul, [ws for _, ws in model_choices])
             )
             for model_choices
             in product(*[filtered_comp for _, filtered_comp in f_enum_models])
         }
 
-        merged_outcomes = all_enum_models - unsat_enum_models
-        merged_outcomes = [(pr, set(model), None) for model, pr in merged_outcomes]
+        bottom_models_merged = Models(factors=[
+            models.factors[i] for _, i in filtered_factors
+        ])
+        possible_atoms = bottom_models_merged.atoms()
 
-        filtered_factors = [Models(outcomes=merged_outcomes)]
+        cases_merged = [
+            (case | {na.flip() for na in possible_atoms-case}, ws)
+            for case, ws in all_enum_models - unsat_enum_models
+        ]       # Making negative atoms explicit
+        outcomes_merged = (
+            bottom_models_merged,
+            [
+                (case, ws, Polynomial(float_val=1.0), Models(factors=[]), False)
+                for case, ws in cases_merged
+            ]
+        )
+
+        filtered_factors = [Models(outcomes=outcomes_merged)]
 
     return Models(factors=filtered_factors+intact_factors)
 
 def _filter_outcomes(models, literals):
     """
-    Factorizing out submethod to be called by filter(), for outcomes-Models
+    Factorizing out submethod to be called by filter_models(), for outcomes-Models
     instances
     """
     assert hasattr(models, "outcomes")
 
     from .models import Models
 
-    # Filter each outcome and add to new outcome list if result is not empty
-    filtered_outcomes = []
-    for o in models.outcomes:
-        # Each outcome entry is a tuple of a model for some program bottom in
-        # the splitting sequence of the program (tree actually), a weight sum
-        # applied to the bottom model, a Models instance for some program top,
-        # and a boolean flag denoting whether this outcome branch is filtered
-        # out and thus shouldn't contribute to 'covered' probability mass
-        bottom_model, bottom_w, top_models, filtered_out = o
+    bottom_models, branch_consequences = models.outcomes
 
-        if filtered_out:
-            # This outcome branch is already filtered out, can add as-is right
-            # away
-            filtered_outcomes.append(o)
-            continue
+    if branch_consequences is None:
+        return Models(outcomes=(filter_models(bottom_models, literals), None))
+    else:
+        # Filter each outcome and add to new outcome list if result is not empty
+        filtered_consequences = []
 
-        # Set of atoms actually covered by the outcome
-        top_atoms = top_models.atoms() if top_models is not None else set()
-        o_atoms = bottom_model | top_atoms
+        for bc in branch_consequences:
+            # Each outcome entry is a tuple of a model for some program bottom in
+            # the splitting sequence of the program (tree actually), a weight sum
+            # applied to the bottom model, a Models instance for some program top,
+            # and a boolean flag denoting whether this outcome branch is filtered
+            # out and thus shouldn't contribute to 'covered' probability mass
+            branch_ev, bm_filtered, branch_w, top_base_w, top_models, filtered_out = bc
 
-        # Disjunction to satisfy; making a copy that we can manipulate within this
-        # for loop
-        disjunction = {l for l in literals}
+            if filtered_out:
+                # This outcome branch is already filtered out, can add as-is right
+                # away
+                filtered_consequences.append(bc)
+                continue
 
-        add_as_is = False
-        for l in literals:
-            # literal shouldn't be covered by both bottom_model and top_models
-            assert not ((l.as_atom() in bottom_model) and (l.as_atom() in top_atoms))
+            # Set of atoms actually covered by the outcome
+            branch_atoms = bm_filtered.atoms()
+            top_atoms = top_models.atoms()
+            bc_atoms = branch_atoms | top_atoms
 
-            if l.naf:
-                ## l.naf==True; l is negative literal
-                # If not covered by either bottom_model or top_models, the disjunction
-                # is trivially satisfiable and this outcome can be included as-is without
-                # filtering
-                if l.as_atom() not in o_atoms:
-                    add_as_is = True
+            # Disjunction to satisfy; making a copy that we can manipulate within this
+            # for loop
+            disjunction = {l for l in literals}
 
-                # If covered by bottom_models, this literal is never satisfiable and can
-                # be removed from disjunction
-                if l.as_atom() in bottom_model:
-                    disjunction.remove(l)
+            add_as_is = False
+            for l in literals:
+                # literal shouldn't be covered by both branch_atoms and top_atoms
+                assert not ((l.as_atom() in branch_atoms) and (l.as_atom() in top_atoms))
 
+                if l.naf:
+                    ## l.naf==True; l is negative literal
+                    # If not covered by either branch_atoms or top_atoms, the disjunction
+                    # is trivially satisfiable and this outcome can be included as-is without
+                    # filtering
+                    if l.as_atom() not in bc_atoms:
+                        add_as_is = True
+
+                    # If covered directly by branch_ev, this literal is never satisfiable and
+                    # can be removed from disjunction
+                    if l.as_atom() in branch_ev:
+                        disjunction.remove(l)
+
+                else:
+                    ## l.naf==False; l is positive literal
+                    # If covered directly by branch_ev, the disjunction is trivially satisfiable
+                    # and this outcome can be included as-is without filtering
+                    if l in branch_ev:
+                        add_as_is = True
+
+                    # If not covered by either branch_atoms or top_atoms, this literal is
+                    # never satisfiable and can be removed from disjunction
+                    if l not in bc_atoms:
+                        disjunction.remove(l)
+
+            if add_as_is:
+                # No filtering needed, add the outcome as-is
+                filtered_consequences.append(bc)
+                continue
+            if len(disjunction) == 0:
+                # Empty disjunction cannot be satisfied; flag as filtered and add to
+                # outcome list
+                filtered_consequences.append(
+                    (branch_ev, bm_filtered, branch_w, top_base_w, top_models, True)
+                )
+                continue
+
+            # Outcomes that reached here represent mixture of models satisfying the
+            # disjunction and those that do not; need further filtering of bm_filtered
+            # and top_models, depending on how literals are covered by each
+            literals_bm_f = {l for l in literals if l.as_atom() in branch_atoms}
+            literals_top = {l for l in literals if l.as_atom() in top_atoms}
+
+            if len(literals_bm_f) > 0:
+                bm_further_filtered = filter_models(bm_filtered, literals_bm_f)
+                branch_flt_w = bm_further_filtered.compute_Z()
             else:
-                ## l.naf==False; l is positive literal
-                # If covered by bottom_models, the disjunction is trivially satisfiable
-                # and this outcome can be included as-is without filtering
-                if l.as_atom() in bottom_model:
-                    add_as_is = True
+                bm_further_filtered = bm_filtered
+                branch_flt_w = branch_w
 
-                # If not covered by either bottom_model or top_models, this literal is
-                # never satisfiable and can be removed from disjunction
-                if l.as_atom() not in o_atoms:
-                    disjunction.remove(l)
+            if len(literals_top) > 0:
+                top_models_filtered = filter_models(top_models, literals_top)
+            else:
+                top_models_filtered = top_models
 
-        if add_as_is:
-            # No filtering needed, add the outcome as-is
-            filtered_outcomes.append(o)
-            continue
-        if len(disjunction) == 0:
-            # Empty disjunction cannot be satisfied; flag as filtered and add to
-            # outcome list
-            filtered_outcomes.append((bottom_model, bottom_w, top_models, True))
-            continue
+            filtered_consequences.append(
+                (
+                    branch_ev, bm_further_filtered, branch_flt_w,
+                    top_base_w, top_models_filtered, filtered_out
+                )
+            )
 
-        # Outcomes that reached here represent mixture of models satisfying the
-        # disjunction and those that do not; need top filtering
-        filtered_outcomes.append(
-            (bottom_model, bottom_w, filter(top_models, literals), filtered_out)
-        )
-
-    return Models(outcomes=filtered_outcomes)
+        return Models(outcomes=(bottom_models, filtered_consequences))

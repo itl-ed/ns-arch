@@ -3,7 +3,7 @@ from itertools import product, chain, combinations
 from collections import defaultdict
 
 from ..rule import Rule
-from ..utils.polynomial import poly_ratio_at_limit
+from ..polynomial import Polynomial
 
 
 def query(models, q_vars, event, per_assignment=True, per_partition=False):
@@ -18,14 +18,14 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
     If q_vars is None we have a yes/no (polar) question, where having a non-empty
     tuple as q_vars indicates we have a wh-question.
     """
-    if type(event) != set:
+    if type(event) != frozenset:
         try:
             # Treat as set
-            event = set(event)
+            event = frozenset(event)
         except TypeError:
             # Accept single-rule event and wrap in a set
             assert isinstance(event, Rule)
-            event = set([event])
+            event = frozenset([event])
 
     if q_vars is None:
         # Empty tuple representing no wh-quantified variables to test. () in the
@@ -49,6 +49,10 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
             ents = set()
 
         preds = set((atm.name, len(atm.args)) for atm in atoms_covered)
+        # For now, let's limit our answer to "what is X" questions to nouns: i.e. object
+        # class categories...
+        preds = {p for p in preds if p[0].startswith("cls")}
+
         pred_var_arities = {
             l for l in set.union(*[ev_rule.literals() for ev_rule in event])
             if l.name=="*_?"
@@ -113,6 +117,7 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
                 filtered_hb = filtered
                 if len(ev_rule.head) > 0:
                     for lits in [ev_rule.head] + ev_rule.body:
+                        lits = frozenset(lits)
                         filtered_hb = [f.filter(lits) for f in filtered_hb]
                 else:
                     filtered_hb = []
@@ -122,7 +127,7 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
                 if len(ev_rule.body) > 0:
                     # Negation of conjunction of body literals == Disjunction of
                     # negated body literals
-                    body_neg = [bl.flip() for bl in ev_rule.body]
+                    body_neg = frozenset([bl.flip() for bl in ev_rule.body])
                     filtered_nb = [f.filter(body_neg) for f in filtered_nb]
                 else:
                     filtered_nb = []
@@ -135,8 +140,8 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
         per_assig = {
             assig: (
                 fms,
-                sum([poly_ratio_at_limit(m.compute_Z(), models_pmass) for m in fms])
-                    if models_pmass != {} else 0.0
+                sum([Polynomial.ratio_at_limit(m.compute_Z(), models_pmass) for m in fms])
+                    if models_pmass != Polynomial(float_val=0.0) else 0.0
             )
             for assig, fms in per_assig.items()
         }
@@ -145,6 +150,8 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
 
     if per_partition:
         # 2) Per-answer filtering
+
+        raise NotImplementedError       # Need update to comply with recent changes
         possible_answers = list(chain.from_iterable(
             combinations(ev_instances, l) for l in range(1,len(ev_instances)+1)
         ))

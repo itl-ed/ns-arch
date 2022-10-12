@@ -493,7 +493,7 @@ class TheoreticalReasonerModule:
 
                     translated_qrs.append(Rule(head=rule_head, body=rule_body))
 
-                translated_question = q_vars, translated_qrs
+                translated_question = q_vars, frozenset(translated_qrs)
             else:
                 translated_question = None
 
