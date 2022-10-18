@@ -140,7 +140,7 @@ def query(models, q_vars, event, per_assignment=True, per_partition=False):
         per_assig = {
             assig: (
                 fms,
-                sum([Polynomial.ratio_at_limit(m.compute_Z(), models_pmass) for m in fms])
+                sum([(m.compute_Z() / models_pmass).at_limit() for m in fms])
                     if models_pmass != Polynomial(float_val=0.0) else 0.0
             )
             for assig, fms in per_assig.items()

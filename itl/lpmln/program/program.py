@@ -3,6 +3,7 @@ Implements LP^MLN program class
 """
 from collections import defaultdict
 
+from .compile import compile
 from .solve import recursive_solve
 from .optimize import optimize
 from .split import split_program
@@ -107,6 +108,13 @@ class Program:
     def solve(self, topk_ratio=TOPK_RATIO):
         """ Wraps around recursive_solve, and exposed as class instance method """
         return recursive_solve(self, scale_prec=SCALE_PREC)
+
+    def compile(self):
+        """
+        Compiles program into a binary join tree from equivalent directed graph,
+        which would contain data needed to answer probabilistic inference queries
+        """
+        return compile(self)
 
     def optimize(self, statements):
         """

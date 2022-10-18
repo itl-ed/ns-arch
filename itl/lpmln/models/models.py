@@ -1,78 +1,39 @@
-import re
-from itertools import product
+import operator
 from collections import defaultdict
+from itertools import product
 from functools import reduce
 
-from .unnorm_mass import compute_Z
-from .filter import filter_models
+from .common_factors import ModelsCommonFactors
+from .branch_outcomes import ModelsBranchOutcomes
 from .query import query
-from ..literal import Literal
 from ..polynomial import Polynomial
 from ..utils import cacheable
 
 
 class Models:
     """
-    Representation of sets of models, either as:
-        1) Complete factorization by joint distributions of independent atoms, each
-            with its marginal probability, or
-        2) Flattened list of individual model specifications (outcomes) by set of
-            true atoms (i.e. Herbrand interpretation), each with its joint probability
+    Representation of sets of models, which are probabilistic answer sets to an LP^MLN
+    program with one or more topmost nodes. Each complete Models instance consists of
+    a list of (ModelsCommonFactors, ModelsBranchOutcomes) pairs, each corresponding to
+    a collection of models for some LP^MLN program with a single topmost node. The list
+    may have zero, one or many elements depending of the dependency structure of the
+    original LP^MLN program for which this Models instance represents valid answer sets
+    (along with their probabilistic weights).
     """
-    def __init__(self, factors=None, outcomes=None):
-        assert not ((factors is not None) and (outcomes is not None)), \
-            "Do not provide both factors & outcomes as arg"
-        if factors is not None:
-            # Can flatten factors that are themselves single-factor Models instances
-            while any(_is_single_factor_models(f) for f in factors):
-                factors_flattened = []
-                for f in factors:
-                    if _is_single_factor_models(f):
-                        factors_flattened.append(f.factors[0])
-                    else:
-                        factors_flattened.append(f)
-                factors = factors_flattened
+    def __init__(self, factors_outcomes_pairs=None):
+        assert all(len(cfs_bos)==2 for cfs_bos in factors_outcomes_pairs)
+        assert all(
+            isinstance(cfs, ModelsCommonFactors) or cfs is None
+            for cfs, _ in factors_outcomes_pairs
+        )
+        assert all(
+            isinstance(bos, ModelsBranchOutcomes) or bos is None
+            for _, bos in factors_outcomes_pairs
+        )
 
-            if len(factors) > 1:
-                # Aggregate literal factors with same head; weights are summed in
-                # log-space
-                lit_factors = [
-                    f for f in factors
-                    if type(f) == tuple and isinstance(f[0], Literal)
-                ]
-                non_lit_factors = [
-                    f for f in factors
-                    if not (type(f) == tuple and isinstance(f[0], Literal))
-                ]
-
-                lits_agg = defaultdict(lambda: (Polynomial(float_val=1.0), None))
-                for lit, w, coll in lit_factors:
-                    if w is not None:
-                        # Non-absolute (incidental) rule weight
-                        w_agg = lits_agg[lit][0] * Polynomial.from_primitive(w)
-                    else:
-                        # Absolute rule weight
-                        w_agg = None
-                    coll_agg = lits_agg[lit][1] if coll is None else coll
-                    lits_agg[lit] = (w_agg, coll_agg)
-
-                factors = [
-                    (lit, w.primitivize() if w is not None else None, coll)
-                    for lit, (w, coll) in lits_agg.items()
-                ] + non_lit_factors
-
-            self.factors = factors
-        if outcomes is not None:
-            self.outcomes = outcomes
-
-        # If single-factor instance and the single factor is itself a Models
-        # instance, flatten the layer
-        while _is_single_factor_models(self) and isinstance(self.factors[0], Models):
-            if hasattr(self.factors[0], "factors"):
-                self.factors = self.factors[0].factors
-            elif hasattr(self.factors[0], "outcomes"):
-                self.outcomes = self.factors[0].outcomes
-                delattr(self, "factors")
+        if factors_outcomes_pairs is None:
+            factors_outcomes_pairs = []
+        self.cfs_bos_pairs = factors_outcomes_pairs
 
         self.cache = {
             method: {} for method in dir(self)
@@ -80,148 +41,180 @@ class Models:
         }
 
     def __repr__(self):
-        descr = ""
-        if hasattr(self, "factors"):
-            descr = f"factors(len={len(self.factors)})"
-        if hasattr(self, "outcomes"):
-            descr = f"outcomes(len={len(self.outcomes[1]) if self.outcomes[1] is not None else '*'})"
-        return f"Models({descr})"
+        return f"Models(len={len(self.cfs_bos_pairs)})"
 
-    @cacheable
     def is_empty(self):
         """
-        Models instance is empty if it doesn't cover any models
-        (Caution: instance with empty factor list is not empty, but indeed
-        covering an empty model, thus not empty as Models instance)
+        Instance is empty if its list of factors-outcomes pairs is empty
         """
-        if not (hasattr(self, "factors") or hasattr(self, "outcomes")):
-            # Not having either signifies empty instance
-            return True
-        
-        if hasattr(self, "outcomes") and len(self.outcomes)==0:
-            # Instance with empty outcomes list is essentially an empty one
-            return True
-
-        return False
-
-    def enumerate(self):
-        """
-        Unroll the Models instance to generate every single model covered, along with
-        its joint probability.
-
-        (TODO?: Let's see later if we can come up with a more 'reactive' algorithm that
-        doesn't have to wait results from inner recursive calls)
-        """
-        factors_enums = []
-        if hasattr(self, "factors"):
-            for f in self.factors:
-                if isinstance(f, Models):
-                    # Recurse; another Models instance
-                    factors_enums.append(set(f.enumerate()))
-                else:
-                    # Base case; independent atoms with probability
-                    assert len(f) == 3
-                    if f[0] is None:
-                        # Signals violation of integrity constraint; disregard
-                        continue
-
-                    assert isinstance(f[0], Literal)
-
-                    lit_p = (frozenset([f[0]]), f[1])
-                    lit_n = (frozenset(), 1-f[1])
-
-                    if f[2] is None:
-                        factors_enums.append({lit_p, lit_n})
-                    else:
-                        if f[2]:
-                            factors_enums.append({lit_p})
-                        else:
-                            factors_enums.append({lit_n})
-
-            if len(factors_enums) > 0:
-                for model_choices in product(*factors_enums):
-                    yield (
-                        frozenset.union(*[mc[0] for mc in model_choices]),
-                        reduce(lambda p1,p2: p1*p2, [mc[1] for mc in model_choices])
-                    )
-
-        if hasattr(self, "outcomes"):
-            for o in self.outcomes:
-                # Each outcome entry is a tuple of a model for some program bottom in
-                # the splitting sequence of the program (tree actually), a weight sum
-                # applied to the bottom model, a Models instance for some program top,
-                # and a boolean flag denoting whether this outcome branch is filtered
-                # out and thus shouldn't contribute to 'covered' probability mass
-                bottom_model, bottom_w, top_models, filtered_out = o
-
-                # This part has not been updated to comply with recent changes, and we
-                # don't know what would happen here...
-                raise NotImplementedError
-
-                if top_models is None:
-                    yield (frozenset(bottom_model), bottom_pr)
-                else:
-                    for top_model, top_pr in top_models.enumerate():
-                        yield (frozenset(bottom_model | top_model), bottom_pr*top_pr)
+        return len(self.cfs_bos_pairs) == 0
 
     @cacheable
     def atoms(self):
-        """ Return all atoms occurring in models covered by instance """
+        """ Return all atoms occurring covered by instance """
         if self.is_empty():
-            # Empty Models instance
+            # Empty Models instance, return empty set
             return set()
 
-        if hasattr(self, "factors"):
-            atoms = set()
-            for f in self.factors:
-                if isinstance(f, Models):
-                    # Recurse; another Models instance
-                    atoms |= f.atoms()
-                else:
-                    # Base case; independent atoms with probability
-                    assert len(f) == 3
-                    if f[0] is None:
-                        # Signals violation of integrity constraint; disregard
-                        continue
-
-                    assert isinstance(f[0], Literal)
-                    if f[2] is None or f[2] == True:
-                        atoms.add(f[0])
-            
-            return atoms
-
-        if hasattr(self, "outcomes"):
-            bottom_models, branch_consequences = self.outcomes
-
-            if branch_consequences is None:
-                atoms = bottom_models.atoms()
+        atoms = set()
+        for cfs, bos in self.cfs_bos_pairs:
+            if bos is None:
+                # List of branch outcomes nonexistent; full consideration of all
+                # possible events from the bottom factors
+                atoms |= cfs.atoms()
             else:
-                atoms = set()
-                for bc in branch_consequences:
-                    # Each outcome entry is a tuple of a model for some program bottom in
-                    # the splitting sequence of the program (tree actually), a weight sum
-                    # applied to the bottom model, a Models instance for some program top,
-                    # and a boolean flag denoting whether this outcome branch is filtered
-                    # out and thus shouldn't contribute to 'covered' probability mass
-                    branch_event, bm_filtered, _, _, top_models, filtered_out = bc
-                    if filtered_out:
-                        # Disregard this outcome branch
-                        continue
+                # Only consider cases actually covered by branches
+                atoms |= bos.atoms()
+            
+        return atoms
 
-                    atoms |= bm_filtered.atoms()
-                    atoms |= {l for l in branch_event if l.naf==False}
-                    atoms |= top_models.atoms() if top_models is not None else set()
+    def enumerate(self):
+        """
+        Unroll the instance to generate every single model covered, along with its
+        total weight
+        """
+        if self.is_empty():
+            # Empty Models instance, yield nothing
+            raise StopIteration
 
-            return atoms
-
-        raise ValueError("Invalid Models instance")
+        for cfs, bos in self.cfs_bos_pairs:
+            if bos is None:
+                # List of branch outcomes nonexistent; full consideration of all
+                # possible events from the bottom factors
+                yield from cfs.enumerate()
+            else:
+                # Only consider cases actually covered by branches
+                for bottom_model, top_model in bos.enumerate():
+                    yield (bottom_model[0] | top_model[0], bottom_model[1] * top_model[1])
 
     @cacheable
     def compute_Z(self):
         """
         Compute and return total unnormalized probability mass covered by this instance
         """
-        return compute_Z(self)[1]
+        if self.is_empty():
+            # Empty Models instance, return zero
+            return Polynomial(float_val=0.0)
+
+        Z = Polynomial(float_val=1.0)
+        for cfs, bos in self.cfs_bos_pairs:
+            if bos is None:
+                # List of branch outcomes nonexistent; full consideration of all
+                # possible events from the bottom factors
+                Z = Z * cfs.compute_Z()
+            else:
+                # Only consider cases actually covered by branches
+                Z = Z * bos.compute_Z()
+
+        # if len(self.cfs_bos_pairs) == 1 and self.cfs_bos_pairs[0][1] is None:
+        #     # Simpler case with single-head Models instance without branching outcomes
+        #     return self.cfs_bos_pairs[0][0].compute_Z()
+
+        # outcomes_per_pair = [[] for _ in range(len(self.cfs_bos_pairs))]
+
+        # for i, (cfs, bos) in enumerate(self.cfs_bos_pairs):
+        #     if bos is None:
+        #         # List of branch outcomes nonexistent; full consideration of all
+        #         # possible events from the bottom factors
+        #         raise NotImplementedError
+        #     else:
+        #         # Only consider cases actually covered by branches
+        #         for bottom_model, top_model in bos.enumerate():
+        #             outcomes_per_pair[i].append((bottom_model, top_model))
+
+        # # Set of all bottom_models occurred
+        # all_bottom_models = set.union(*[
+        #     set(b_atms for (b_atms, _), (_, _) in outcomes)
+        #     for outcomes in outcomes_per_pair
+        # ])
+
+        # # Universe of all possible positive atoms in bottom models per pair
+        # bottom_univs_per_pair = [
+        #     frozenset.union(*[b_atms for (b_atms, _), (_, _) in outcomes])
+        #     for outcomes in outcomes_per_pair
+        # ]
+
+        # # Universe of all possible positive atoms in across all pairs
+        # bottom_univ = frozenset.union(*bottom_univs_per_pair)
+
+        # # Expand the witnessed all_bottom_models to all possible full instantiations
+        # all_bottom_models_full = set()
+        # for b_atms in all_bottom_models:
+        #     rest_possible_insts = product(*{
+        #         (atm, atm.flip()) for atm in bottom_univ - b_atms
+        #     })
+        #     for r_inst in rest_possible_insts:
+        #         r_inst = frozenset(r_inst)
+        #         all_bottom_models_full.add(b_atms | r_inst)
+
+        # # Finalize the set of full models
+        # all_models = defaultdict(list)
+        # for i, outcomes in enumerate(outcomes_per_pair):
+        #     pair_bottom_univ = bottom_univs_per_pair[i]
+        #     bottom_branches = [
+        #         (b_ev, b_Z)
+        #         for b_ev, _, b_Z, _, _, _ in self.cfs_bos_pairs[i][1].outcomes
+        #     ]
+
+        #     for (b_atms, b_Z), (t_atms, t_Z) in outcomes:
+        #         # Full specification of b_atms with respect to pair_bottom_univ
+        #         b_lits_pfull = b_atms | {atm.flip() for atm in pair_bottom_univ-b_atms}
+
+        #         # Possible full instantiations of b_atms
+        #         b_lits_full_insts = {
+        #             bm for bm in all_bottom_models_full if b_lits_pfull <= bm
+        #         }
+        #         for b_lits_full in b_lits_full_insts:
+        #             all_models[b_lits_full].append((
+        #                 b_Z, t_atms, t_Z, pair_bottom_univ, bottom_branches
+        #             ))
+
+        # # Collect Z from the final set of full models
+        # Z = Polynomial(float_val=0.0)
+        # for b_lits_full, consequences in all_models.items():
+        #     # How do we ensure we avoided duplicate counting of probability masses
+        #     # for the bottom branch event...? Here's an attempt...
+
+        #     # The goal is to incrementally build the bottom base Z until the
+        #     # whole bottom universe is covered
+        #     univ_covered = set()
+        #     bottom_base_Z = Polynomial(float_val=1.0)
+
+        #     while len(univ_covered) < len(bottom_univ):
+        #         # Incrementally cover the whole universe, each time by looking
+        #         # for a consequence item that would best achieve it
+        #         remainder_to_cover = bottom_univ - univ_covered
+        #         consq_best_overlap = max(
+        #             consequences, key=lambda c: len(c[3] & remainder_to_cover)
+        #         )
+        #         actual_overlap = consq_best_overlap[3] & remainder_to_cover
+
+        #         # Reference against which marginal contribution of covering the
+        #         # universe will be obtained
+        #         b_lits_full_compare = frozenset({
+        #             lit.flip() if lit.as_atom() in actual_overlap else lit
+        #             for lit in b_lits_full
+        #         })
+
+        #         event_Z = [
+        #             b_Z for b_ev, b_Z in consq_best_overlap[4]
+        #             if b_ev <= b_lits_full
+        #         ][0]
+        #         reference_Z = [
+        #             b_Z for b_ev, b_Z in consq_best_overlap[4]
+        #             if b_ev <= b_lits_full_compare
+        #         ][0]
+        #         marginal_Z = event_Z / reference_Z
+
+        #         univ_covered |= actual_overlap
+        #         bottom_base_Z = bottom_base_Z * marginal_Z
+
+        #     # Handling top Z values is easy, just multiply them altogether
+        #     total_top_Z = reduce(operator.mul, [c[2] for c in consequences])
+
+        #     Z += bottom_base_Z * total_top_Z
+
+        return Z
 
     @cacheable
     def filter(self, literals):
@@ -231,7 +224,29 @@ class Models:
         literals, so that formulas in conjunctive normal form can be processed with
         a chain of calls to filter.
         """
-        return filter_models(self, literals)
+        if self.is_empty():
+            # Empty Models instance, simply return self
+            return self
+        
+        filtered_pairs = []
+        for cfs, bos in self.cfs_bos_pairs:
+            if bos is None:
+                # List of branch outcomes nonexistent; full consideration of all
+                # possible events from the bottom factors
+                relevant_literals = literals & cfs.atoms()
+                if len(relevant_literals) > 0:
+                    filtered_pairs.append((cfs.filter(relevant_literals), bos))
+                else:
+                    filtered_pairs.append((cfs, bos))
+            else:
+                # Only consider cases actually covered by branches
+                relevant_literals = literals & bos.atoms()
+                if len(relevant_literals) > 0:
+                    filtered_pairs.append((cfs, bos.filter(relevant_literals)))
+                else:
+                    filtered_pairs.append((cfs, bos))
+
+        return Models(filtered_pairs)
 
     @cacheable
     def query(self, q_vars, event, per_assignment=True, per_partition=False):
@@ -247,8 +262,3 @@ class Models:
         tuple as q_vars indicates we have a wh-question.
         """
         return query(self, q_vars, event, per_assignment, per_partition)
-
-
-def _is_single_factor_models(f):
-    """ Tests if f is a factors-Models instance with only a single factor """
-    return isinstance(f, Models) and hasattr(f, "factors") and len(f.factors)==1

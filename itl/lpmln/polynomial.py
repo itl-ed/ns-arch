@@ -32,26 +32,35 @@ class Polynomial:
             else:
                 self.terms = dict(terms)
 
-    def __repr__(self):
-        if len(self.terms) == 0: return "Poly(0.0)"
+    def __str__(self):
+        if len(self.terms) == 0: return "0.0"
 
-        degree_repr = { 0: "", 1: "exp(a)", -1: "exp(-a)" }
-        terms_repr = [
+        degree_str = { 0: "", 1: "exp(a)", -1: "exp(-a)" }
+        terms_str = [
             (float(np.exp(self.terms[deg])), deg)
             for deg in sorted(self.terms, reverse=True)
         ]
-        terms_repr = [
+        terms_str = [
             (
                 f"{coeff:.1e}" if abs(coeff)>1e3 else f"{coeff:.1f}",
-                degree_repr.get(deg, f"exp({int(deg)}a)")
+                degree_str.get(deg, f"exp({int(deg)}a)")
             )
-            for coeff, deg in terms_repr
+            for coeff, deg in terms_str
         ]
-        terms_repr = [
+        terms_str = [
             f"{coeff_str}*{deg_str}" if deg_str!="" else coeff_str
-            for coeff_str, deg_str in terms_repr
+            for coeff_str, deg_str in terms_str
         ]
-        return f"Poly({'+'.join(terms_repr)})"
+
+        if hasattr(self, "denom_terms"):
+            self_denom_poly = Polynomial(self.denom_terms)
+            denom_str = str(self_denom_poly)
+            return f"({'+'.join(terms_str)})/({denom_str})"
+        else:
+            return f"{'+'.join(terms_str)}"
+
+    def __repr__(self):
+        return f"Poly({str(self)})"
 
     def __hash__(self):
         return hash(str(sorted(self.terms.items())))
@@ -63,35 +72,135 @@ class Polynomial:
     def __add__(self, other):
         """ Sum of two polynomials """
         assert isinstance(other, Polynomial)
-        all_degrees = set(self.terms) | set(other.terms)
-        poly_sum_terms = {}
 
-        for deg in all_degrees:
-            poly_sum_terms[deg] = float(np.logaddexp(
-                self.terms.get(deg, float("-inf")),
-                other.terms.get(deg, float("-inf"))
-            ))
+        if self.is_zero(): return other
+        if other.is_zero(): return self
 
-        return Polynomial(terms=poly_sum_terms)
+        if hasattr(self, "denom_terms") or hasattr(other, "denom_terms"):
+            # If fractions are involved, need recursive calls
+            common_denom = Polynomial(float_val=1.0)
+            self_num_poly = Polynomial(terms=self.terms)
+            other_num_poly = Polynomial(terms=other.terms)
+
+            if hasattr(self, "denom_terms"):
+                # self is a fraction
+                common_denom = common_denom * Polynomial(terms=self.denom_terms)
+                other_num_poly = other_num_poly * Polynomial(terms=self.denom_terms)
+            if hasattr(other, "denom_terms"):
+                # other is a fraction
+                common_denom = common_denom * Polynomial(terms=other.denom_terms)
+                self_num_poly = self_num_poly * Polynomial(terms=other.denom_terms)
+
+            return (self_num_poly + other_num_poly) / common_denom
+
+        else:
+            # Base case; sum of two polys without denominators
+            all_degrees = set(self.terms) | set(other.terms)
+            poly_sum_terms = {}
+
+            for deg in all_degrees:
+                poly_sum_terms[deg] = float(np.logaddexp(
+                    self.terms.get(deg, float("-inf")),
+                    other.terms.get(deg, float("-inf"))
+                ))
+
+            return Polynomial(terms=poly_sum_terms)
 
     def __mul__(self, other):
         """ Multiplication of two polynomials """
         assert isinstance(other, Polynomial)
-        term_products = product(self.terms.items(), other.terms.items())
-        expanded_terms = [
-            (deg1+deg2, coeff1+coeff2)
-            for (deg1, coeff1), (deg2, coeff2) in term_products
-        ]
 
-        poly_product_terms = defaultdict(lambda: float("-inf"))
-        for deg, coeff in expanded_terms:
-            poly_product_terms[deg] = float(np.logaddexp(poly_product_terms[deg], coeff))
+        if self.is_zero() or other.is_zero():
+            # Multiplication by zero
+            return Polynomial(float_val=0.0)
 
-        return Polynomial(terms=poly_product_terms)
+        if hasattr(self, "denom_terms") or hasattr(other, "denom_terms"):
+            # If fractions are involved, need recursive calls
+            # and denominators
+            self_num_poly = Polynomial(terms=self.terms)
+            other_num_poly = Polynomial(terms=other.terms)
+            multiplied = self_num_poly * other_num_poly
+
+            new_denom_poly = Polynomial(float_val=1.0)
+            if hasattr(self, "denom_terms"):
+                # self is a fraction
+                new_denom_poly = new_denom_poly * Polynomial(terms=self.denom_terms)
+            if hasattr(other, "denom_terms"):
+                # other is a fraction
+                new_denom_poly = new_denom_poly * Polynomial(terms=other.denom_terms)
+
+            if new_denom_poly.terms != { 0: 0.0 }:
+                setattr(multiplied, "denom_terms", new_denom_poly.terms)
+
+            return multiplied
+
+        else:
+            # Base case; multiplication of two polys without denominators
+            term_products = product(self.terms.items(), other.terms.items())
+            expanded_terms = [
+                (deg1+deg2, coeff1+coeff2)
+                for (deg1, coeff1), (deg2, coeff2) in term_products
+            ]
+
+            poly_product_terms = defaultdict(lambda: float("-inf"))
+            for deg, coeff in expanded_terms:
+                poly_product_terms[deg] = float(np.logaddexp(poly_product_terms[deg], coeff))
+
+            return Polynomial(terms=poly_product_terms)
+
+    def __truediv__(self, other):
+        """ Division of self by some other polynomial """
+        assert isinstance(other, Polynomial)
+        assert not other.is_zero(), "Cannot divide by zero"
+
+        if len(other.terms) == 1:
+            # Division by single-term poly is simple
+            o_deg = list(other.terms)[0]
+            o_coeff = other.terms[o_deg]
+            poly_div_terms = {
+                deg-o_deg: coeff-o_coeff for deg, coeff in self.terms.items()
+            }
+            return Polynomial(terms=poly_div_terms)
+        else:
+            # Division by multi-term poly generally has to involve fractions...
+            if hasattr(other, "denom_terms"):
+                other_inverted = Polynomial(terms=other.denom_terms)
+            else:
+                other_inverted = Polynomial(float_val=1.0)
+            setattr(other_inverted, "denom_terms", other.terms)
+
+            return self * other_inverted
 
     def is_zero(self):
         """ Test if the value of self is zero (empty self.terms) """
         return len(self.terms) == 0
+
+    def at_limit(self):
+        """
+        Return value when applying the asymptotic limit of alpha (hard weight term)
+        to infinity where appropriate.
+        """
+        if self.is_zero():
+            # Numerator is zero, just return zero
+            return 0.0
+
+        if hasattr(self, "denom_terms"):
+            # Has denominator, need to consider both numerator and denominator
+            if max(self.terms) > max(self.denom_terms):
+                return float("inf")
+            elif max(self.terms) < max(self.denom_terms):
+                return 0.0
+            else:
+                max_degree = max(self.terms)
+                return float(np.exp(self.terms[max_degree] - self.denom_terms[max_degree]))
+        else:
+            # Doesn't have denominator
+            if max(self.terms) > 0:
+                return float("inf")
+            elif max(self.terms) < 0:
+                return 0.0
+            else:
+                return float(np.exp(self.terms[0]))
 
     def primitivize(self):
         """
@@ -109,41 +218,11 @@ class Polynomial:
             deg_str = "" if abs(deg)==1 else str(deg)
             return f"{sign_str}{deg_str}a"
 
-    def ratio_at_limit(self, other):
-        """
-        Dividng a polynomial by another to find the ratio, applying the asymptotic
-        limit of alpha (hard weight term) to infinity where appropriate. Does not
-        intend to cover cases where self has higher degree than other, raise error
-        for such inputs.
-        """
-        assert isinstance(other, Polynomial)
-        if len(other.terms) == 0:
-            # Denominator is zero, shouldn't happen
-            raise ValueError
-        if len(self.terms) == 0:
-            # Numerator is zero, just return poly1
-            return 0.0
-
-        # Maximum degree of exp(a) for both poly1 and poly2
-        max_degree = max(max(self.terms), max(other.terms))
-        assert max_degree == max(other.terms)
-
-        if max(self.terms) < max_degree:
-            # At the limit of alpha, if the maximum degree in poly1 is lower than the
-            # maximum degree for both, the ratio becomes zero
-            return 0.0
-        else:
-            # If poly1 is not dominated by higher degree of poly2, return the ratio of
-            # coefficients for the max degree terms, as lower degree terms can safely
-            # be disregarded at the limit of alpha
-            assert max(self.terms) == max_degree
-            return float(np.exp(self.terms[max_degree] - other.terms[max_degree]))
-
     @staticmethod
     def from_primitive(prm):
         """
-        Convert from appropriate value in primitive type; float for soft weight, str
-        for hard weight.
+        Convert from appropriate value (already in log-space) in primitive type;
+        float for soft weight, str for hard weight.
         """
         assert type(prm) == float or type(prm) == str
 

@@ -8,7 +8,6 @@ import wandb
 from dotenv import find_dotenv, load_dotenv
 from iopath.common.file_io import PathManager as PathManagerBase
 from iopath.common.file_io import PathHandler, HTTPURLHandler, get_cache_dir
-from detectron2.utils.file_io import Detectron2Handler
 
 __all__ = ["PathManager"]
 
@@ -24,7 +23,10 @@ class WandbHandler(PathHandler):
 
     def __init__(self):
         super().__init__()
-        load_dotenv(find_dotenv(raise_error_if_not_found=True))
+        try:
+            load_dotenv(find_dotenv(raise_error_if_not_found=True))
+        except OSError as e:
+            print(f"While reading dotenv: {e}")
 
     def _get_supported_prefixes(self):
         return [self.PREFIX]
@@ -53,5 +55,4 @@ class WandbHandler(PathHandler):
         return PathManager.open(self._get_local_path(path), mode, **kwargs)
 
 PathManager.register_handler(HTTPURLHandler())
-PathManager.register_handler(Detectron2Handler())
 PathManager.register_handler(WandbHandler())

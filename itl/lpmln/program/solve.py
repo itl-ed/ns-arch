@@ -1,4 +1,5 @@
 """ Recursive Program().solve() subroutine factored out """
+import operator
 from itertools import product, chain, combinations
 from functools import reduce
 from multiset import FrozenMultiset
@@ -9,9 +10,8 @@ import networkx as nx
 
 from ..literal import Literal
 from ..rule import Rule
-from ..models import Models
-from ..models.filter import filter_models
-from ..topk_subset import topk_subset_gen
+from ..polynomial import Polynomial
+from ..models import Models, ModelsCommonFactors, ModelsBranchOutcomes
 from ..utils import logit
 from ..utils.logic import cnf_to_dnf, simplify_cnf
 
@@ -22,8 +22,6 @@ def recursive_solve(prog, scale_prec):
     decision trees. Each child of a node in a tree represents a possible answer
     set for the program, along with the probability value for the model. The
     forest can be used to answer queries on marginal probabilities of atoms.
-    Some low-probability models may be pruned, resulting in the total joint
-    probabilities not summing to one.
     """
     from .program import Program
 
@@ -66,109 +64,117 @@ def recursive_solve(prog, scale_prec):
         comp_condensed = nx.condensation(comp)
         scc_members = nx.get_node_attributes(comp_condensed, "members")
 
-        # Locate all source & sink nodes in the condensed component
-        sources = [n for n, deg in comp_condensed.in_degree if deg==0]
+        # Locate all sink nodes in the condensed component
         sinks = [n for n, deg in comp_condensed.out_degree if deg==0]
 
-        # Initialize frontier as singleton list containing a dummy node, which depends
-        # on all sink nodes in the condensed component. Note that the frontier is defined
-        # at the condensation level, where each node corresponds to independently solvable
-        # subprograms given values of condensation-parent nodes.
+        # Initialize frontier as singleton list containing a dummy node. The frontier is
+        # defined at the condensation level, where each node corresponds to independently
+        # solvable subprograms given values of condensation-parent nodes.
         comp_condensed.add_node(-1)
         for sn in sinks:
             comp_condensed.add_edge(sn, -1)
-        frontier = [frozenset([-1])]
-
-        # Indexing each node in condensed component by their bottom sources
-        node_sources = {
-            cn: frozenset((nx.ancestors(comp_condensed, cn) | {cn}) & set(sources))
-            for cn in comp_condensed.nodes
-        }
+        frontier = {frozenset([-1])}
 
         # Then continue expanding the frontier downward by replacing each node with its
-        # parent nodes, based on the following criteria:
-        # 0) (Trivial) Always expand the topmost dummy node
-        # 1) (Trivial) Stop expanding if reached a source node
-        # 2) If length of parent node sets (grouped by any overlap of source nodes covered)
-        #    is one, always expand
-        # 3) Else, expand only if it is expected to reduce the total amount of computation
-        #    required for solving (sub)programs covering this component
-        unexplored_frontier = True; frontier_final = []; backtrack_paths = {}
+        # parent nodes until source nodes are reached. During frontier expansion, mind
+        # overlapping parents.
+        unexplored_frontier = True; reached_source = set(); backtrack_paths = {}
         while unexplored_frontier:
-            expanded = []; new_frontier_nodes = []
+            expanded = False; new_frontier_nodes = set()
             for fns in frontier:
-                # Group parent nodes by source overlap
-                parent_node_sets = {}
+                # Check for other nodes with overlapping parents
                 fns_parents = frozenset([
                     parent for fn in fns for parent, _ in comp_condensed.in_edges(fn)
+                    if parent not in fns    # Safely disregard dependency within fns
                 ])
-                for parent in fns_parents:
-                    # Safely disregard dependency within fns
-                    if parent in fns: continue
+                if len(fns_parents) == 0:
+                    # No parent nodes at all
+                    reached_source.add(fns)
+                    continue
 
-                    parent_sources = node_sources[parent]
-                    overlapping_parents = [
-                        srcs for srcs in parent_node_sets
-                        if len(srcs & parent_sources) > 0
-                    ]
+                overlapping_parents = {
+                    cns: fns_parents & frozenset.union(*pnss)
+                    for cns, pnss in backtrack_paths.items()
+                }
+                overlapping_parents = {
+                    cns: pns for cns, pns in overlapping_parents.items()
+                    if len(pns) > 0
+                }
 
-                    if len(overlapping_parents) > 0:
-                        # Merge with existing record, then del existing key
-                        to_merge = frozenset.union(*[
-                            parent_node_sets[srcs] for srcs in overlapping_parents
-                        ])
-                        for srcs in overlapping_parents: del parent_node_sets[srcs]
-                        merged_sources = frozenset.union(*overlapping_parents)
-                        merged_sources |= parent_sources
-                        parent_node_sets[merged_sources] = frozenset({parent} | to_merge)
+                # Merge any overlaps to form coupled node sets, effectively partitioning
+                # the parent nodes
+                overlap_chunks = set()
+                for overlap in overlapping_parents.values():
+                    chunks_to_merge = {
+                        chk for chk in overlap_chunks if len(chk & overlap) > 0
+                    }
+
+                    if len(chunks_to_merge) == 0:
+                        # Fresh chunk to add
+                        overlap_chunks.add(overlap)
                     else:
-                        # New entry
-                        parent_node_sets[parent_sources] = frozenset({parent})
+                        # Replace chunks with overlaps with a new merged chunk
+                        merged_chunk = frozenset.union(*chunks_to_merge)
+                        overlap_chunks.add(merged_chunk)
+                        for chk in chunks_to_merge: overlap_chunks.remove(chk)
+                
+                # Finalized partitioning of parents
+                coupled_parents = frozenset.union(*overlap_chunks) \
+                    if len(overlap_chunks) > 0 else frozenset()
+                unseen_parents = fns_parents - coupled_parents
 
-                if fns == frozenset([-1]):
-                    # Case 0); first iteration with dummy node
-                    new_frontier_nodes += list(parent_node_sets.values())
-                    backtrack_paths[fns] = list(parent_node_sets.values())
-                    expanded.append(fns)
-                    continue
+                parent_node_sets = {frozenset([pn]) for pn in unseen_parents}
+                parent_node_sets |= overlap_chunks
 
-                if fns_parents <= fns:
-                    # Case 1); all parent nodes already expanded (if any), no more
-                    # nodes to expand
-                    frontier_final.append(fns)
-                    continue
+                backtrack_paths[fns] = parent_node_sets
 
-                if len(parent_node_sets) == 1:
-                    # Case 2); single branching
-                    new_frontier_nodes += list(parent_node_sets.values())
-                    backtrack_paths[fns] = list(parent_node_sets.values())
-                    expanded.append(fns)
-                    continue
-
-                # If current frontier is not expanded, 2**(# source nodes for fns) enumeration
-                # expected
-                cost_if_unexp = 2**len(frozenset.union(*[pns for pns in parent_node_sets]))
-
-                # If current frontier is expanded, 2**(# source nodes for pns) enumeration
-                # expected for each (memoizable) parent node set pns, plus 2 ** (# branches)
-                cost_if_exp = 2**len(parent_node_sets) + \
-                    sum(2**len(pns) for pns in set(parent_node_sets))
-
-                if cost_if_unexp > cost_if_exp:
-                    # Case 3); branching expected to decrease total amount of computation
-                    # required
-                    new_frontier_nodes += list(parent_node_sets.values())
-                    backtrack_paths[fns] = list(parent_node_sets.values())
-                    expanded.append(fns)
-                else:
-                    # Expansion not expected to bring computation save; add to final frontier
-                    frontier_final.append(fns)
+                if len(unseen_parents) > 0:
+                    new_frontier_nodes |= set(parent_node_sets)
+                    expanded = True
 
             # Update frontier and test if further (tests for) expansions are necessary
-            unexplored_frontier = len(expanded) > 0
+            unexplored_frontier = expanded
             if unexplored_frontier:
                 frontier = new_frontier_nodes
         del backtrack_paths[frozenset([-1])]    # Dummy not needed, shouldn't be iterated over
+
+        # Set of all chunks where any overlapping ones are merged
+        chunks_witnessed = reached_source | set(backtrack_paths)
+        if len(backtrack_paths) > 0:
+            chunks_witnessed |= set.union(*backtrack_paths.values())
+        
+        all_chunks = set()
+        for cns in chunks_witnessed:
+            if any(cns > chk for chk in all_chunks):
+                all_chunks = {cns if cns > f else f for f in all_chunks}
+            elif any(cns < chk for chk in all_chunks):
+                continue
+            else:
+                all_chunks.add(cns)
+        
+        # Finalized frontier
+        frontier_final = set()
+        for cns in reached_source:
+            supersets = {chk for chk in all_chunks if cns < chk}
+            if len(supersets) > 0:
+                frontier_final |= supersets
+            else:
+                frontier_final.add(cns)
+
+        if len(backtrack_paths) > 0:
+            # Update backtrack_paths so that it complies with the partitioning of parent
+            # node sets in frontier_final
+            for cns, pnss in backtrack_paths.items():
+                matching_chunks = [
+                    [f for f in frontier_final if pns < f] for pns in pnss
+                ]
+                backtrack_paths[cns] = {
+                    chks[0] if len(chks) > 0 else pns
+                    for pns, chks in zip(pnss, matching_chunks)
+                }
+            
+            # and vice versa
+
 
         # For each node set in the finalized frontier, find the subgraph and then (grounded)
         # subprogram such that estimation of probabilities for the node set can be obtained
@@ -191,7 +197,7 @@ def recursive_solve(prog, scale_prec):
 
             # Solve this subprogram; how it will be achieved depends on the result of
             # splitting this subprogram
-            bottom, top, found_split = Program.split(subcomp, atoms_map, gr_subprog)
+            bottom, top, _ = Program.split(subcomp, atoms_map, gr_subprog)
             bottom_gr_facts_only = _grounded_facts_only([r for r, _ in bottom.rules])
             is_trivial_split = top is None
 
@@ -201,11 +207,8 @@ def recursive_solve(prog, scale_prec):
                     # (Assuming only one fact is present with the atom as head)
                     subprog_models = _models_from_rule_heads(bottom.rules)
                 else:
-                    raise NotImplementedError
-                    # Solve the bottom with clingo and return answer sets (with associated
-                    # probabilities)
-                    bottom_atoms = {atoms_inv_map[n] for n in found_split}
-
+                    # Solve the bottom with clingo and return answer sets (with total
+                    # associated total weights)
                     ctl = clingo.Control(["--warn=none"])
                     ctl.add("base", [], bottom._pure_ASP_str(unsats=True))
                     ctl.ground([("base", [])])
@@ -224,15 +227,29 @@ def recursive_solve(prog, scale_prec):
                     ]
                     bottom_models = [
                         (
-                            [Literal.from_clingo_symbol(a) for a in atoms],
-                            reduce(_sum_weights, [
-                                ([0.0, -1.0] if a.arguments[1].positive else [0.0, 1.0])
+                            {Literal.from_clingo_symbol(a) for a in atoms},
+                            reduce(operator.mul, [
+                                (Polynomial(terms={ -1: 0.0 }) if a.arguments[1].positive
+                                    else Polynomial(terms={ 1: 0.0 }))
                                 if a.arguments[1].type == clingo.SymbolType.Function
-                                else [-a.arguments[1].number / scale_prec, 0.0] for a in unsats
+                                else Polynomial(terms={ 0: -a.arguments[1].number / scale_prec })
+                                for a in unsats
                             ])
                         )
                         for atoms, unsats in bottom_models
                     ]
+
+                    all_atoms = set.union(*[bm for bm, _ in bottom_models])
+                    bottom_outcomes = [
+                        (
+                            bm | {atm.flip() for atm in all_atoms-bm}, None, weights_exp,
+                            Polynomial(float_val=1.0), None, False
+                        )
+                        for bm, weights_exp in bottom_models
+                    ]
+                    subprog_models = Models([
+                        (None, ModelsBranchOutcomes(bottom_outcomes))
+                    ])
             else:
                 # Solve the bottom for models, obtain & solve the reduced top for
                 # each bottom model
@@ -291,19 +308,17 @@ def recursive_solve(prog, scale_prec):
                 )
 
         # By now all sink nodes in the condensed component should have been solved
-        # and assigned some Models instance. Construct an outcomes-Models instance
-        # as the final representation of probabilistic answer sets engendered by
-        # this component; 'bottom' models should contain models for all sink nodes,
-        # where per-choice consequences are not defined (no further ASP rule to follow).
+        # and assigned some Models instance. Construct a Models instance as the final
+        # representation of probabilistic answer sets engendered by this component.
         sink_nodes_models = [
             ms for cns, ms in models_per_node_set.items()
             if all(cn in sinks for cn in cns)
         ]
-        sink_nodes_models = Models(factors=sink_nodes_models)
-        comp_models = Models(outcomes=(sink_nodes_models, None))
+        comp_cfs_bos_pairs = sum([ms.cfs_bos_pairs for ms in sink_nodes_models], [])
+        comp_models = Models(comp_cfs_bos_pairs)
         indep_trees.append(comp_models)
 
-    models = Models(factors=indep_trees)
+    models = Models([(ModelsCommonFactors(indep_trees), None)])
 
     return models
 
@@ -391,14 +406,13 @@ def _ground_and_factorize(prog):
                 for cs in product(*possible_substs.values())
             ]           # Flatten products into list of all possible groundings
         else:
-            possible_substs = []
+            possible_substs = [{}]
         
         for subst in possible_substs:
             # For each possible grounding of this rule
             subst = { (v, True): (c, False) for v, c in subst.items() }
             gr_rule = rule.substitute(terms=subst)
 
-            gr_head_pos = [ghl for ghl in gr_rule.head if ghl.naf==False]
             gr_body_pos = [gbl for gbl in gr_rule.body if gbl.naf==False]
             gr_body_neg = [gbl for gbl in gr_rule.body if gbl.naf==True]
 
@@ -416,15 +430,6 @@ def _ground_and_factorize(prog):
             ]
             gr_body_filtered = gr_body_pos + gr_body_neg_filtered
 
-            # If rule body becomes empty after the filtering of ungroundable body atoms
-            # in gr_body_neg, and rule head atom is not groundable, this grounded rule
-            # will be always violated; in such cases will always fire, and we can dismiss
-            # the rule
-            body_always_sat = len(gr_body_filtered) == 0
-            head_always_unsat = not any(ghl in atoms_map for ghl in gr_head_pos)
-            if body_always_sat and head_always_unsat:
-                continue
-            
             # Add this grounded rule to the list with r_pr and index
             gr_rule = Rule(head=gr_rule.head, body=gr_body_filtered)
             grounded_rules.add((gr_rule, r_pr, ri))
@@ -454,10 +459,10 @@ def _ground_and_factorize(prog):
             atoms_map[aux_lit] = aux_i
             atoms_inv_map[aux_i] = aux_lit
 
+            dep_graph.add_node(aux_i)
             for gbl in gr_rule.body:
                 gbl_i = atoms_map[gbl.as_atom()]
                 dep_graph.add_node(gbl_i)
-                dep_graph.add_node(aux_i)
                 dep_graph.add_edge(gbl_i, aux_i)
 
     grounded_rules = FrozenMultiset([(gr_rule, r_pr) for gr_rule, r_pr, _ in grounded_rules])
@@ -493,7 +498,9 @@ def _models_from_rule_heads(rules):
         )
         for f, r_pr in rules
     ]
-    return Models(factors=rules_factors)
+    return Models([
+        (ModelsCommonFactors(rules_factors), None)
+    ])
 
 
 def _models_from_bottom_factors_and_top(
@@ -554,7 +561,8 @@ def _models_from_bottom_factors_and_top(
 
         bottom_indep_branches.append(branches)
 
-    bottom_models = Models(factors=bottom_factors)
+    # Package into a common factors instance
+    bottom_factors = ModelsCommonFactors(bottom_factors)
 
     # Process each full specification of independent branch cases and
     # aggregate total (unnormalized) probability mass
@@ -567,22 +575,25 @@ def _models_from_bottom_factors_and_top(
         # will be used to reduce top program)
         total_ev_disj = cnf_to_dnf(total_ev_conj)
 
-        # For each disjunct, filter bottom_models with corresponding event and
+        # For each disjunct, filter bottom_factors with corresponding event and
         # obtain unnormalized probability for the branch
-        bottom_models_filtered = [
-            reduce(filter_models, [bottom_models]+[{lit} for lit in djct])
+        bottom_factors_filtered = [
+            reduce(
+                lambda bf, ls: bf.filter(ls),
+                [bottom_factors]+[frozenset([lit]) for lit in djct]
+            )
             for djct in total_ev_disj
         ]
         unnorm_pmasses = [
-            bm_filtered.compute_Z()
-            for bm_filtered in bottom_models_filtered
+            bf_filtered.compute_Z()
+            for bf_filtered in bottom_factors_filtered
         ]
 
         # Weed out branch with zero possibility (i.e. zero probability mass)
         total_ev_disj = [
-            (djct, bm_filtered, pmass)
-            for djct, bm_filtered, pmass
-            in zip(total_ev_disj, bottom_models_filtered, unnorm_pmasses)
+            (djct, bf_filtered, pmass)
+            for djct, bf_filtered, pmass
+            in zip(total_ev_disj, bottom_factors_filtered, unnorm_pmasses)
             if not pmass.is_zero()
         ]
 
@@ -594,26 +605,16 @@ def _models_from_bottom_factors_and_top(
         # solving to list of consequences per branch event
         consequences_per_choice += [
             (
-                djct, bm_filtered, pmass, base_w,
+                djct, bf_filtered, pmass, base_w,
                 recursive_solve(reduced_prog, scale_prec), False
             )
-            for (djct, bm_filtered, pmass), (reduced_prog, base_w)
+            for (djct, bf_filtered, pmass), (reduced_prog, base_w)
             in zip(total_ev_disj, reduced_top_programs)
         ]
 
     # Collate the result into an outcomes-Models instance
-    outcomes = (bottom_models, consequences_per_choice)
-    return Models(outcomes=outcomes)
-
-
-def _sum_weights(w1, w2):
-    """
-    Sum of weight sums, each represented as a binomial consisting of a zeroth
-    degree term and first degree term (for "a"), represented as iterable of
-    number with length of 2
-    """
-    assert len(w1) == 2 and len(w2) == 2
-    return [w1[0]+w2[0], w1[1]+w2[1]]
+    cfs_bos_pairs = [(bottom_factors, ModelsBranchOutcomes(consequences_per_choice))]
+    return Models(cfs_bos_pairs)
 
 
 def _powerset(iterable):
