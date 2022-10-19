@@ -6,5 +6,6 @@ is basically weighted model counting for ASP.
 from .literal import Literal
 from .rule import Rule
 from .program import Program
+from .polynomial import Polynomial
 
-__all__ = ["Literal", "Rule", "Program"]
+__all__ = ["Literal", "Rule", "Program", "Polynomial"]

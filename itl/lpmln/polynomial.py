@@ -216,6 +216,11 @@ class Polynomial:
             # Return as str
             sign_str = "-" if coeff < 0 else ""
             deg_str = "" if abs(deg)==1 else str(deg)
+            
+            if coeff != 0.0:
+                # I wonder this will ever happen...
+                raise ValueError
+
             return f"{sign_str}{deg_str}a"
 
     @staticmethod

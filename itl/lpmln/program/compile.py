@@ -311,20 +311,20 @@ def _rule_to_potential(rule, r_pr, atoms_map):
         for bl in rule.body
     ])
 
+    # We won't consider idiosyncratic cases with negative rule head literals
+    assert all(hl>0 for hl in rh_by_ind)
+
     cases = {
-        frozenset(case)
-        for case in product(*[(ai, -ai) for ai in atoms_by_ind])
+        frozenset(case) for case in product(*[(ai, -ai) for ai in atoms_by_ind])
     }
 
     # Requirements of external support (for positive atoms), computed as follows:
-    # 1) If body is true for case, all of positive body atoms
-    # 2) If body is not true, intersection of case and negative body atoms (i.e.
-    #    reason why body is not true), plus the head atom if head is true
+    # 1) Any atoms positive in the case that are not the rule head...
+    # 2) ... but head atom is exempt if body is true (i.e. the rule licenses head
+    #    if body is true)
     pos_requirements = {
-        case: frozenset({bl for bl in rb_by_ind if bl>0})
-            if rb_by_ind <= case
-            else case & frozenset({-bl for bl in rb_by_ind if bl<0}) | \
-                (rh_by_ind if rh_by_ind <= case else frozenset())
+        case: frozenset({cl for cl in case if cl>0}) - \
+            (rh_by_ind if rb_by_ind <= case else frozenset())
         for case in cases
     }
 
@@ -346,7 +346,7 @@ def _rule_to_potential(rule, r_pr, atoms_map):
                 # Rule weight of exp(w) missed in case of deductive violations (i.e.
                 # when body is true but head is not)
                 pos_clearances[case]:  Polynomial(float_val=1.0)
-                    if (rb_by_ind <= case) and (not rh_by_ind <= case)
+                    if (rb_by_ind <= case) and (len(rh_by_ind)==0 or not rh_by_ind <= case)
                     else Polynomial.from_primitive(r_pr_logit)
             }
             for case in cases
@@ -359,7 +359,7 @@ def _rule_to_potential(rule, r_pr, atoms_map):
             frozenset(case): { pos_clearances[case]: Polynomial(float_val=1.0) }
             for case in cases
             # Zero potential for deductive violations
-            if not ((rb_by_ind <= case) and (not rh_by_ind <= case))
+            if not ((rb_by_ind <= case) and (len(rh_by_ind)==0 or not rh_by_ind <= case))
         }
 
     return potential

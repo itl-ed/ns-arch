@@ -30,7 +30,7 @@ class AgentCompositeActions:
         question info provided from user.
         """
         # This mismatch is about to be handled
-        self.agent.theoretical.mismatches.remove(mismatch)
+        self.agent.symbolic.mismatches.remove(mismatch)
 
         rule, _ = mismatch
 
@@ -103,7 +103,7 @@ class AgentCompositeActions:
         to actually answer it by adding a new agenda item.
         """
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
-        translated = self.agent.theoretical.translate_dialogue_content(dialogue_state)
+        translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
         _, question = translated[ui]
 
@@ -128,13 +128,13 @@ class AgentCompositeActions:
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
         _, _, orig_utt = dialogue_state["record"][ui]
 
-        translated = self.agent.theoretical.translate_dialogue_content(dialogue_state)
+        translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
         _, question = translated[ui]
         assert question is not None
 
         q_vars, _ = question
-        models_vl, _ = self.agent.theoretical.concl_vis_lang
+        bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
         # Ensure it has every ingredient available needed for making most informed judgements
         # on computing the best answer to the question. Specifically, scene graph outputs from
@@ -142,7 +142,7 @@ class AgentCompositeActions:
         # critical influence on the symbolic sensemaking process. Make sure such entities, if
         # actually present, are captured in scene graphs by performing visual search as needed.
         if len(self.agent.lt_mem.kb.entries) > 0:
-            search_specs = self._search_specs_from_kb(question, models_vl)
+            search_specs = self._search_specs_from_kb(question, bjt_vl)
             if len(search_specs) > 0:
                 self.agent.vision.predict(
                     None, label_exemplars=self.agent.lt_mem.exemplars,
@@ -150,15 +150,15 @@ class AgentCompositeActions:
                 )
 
                 #  ... and another round of sensemaking
-                exported_kb = self.agent.lt_mem.kb.export_reasoning_program(self.agent.vision.scene)
-                self.agent.theoretical.sensemake_vis(self.agent.vision.scene, exported_kb)
-                self.agent.theoretical.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
-                self.agent.theoretical.sensemake_vis_lang(dialogue_state)
+                exported_kb = self.agent.lt_mem.kb.export_reasoning_program()
+                self.agent.symbolic.sensemake_vis(self.agent.vision.scene, exported_kb)
+                self.agent.symbolic.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
+                self.agent.symbolic.sensemake_vis_lang(dialogue_state)
 
-                models_vl, _ = self.agent.theoretical.concl_vis_lang
+                bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
-        # Compute raw answer candidates by appropriately querying current world models
-        answers_raw, _ = models_vl.query(*question)
+        # Compute raw answer candidates by appropriately querying compiled BJT
+        answers_raw = self.agent.symbolic.query(bjt_vl, *question)
 
         if q_vars is not None:
             # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
@@ -169,11 +169,11 @@ class AgentCompositeActions:
 
         # Pick out an answer to deliver; maximum confidence
         if len(answers_raw) > 0:
-            max_score = max(s[1] for s in answers_raw.values())
+            max_score = max(answers_raw.values())
             answer_selected = random.choice([
-                a for (a, (_, s)) in answers_raw.items() if s == max_score
+                a for (a, s) in answers_raw.items() if s == max_score
             ])
-            _, ev_prob = answers_raw[answer_selected]
+            ev_prob = answers_raw[answer_selected]
         else:
             answer_selected = (None,) * len(q_vars)
             ev_prob = None
@@ -236,11 +236,11 @@ class AgentCompositeActions:
         # Push the translated answer to buffer of utterances to generate
         self.agent.lang.dialogue.to_generate.append(answer_translated)
 
-    def _search_specs_from_kb(self, question, ref_models):
+    def _search_specs_from_kb(self, question, ref_bjt):
         """
         Factored helper method for extracting specifications for visual search,
         based on the agent's current knowledge-base entries and some sensemaking
-        result provided as a Models instance
+        result provided as a compiled binary join tree (BJT)
         """
         q_vars, q_rules = question
 
@@ -375,7 +375,8 @@ class AgentCompositeActions:
 
                 # Check if the agent is already (visually) aware of the potential search
                 # targets; if so, disregard this one
-                check_result, _ = ref_models.query(
+                check_result = self.agent.symbolic.query(
+                    ref_bjt,
                     tuple((v, False) for v in search_vars),
                     frozenset([Rule(head=l) for l in lits])
                 )

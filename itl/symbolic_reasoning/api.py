@@ -1,5 +1,5 @@
 """
-theoretical reasoning module API that exposes only the high-level functionalities
+symbolic reasoning module API that exposes only the high-level functionalities
 required by the ITL agent: make sense out of the current visual & language inputs
 plus existing knowledge stored in knowledge base.
 
@@ -8,19 +8,19 @@ perceived information from various modalities to establish a set of judgements s
 in such a manner that they can later be exploited for other symbolic reasoning tasks --
 in light of the existing general knowledge held by the perceiving agent.
 
-(I borrow the term 'sensemaking' from the discipline of theoretical science & psychology.
+(I borrow the term 'sensemaking' from the discipline of symbolic science & psychology.
 According to Klein (2006), sensemaking is "the process of creating situational awareness
 and understanding in situations of high complexity or uncertainty in order to make decisions".)
 
 Here, we resort to declarative programming to encode individual sensemaking problems into
-logic programs (written in the language of weighted ASP) and solve with a dedicated solver
-(clingo).
+logic programs (written in the language of weighted ASP), which are solved with a belief
+propagation method.
 """
 from itertools import product
-from collections import defaultdict
 
 import numpy as np
 
+from .query import query
 from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import wrap_args
 
@@ -33,7 +33,7 @@ SCORE_THRES = 0.5      # Only consider recognised categories with category score
                         # than this value, unless focused attention warranted by KB
 LOWER_THRES = 0.3       # Lower threshold for predicates that deserve closer look
 
-class TheoreticalReasonerModule:
+class SymbolicReasonerModule:
 
     def __init__(self):
         self.concl_vis = None
@@ -116,10 +116,10 @@ class TheoreticalReasonerModule:
 
         # Solve with clingo to find the best models of the program
         prog = pprog + inference_prog
-        models_v = prog.solve()
+        bjt_v = prog.compile()
 
         # Store sensemaking result as module state
-        self.concl_vis = models_v, prog
+        self.concl_vis = bjt_v, prog
     
     def resolve_symbol_semantics(self, dialogue_state, lexicon):
         """
@@ -159,9 +159,9 @@ class TheoreticalReasonerModule:
 
         # Add priming effect by recognized visual concepts
         if self.concl_vis is not None:
-            models_v, _ = self.concl_vis
+            bjt_v, _ = self.concl_vis
             ## TODO: uncomment after updating compute_marginals
-            # marginals_v = models_v.compute_marginals()
+            # marginals_v = bjt_v.compute_marginals()
 
             # if marginals_v is not None:
             #     vis_concepts = defaultdict(float)
@@ -209,10 +209,13 @@ class TheoreticalReasonerModule:
                         # Below not required if all occurring args are hard-assigned to some entity
                         continue
 
-                    # If models_v is present and rule is grounded, add bias in favor of
+                    # If bjt_v is present and rule is grounded, add bias in favor of
                     # assignments which would satisfy the rule
                     is_grounded = all(not a[0].isupper() for a in occurring_args)
                     if self.concl_vis is not None and is_grounded:
+                        # TODO: Update to comply with the recent changes
+                        raise NotImplementedError
+
                         # Rule instances by possible word sense selections
                         wsd_cands = [lexicon.s2d[sym[:2]] for sym in head_preds+body_preds]
 
@@ -238,7 +241,7 @@ class TheoreticalReasonerModule:
                             # Question to query models_v with
                             q_rule = Rule(head=rule_head, body=rule_body)
                             q_vars = tuple((a, False) for a in occurring_args)
-                            query_result, _ = models_v.query(q_vars, q_rule)
+                            query_result = models_v.query(q_vars, q_rule)
 
                             for ans, (_, score) in query_result.items():
                                 c_head = Literal("cons", wrap_args(f"r{ri}", int(score*100)))
@@ -512,7 +515,7 @@ class TheoreticalReasonerModule:
                 manager
         """
         dprog = Program()
-        models_v, prog = self.concl_vis
+        bjt_v, prog = self.concl_vis
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking
@@ -533,9 +536,13 @@ class TheoreticalReasonerModule:
         # Finally, reasoning with all visual+language info
         if len(dprog) > 0:
             prog += dprog
-            models_vl = prog.solve()
+            bjt_vl = prog.compile()
         else:
-            models_vl = models_v
+            bjt_vl = bjt_v
 
         # Store sensemaking result as module state
-        self.concl_vis_lang = models_vl, prog
+        self.concl_vis_lang = bjt_vl, prog
+
+    @staticmethod
+    def query(bjt, q_vars, event):
+        return query(bjt, q_vars, event)

@@ -109,6 +109,10 @@ class Rule:
         """ Return True if rule consists of its head and empty body """
         return (len(self.head) == 1) and (len(self.body) == 0)
 
+    def is_single_body_constraint(self):
+        """ Return True if rule consists of its head and empty body """
+        return (len(self.head) == 0) and (len(self.body) == 1)
+
     def is_grounded(self):
         """ Returns True if the rule is variable-free """
         return all([l.is_grounded() for l in self.literals()])

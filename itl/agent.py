@@ -14,7 +14,7 @@ from detectron2.structures import BoxMode
 from .memory import LongTermMemoryModule
 from .vision import VisionModule
 from .lang import LanguageModule
-from .theoretical_reasoning import TheoreticalReasonerModule
+from .symbolic_reasoning import SymbolicReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 from .actions import AgentCompositeActions
 from .lpmln import Rule, Literal
@@ -38,7 +38,7 @@ class ITLAgent:
         # Initialize component modules
         self.vision = VisionModule(opts.vision_model_path)
         self.lang = LanguageModule(opts.grammar_image_path, opts.ace_binary_path)
-        self.theoretical = TheoreticalReasonerModule()
+        self.symbolic = SymbolicReasonerModule()
         self.practical = PracticalReasonerModule()
         self.lt_mem = LongTermMemoryModule()
 
@@ -105,12 +105,12 @@ class ITLAgent:
 
         # Inform the language module of the visual context
         self.lang.situate(self.vision.last_input, self.vision.scene)
-        self.theoretical.refresh()
+        self.symbolic.refresh()
 
         # Sensemaking from vision input only
-        exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
-        self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
-        models_v, _ = self.theoretical.concl_vis
+        exported_kb = self.lt_mem.kb.export_reasoning_program()
+        self.symbolic.sensemake_vis(self.vision.scene, exported_kb)
+        bjt_v, _ = self.symbolic.concl_vis
 
         # "Question" for probing agent's performance
         q_vars = (("P", True),)
@@ -120,17 +120,18 @@ class ITLAgent:
         # Parts taken from self.comp_actions.prepare_answer_Q(), excluding processing
         # questions in dialogue records
         if len(self.lt_mem.kb.entries) > 0:
-            search_specs = self.comp_actions._search_specs_from_kb(question, models_v)
+            search_specs = self.comp_actions._search_specs_from_kb(question, bjt_v)
             if len(search_specs) > 0:
                 self.vision.predict(
                     None, label_exemplars=self.lt_mem.exemplars,
                     specs=search_specs, visualize=False
                 )
 
-            exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
-            self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
+            exported_kb = self.lt_mem.kb.export_reasoning_program()
+            self.symbolic.sensemake_vis(self.vision.scene, exported_kb)
+            bjt_v, _ = self.symbolic.concl_vis
         
-        answers_raw, _ = models_v.query(*question)
+        answers_raw = self.symbolic.query(bjt_v, *question)
 
         # Collate results with respect to the provided concept set
         denotations = [
@@ -144,7 +145,7 @@ class ITLAgent:
         denotations = [f"{cat_type}_{conc_ind}" for conc_ind, cat_type in denotations]
 
         agent_answers = {
-            c: True if (d,) in answers_raw and answers_raw[(d,)][1] > 0.5 else False
+            c: True if (d,) in answers_raw and answers_raw[(d,)] > 0.5 else False
             for c, d in zip(concepts, denotations)
         }
 
@@ -336,7 +337,7 @@ class ITLAgent:
             if self.vision.new_input is not None:
                 # Inform the language module of the visual context
                 self.lang.situate(self.vision.last_input, self.vision.scene)
-                self.theoretical.refresh()
+                self.symbolic.refresh()
 
                 # No need to treat these facts as 'mismatches'
                 # (In a sense, this kinda overlaps with the notion of 'common ground'?
@@ -378,18 +379,18 @@ class ITLAgent:
 
             if self.vision.new_input is not None or xb_updated or kb_updated:
                 # Sensemaking from vision input only
-                exported_kb = self.lt_mem.kb.export_reasoning_program(self.vision.scene)
-                self.theoretical.sensemake_vis(self.vision.scene, exported_kb)
+                exported_kb = self.lt_mem.kb.export_reasoning_program()
+                self.symbolic.sensemake_vis(self.vision.scene, exported_kb)
 
             if self.lang.new_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
-                self.theoretical.resolve_symbol_semantics(
+                self.symbolic.resolve_symbol_semantics(
                     dialogue_state, self.lt_mem.lexicon
                 )
 
                 if self.vision.scene is not None:
                     # Sensemaking from vision & language input
-                    self.theoretical.sensemake_vis_lang(dialogue_state)
+                    self.symbolic.sensemake_vis_lang(dialogue_state)
 
             ###################################################################
             ##           Identify & exploit learning opportunities           ##
@@ -402,7 +403,7 @@ class ITLAgent:
             # Process translated dialogue record to do the following:
             #   - Integrate newly provided generic rules into KB
             #   - Identify recognition mismatch btw. user provided vs. agent
-            translated = self.theoretical.translate_dialogue_content(dialogue_state)
+            translated = self.symbolic.translate_dialogue_content(dialogue_state)
             for ui, (rules, _) in enumerate(translated):
                 kb_rules_to_add = []
                 if rules is not None:
@@ -415,22 +416,22 @@ class ITLAgent:
                             kb_rules_to_add.append(r)
 
                         # Test against vision-only sensemaking result to identify any
-                        # theoretical mismatch
+                        # symbolic mismatch
                         if all(not is_var for _, is_var in r.terms()) \
-                            and self.theoretical.concl_vis is not None:
+                            and self.symbolic.concl_vis is not None:
                             if r in self.doubt_no_more:
                                 # May skip testing this one
                                 continue
 
                             # Make a yes/no query to obtain the likelihood of content
-                            models_v, _ = self.theoretical.concl_vis
-                            q_response, _ = models_v.query(None, r)
-                            ev_prob = q_response[()][1]
+                            bjt_v, _ = self.symbolic.concl_vis
+                            q_response = self.symbolic.query(bjt_v, None, r)
+                            ev_prob = q_response[()]
 
                             surprisal = -math.log(ev_prob + EPS)
                             if surprisal > SR_THRES:
                                 m = (r, surprisal)
-                                self.theoretical.mismatches.add(m)
+                                self.symbolic.mismatches.add(m)
                     
                     if len(kb_rules_to_add) > 0:
                         provenance = dialogue_state["record"][ui][2]
@@ -438,7 +439,7 @@ class ITLAgent:
 
             # Handle neologisms
             neologisms = {
-                tok: sym for tok, (sym, den) in self.theoretical.word_senses.items()
+                tok: sym for tok, (sym, den) in self.symbolic.word_senses.items()
                 if den is None
             }
             for tok, sym in neologisms.items():
@@ -475,7 +476,7 @@ class ITLAgent:
                         # memory, as feature vectors at the penultimate layer right
                         # before category prediction heads
                         args = [
-                            self.theoretical.value_assignment[arg] for arg in rule_head[0][2]
+                            self.symbolic.value_assignment[arg] for arg in rule_head[0][2]
                         ]
                         ex_bboxes = [
                             self.lang.dialogue.referents["env"][a]["bbox"] for a in args
@@ -540,7 +541,7 @@ class ITLAgent:
 
         for n in self.lang.unresolved_neologisms:
             self.practical.agenda.append(("address_neologism", n))
-        for m in self.theoretical.mismatches:
+        for m in self.symbolic.mismatches:
             self.practical.agenda.append(("address_mismatch", m))
         for ui in self.lang.dialogue.unanswered_Q:
             self.practical.agenda.append(("address_unanswered_Q", ui))

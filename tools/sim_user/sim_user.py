@@ -231,10 +231,12 @@ class SimulatedTeacher:
 
                 responses.append(result_response)
                 
-                # Generic difference between intended concept vs. incorrect answer concept
-                # additionally provided if teacher strategy is 'greater' than [maximal feedback]
-                if self.strat_feedback == "max":
-                    # Give generics only if not given previously
+                # Generic difference between intended concept vs. incorrect answer
+                # concept additionally provided if teacher strategy is 'greater'
+                # than [maximal feedback]
+                if self.strat_feedback == "max" and not is_novel_concept:
+                    # Give generics only if not given previously, and if current target
+                    # concept is not introduced for the first time
                     contrast_concepts = frozenset([concept_string, answer_content])
                     pluralize = inflect.engine().plural
 

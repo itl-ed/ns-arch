@@ -1,17 +1,13 @@
 import re
-import math
-from itertools import product
 from collections import defaultdict
-
-import numpy as np
 
 from ..lpmln import Literal, Rule, Program
 from ..lpmln.utils import logit, sigmoid, wrap_args
 
 
-P_C = 0.05          # Catchall hypothesis probability
+P_C = 0.01          # Catchall hypothesis probability
 LOWER_THRES = 0.5   # Lower threshold for predicates that deserve closer look (see
-                    # ../theoretical_reasoning/api.py)
+                    # ../symbolic_reasoning/api.py)
 
 class KnowledgeBase:
     """
@@ -107,7 +103,7 @@ class KnowledgeBase:
 
         return is_new_entry
 
-    def export_reasoning_program(self, vis_scene):
+    def export_reasoning_program(self):
         """
         Returns an ASP program that implements deductive & abductive reasonings by
         virtue of the listed entries
@@ -115,13 +111,12 @@ class KnowledgeBase:
         inference_prog = Program()
 
         # Add rules implementing deductive inference
-        ded_out = self._add_deductive_inference_rules(inference_prog, vis_scene)
-        grd_rule_probs, entries_by_head, intermediate_outputs = ded_out
+        entries_by_head, intermediate_outputs = \
+            self._add_deductive_inference_rules(inference_prog)
 
         # Add rules implementing abductive inference
         self._add_abductive_inference_rules(
-            inference_prog, vis_scene,
-            grd_rule_probs, entries_by_head, intermediate_outputs
+            inference_prog, entries_by_head, intermediate_outputs
         )
 
         # Set of predicates that warrant consideration as possibility even with score
@@ -137,15 +132,11 @@ class KnowledgeBase:
 
         return inference_prog, preds_in_kb
 
-    def _add_deductive_inference_rules(self, inference_prog, vis_scene):
+    def _add_deductive_inference_rules(self, inference_prog):
         """
         As self.export_reasoning_program() was getting too long, refactored code for
         deductive inference program synthesis from KB
         """
-        # For storing rule head & body probabilities computed according to provided
-        # vis_scene
-        grd_rule_probs = []
-
         # For collecting entries by same heads, so that abductive inference rules can
         # be implemented for each collection
         entries_by_head = defaultdict(list)
@@ -154,36 +145,8 @@ class KnowledgeBase:
         # and reusing in the second (abductive) part
         intermediate_outputs = []
 
-        # Helper method for fetching scores appropriate for literals from vis_scene
-        def fetch_vis_score(pred, grd_args):
-            cat_type, conc_ind = pred.split("_")
-            conc_ind = int(conc_ind)
-
-            # Fetch visual confidence score for category prediction with args
-            obj = vis_scene[grd_args[0]]
-            if cat_type == "cls" or cat_type == "att":
-                if cat_type == "cls":
-                    score = float(obj["pred_classes"][conc_ind])
-                else:
-                    score = float(obj["pred_attributes"][conc_ind])
-                score = score if score > LOWER_THRES else 0.0
-            else:
-                assert cat_type == "rel"
-                if "pred_relations" in obj and grd_args[1] in obj["pred_relations"]:
-                    rels_per_obj = obj["pred_relations"][grd_args[1]]
-                    score = float(rels_per_obj[conc_ind])
-                    score = score if score > LOWER_THRES else 0.0
-                else:
-                    # No need to go further, return 0
-                    score = 0.0
-
-            return score
-
         # Process each entry
         for i, (rules, _) in enumerate(self.entries):
-            # Storage of grounded head/body/rule probabilities
-            h_grd_probs = {}; b_grd_probs = {}; r_grd_probs = {}
-
             all_fn_args = set(); all_var_names = set()
             for r in rules:
                 # All function term args used in this rule
@@ -315,123 +278,22 @@ class KnowledgeBase:
             inference_prog.add_absolute_rule(Rule(
                 head=r_unsat_lit, body=[h_sat_lit.flip(), b_sat_lit]
             ))
-
-            # Helper method for computing prior probabilities of grounded head/body
-            def compute_prior_prob(subs, sat_conds_pure, sat_conds_nonpure):
-                # Value to return - update by multiplying values starting from 1.0
-                prior = 1.0
-
-                # "Pure" condition literals that don't include any function terms;
-                # can be fetched directly from the provided vis_scene
-                for lit in sat_conds_pure:
-                    pred = lit.name
-                    grd_args = [subs[a[0]] for a in lit.args]
-                    score = fetch_vis_score(pred, grd_args)
-
-                    if score == 0.0: return 0.0     # Short-circuit if score is zero
-                    prior *= score
-
-                # "Non-pure" condition literals are trickier; compute probabilities
-                # that the skolem functions, which have existential readings, can assign
-                # values with respect to the grounding of variables as specified by subs
-                lit_unsat_probs = []
-                for lit in sat_conds_nonpure:
-                    pred = lit.name
-
-                    # Flags for variables which stand for skolem function terms and thus
-                    # cannot be grounded
-                    still_var_args = [a[0] not in subs for a in lit.args]
-
-                    # Probability that none of the full grounding of this literal will hold
-                    l_unsat_prob = 1.0
-                    for assig in product(vis_scene, repeat=sum(still_var_args)):
-                        # Collect fully grounded arguments for the provided grounding
-                        # substitution and this function value assignment
-                        assig = list(assig); grd_args = []
-                        for a, still_var in zip(lit.args, still_var_args):
-                            if still_var: grd_args.append(assig.pop(-1))
-                            else: grd_args.append(subs[a[0]])
-                        
-                        # Multiply unsat_prob by (1-score)
-                        l_unsat_prob *= 1 - fetch_vis_score(pred, grd_args)
-                    lit_unsat_probs.append(l_unsat_prob)
-                
-                # Multiply prior by prod{(1-P(L_i))}, which equals value of formula
-                # obtained by the inclusion-exclusion principle
-                prior *= math.prod([1-s for s in lit_unsat_probs])
-
-                return prior
-
-            # Collect probabilities of possible grounded rule heads & bodies,
-            # depending on how they are instantiated and how functions map their
-            # arguments to possible values
-            possible_instantiations = product(vis_scene, repeat=len(b_var_signature))
-            for inst in possible_instantiations:
-                # Fetch prior probability value; compute if non-existent yet
-                h_inst = tuple(inst[b_var_signature.index(a)] for a in h_var_signature)
-                if h_inst not in h_grd_probs:
-                    h_subs = {arg: ent for arg, ent in zip(h_var_signature, h_inst)}
-                    h_grd_probs[h_inst] = compute_prior_prob(
-                        h_subs, h_sat_conds_pure, h_sat_conds_nonpure
-                    )
-
-                b_inst = inst
-                if b_inst not in b_grd_probs:
-                    b_subs = {arg: ent for arg, ent in zip(b_var_signature, b_inst)}
-                    b_grd_probs[b_inst] = compute_prior_prob(
-                        b_subs, b_sat_conds_pure, b_sat_conds_nonpure
-                    )
-
-                r_grd_probs[inst] = (h_grd_probs[h_inst], b_grd_probs[b_inst])
-
-            # Collect grounded proabilities by grounded rule instances
-            grd_rule_probs.append(r_grd_probs)
+            
+            # Add appropriately weighted rule for applying 'probabilistic pressure'
+            # against to deductive rule violation
+            provenances = self.entries[i][1]
+            r_pr = sigmoid(sum(logit(w) for w, _ in provenances))
+            inference_prog.add_rule(Rule(body=r_unsat_lit), r_pr)
 
             # Store intermediate outputs for later reuse
             intermediate_outputs.append((
                 h_sat_lit, b_sat_lit, h_var_signature, b_var_signature
             ))
 
-        # Manipulation of weight sums of models where rule is violated, i.e. body holds
-        # but head does not. Manipulation weights are determined based on probabilities
-        # of rule head literals and thus depend on grounding.
-        for i, grd_probs in enumerate(grd_rule_probs):
-            # Fetch rule probability; for rules with multiple provenance, probabilities
-            # are aggregated by summing in logit-space and then sigmoid-ing back to
-            # probability space
-            provenances = self.entries[i][1]
-            r_pr = sigmoid(sum(logit(w) for w, _ in provenances))
-
-            b_var_signature = intermediate_outputs[i][3]
-
-            for inst, (h_grd_pr, _) in grd_probs.items():
-                # If prior Pr(Head) is smaller than rule probability, boost Pr(Head|Body)
-                # up to the probability while retaining Pr(Body)
-                if h_grd_pr < r_pr:
-                    # Manipulate prior prob of grounded head for target conditional,
-                    # while retaining distributions outside the conditional
-                    grd_r_unsat_lit = Literal(f"deduc_viol_{i}", wrap_args(*inst))
-                    grd_b_sat_lit = Literal(f"body_sat_{i}", wrap_args(*inst))
-
-                    # Manipulating & balancing rule weights; effectively 'apply pressure'
-                    # to model weights, so that the prior probability that head not being
-                    # satisfied becomes (1-r_pr) instead of (1-h_grd_pr)
-                    manipulator = logit(1-r_pr) - logit(1-h_grd_pr)
-                    balancer = np.log(h_grd_pr) - np.log(r_pr)
-
-                    # manipulator ::  :- not deduc_viol_i(*b_var_signature).
-                    inference_prog.add_rule(
-                        Rule(body=grd_r_unsat_lit.flip()), sigmoid(manipulator)
-                    )
-                    # balancer ::  :- not body_sat(*b_var_signature).
-                    inference_prog.add_rule(
-                        Rule(body=grd_b_sat_lit.flip()), sigmoid(balancer)
-                    )
-
-        return grd_rule_probs, entries_by_head, intermediate_outputs
+        return entries_by_head, intermediate_outputs
 
     def _add_abductive_inference_rules(
-        self, inference_prog, vis_scene, grd_rule_probs, entries_by_head, intermediate_outputs
+        self, inference_prog, entries_by_head, intermediate_outputs
     ):
         """
         As self.export_reasoning_program() was getting too long, refactored code for
@@ -445,7 +307,6 @@ class KnowledgeBase:
             for ei, ism in entry_collection:
                 h_sat_lit, b_sat_lit, h_var_signature, b_var_signature \
                     = intermediate_outputs[ei]
-                grd_probs = grd_rule_probs[ei]
 
                 if ism is not None:
                     h_sat_lit = h_sat_lit.substitute(**ism)
@@ -455,7 +316,7 @@ class KnowledgeBase:
                     b_var_signature = [ism["terms"][v] for v in b_var_signature]
 
                 standardized_outputs.append((
-                    h_sat_lit, b_sat_lit, h_var_signature, b_var_signature, grd_probs
+                    h_sat_lit, b_sat_lit, h_var_signature, b_var_signature
                 ))
 
             coll_h_var_signature = standardized_outputs[0][2]
@@ -468,7 +329,9 @@ class KnowledgeBase:
 
             for s_out in standardized_outputs:
                 # coll_h_sat_lit holds when any (and all) of the heads hold
-                inference_prog.add_absolute_rule(Rule(head=coll_h_sat_lit, body=s_out[0]))
+                inference_prog.add_absolute_rule(
+                    Rule(head=coll_h_sat_lit, body=s_out[0])
+                )
 
             # Flag holding when the explanandum (head) is not explained by any of
             # the explanantia (bodies), and thus evoke 'catchall' hypothesis
@@ -476,58 +339,14 @@ class KnowledgeBase:
                 f"abduc_catchall_{i}", wrap_args(*coll_h_var_signature)
             )
 
-            # r_catchall_lit holds when coll_H_sat_lit holds but none of the
+            # r_catchall_lit holds when coll_h_sat_lit holds but none of the
             # explanantia (bodies) hold
             unexpl_lits = [s_out[1].flip() for s_out in standardized_outputs]
             inference_prog.add_absolute_rule(Rule(
                 head=coll_h_catchall_lit, body=[coll_h_sat_lit]+unexpl_lits
             ))
 
-            # Manipulation of weight sums of models where rule head is unexplained
-            # and catchall hypothesis must be activated, i.e. head holds but none of
-            # the explanantia (bodies for the head) hold. Manipulation weights are
-            # determined based on probabilities of rule body literals and thus depend
-            # on grounding.
-            # (For now we will assume the body events are independent)
-            h_possible_instantiations = product(vis_scene, repeat=len(coll_h_var_signature))
-            for h_inst in h_possible_instantiations:
-                # Collect probabilities that none of the bodies hold
-                catchall_prob = 1.0
-                for s_out in standardized_outputs:
-                    h_var_signature = s_out[2]; b_var_signature = s_out[3]
-                    grd_probs = s_out[4]
-
-                    h_var_inds = [b_var_signature.index(v) for v in h_var_signature]
-
-                    catchall_prob *= math.prod(
-                        1-b_grd_prob for inst, (_, b_grd_prob) in grd_probs.items()
-                        if tuple(inst[vi] for vi in h_var_inds) == h_inst
-                    )
-
-                    if catchall_prob == 0.0: break     # Short-circuit if prob is zero
-
-                # If prior Pr(Catchall(<=>"None of the body holds")) is larger than the
-                # catchall hypothesis probability, suppress Pr(Catchall|Head) down to the
-                # probability while retaining Pr(Head)
-                if catchall_prob > P_C:
-                    # Manipulate prior prob of grounded body for target conditional,
-                    # while retaining distributions outside the conditional
-                    grd_coll_h_catchall_lit = Literal(
-                        f"abduc_catchall_{i}", wrap_args(*h_inst)
-                    )
-                    grd_coll_h_sat_lit = Literal(
-                        f"coll_head_sat_{i}", wrap_args(*h_inst)
-                    )
-
-                    # Manipulating & balancing rule weights
-                    manipulator = logit(P_C) - logit(catchall_prob)
-                    balancer = np.log(1-catchall_prob) - np.log(1-P_C)
-
-                    # manipulator ::  :- not abduc_catchall_i(*b_var_signature).
-                    inference_prog.add_rule(
-                        Rule(body=grd_coll_h_catchall_lit.flip()), sigmoid(manipulator)
-                    )
-                    # balancer ::  :- not coll_head_sat(*h_var_signature).
-                    inference_prog.add_rule(
-                        Rule(body=grd_coll_h_sat_lit.flip()), sigmoid(balancer)
-                    )
+            # Add appropriately weighted rule for applying 'probabilistic pressure'
+            # against resorting to catchall hypothesis due to absence of abductive
+            # explanation of head
+            inference_prog.add_rule(Rule(body=coll_h_catchall_lit), 1-P_C)

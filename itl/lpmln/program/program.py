@@ -4,7 +4,6 @@ Implements LP^MLN program class
 from collections import defaultdict
 
 from .compile import compile
-from .solve import recursive_solve
 from .optimize import optimize
 from .split import split_program
 from .reduce import reduce_program
@@ -105,10 +104,6 @@ class Program:
         for bl in rule.body:
             self._rules_by_atom[bl.as_atom()].add(len(self.rules)-1)
 
-    def solve(self, topk_ratio=TOPK_RATIO):
-        """ Wraps around recursive_solve, and exposed as class instance method """
-        return recursive_solve(self, scale_prec=SCALE_PREC)
-
     def compile(self):
         """
         Compiles program into a binary join tree from equivalent directed graph,
@@ -186,27 +181,20 @@ class Program:
                     raise NotImplementedError
             else:
                 if len(rule.head) <= 1:
-                    if r_pr[0] == 1.0:
-                        # Add as-is
-                        as_str += str(rule) + "\n"
-                    elif r_pr[0] == 0.0:
-                        # Turn into corresponding integrity constraint and add
-                        as_str += "".join(str(nr)+"\n" for nr in rule.negate())
+                    if len(rule.head) == 1:
+                        as_str += rule.str_as_choice() + "\n"
                     else:
-                        if len(rule.head) == 1:
-                            as_str += rule.str_as_choice() + "\n"
-                        else:
-                            # Even when unsats=False, should add a modified rule with
-                            # an auxiliary atom as head when body contains more than
-                            # one literal, so that body literals are connected in the
-                            # dependency graph
-                            if len(rule.body) > 1:
-                                aux_args = [(ri, False)]
-                                aux_rule = Rule(
-                                    head=Literal("unsat", aux_args),
-                                    body=rule.body
-                                )
-                                as_str += str(aux_rule) + "\n"
+                        # Even when unsats=False, should add a modified rule with
+                        # an auxiliary atom as head when body contains more than
+                        # one literal, so that body literals are connected in the
+                        # dependency graph
+                        if len(rule.body) > 1:
+                            aux_args = [(ri, False)]
+                            aux_rule = Rule(
+                                head=Literal("unsat", aux_args),
+                                body=rule.body
+                            )
+                            as_str += str(aux_rule) + "\n"
                 else:
                     # Choice rules with multiple head literals
                     as_str += rule.str_as_choice() + "\n"
