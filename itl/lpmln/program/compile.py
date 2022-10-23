@@ -43,9 +43,53 @@ def compile(prog):
         # Run modified Shafer-Shenoy belief propagation on the constructed binary
         # join tree, filling in the output (unnormalized) belief storage registers
         output_node_sets = [frozenset({atm}) for atm in bjt.graph["atoms_map_inv"]]
-        _belief_propagation(bjt, output_node_sets)
+
+        for node_set in output_node_sets:
+            _belief_propagation(bjt, node_set)
 
     return bjt
+
+
+def bjt_query(bjt, q_key):
+    """ Query a BJT for (unnormalized) belief table """
+    relevant_nodes = frozenset({abs(n) for n in q_key})
+    relevant_cliques = [n for n in bjt.nodes if relevant_nodes <= n]
+
+    if len(relevant_cliques) > 0:
+        # In-clique query; find the BJT node with the smallest node set that
+        # comply with the key
+        smallest_rel_nodeset = sorted(relevant_cliques, key=len)[0]
+        _belief_propagation(bjt, smallest_rel_nodeset)
+        beliefs = bjt.nodes[smallest_rel_nodeset]["output_beliefs"]
+
+        # Marginalize and return
+        return _marginalize_simple(beliefs, relevant_nodes)
+    else:
+        # Out-clique query; first divide query key node set by belonging components
+        # in the BJT
+        components = {
+            frozenset.union(*comp): bjt.subgraph(comp)
+            for comp in nx.connected_components(bjt.to_undirected())
+        }
+
+        divided_keys_and_subtrees = {
+            frozenset({l for l in q_key if abs(l) in comp_nodes}): sub_bjt
+            for comp_nodes, sub_bjt in components.items()
+            if len(comp_nodes & relevant_nodes) > 0
+        }
+
+        if len(divided_keys_and_subtrees) == 1:
+            # All query key nodes in the same component; variable elimination needed
+            raise NotImplementedError
+        else:
+            # Recursively query each subtree with corresponding 'subkey'
+            query_results = {
+                subkey: bjt_query(sub_bjt, subkey)
+                for subkey, sub_bjt in divided_keys_and_subtrees.items()
+            }
+
+            # Combine independent query results
+            return _combine_factors_simple(list(query_results.values()))
 
 
 class _Observer:
@@ -365,62 +409,61 @@ def _rule_to_potential(rule, r_pr, atoms_map):
     return potential
 
 
-def _belief_propagation(bjt, output_node_sets):
+def _belief_propagation(bjt, node_set):
     """
     (Modified) Shafer-Shenoy belief propagation on binary join trees, whose input
     potential storage registers are properly filled in. Populate output belief storage
-    registers as demanded by output_node_sets.
+    registers as demanded by node_set.
     """
-    for node_set in output_node_sets:
-        # Corresponding node in BJT
-        bjt_node = bjt.nodes[node_set]
+    # Corresponding node in BJT
+    bjt_node = bjt.nodes[node_set]
 
-        # Fetch input potentials for the BJT node
-        input_potential = bjt_node["input_potential"]
+    # Fetch input potentials for the BJT node
+    input_potential = bjt_node["input_potential"]
 
-        # Fetch incoming messages for the BJT node, if any
-        incoming_messages = []
-        for from_node_set, _, msg in bjt.in_edges(node_set, data="message"):
-            if msg is None:
-                # If message not computed already, compute it (once and for all)
-                # and store it in the directed edge's storage register
-                _compute_message(bjt, from_node_set, node_set)
-                msg = bjt.edges[(from_node_set, node_set)]["message"]
-            
-            incoming_messages.append(msg)
+    # Fetch incoming messages for the BJT node, if any
+    incoming_messages = []
+    for from_node_set, _, msg in bjt.in_edges(node_set, data="message"):
+        if msg is None:
+            # If message not computed already, compute it (once and for all)
+            # and store it in the directed edge's storage register
+            _compute_message(bjt, from_node_set, node_set)
+            msg = bjt.edges[(from_node_set, node_set)]["message"]
+        
+        incoming_messages.append(msg)
 
-        # Combine incoming messages; combine entries by multiplying 'fully-alive'
-        # weights and 'half-alive' weights respectively
-        if len(incoming_messages) > 0:
-            msgs_combined = _combine_factors_outer(incoming_messages)
+    # Combine incoming messages; combine entries by multiplying 'fully-alive'
+    # weights and 'half-alive' weights respectively
+    if len(incoming_messages) > 0:
+        msgs_combined = _combine_factors_outer(incoming_messages)
 
-            # Final binary combination of (combined) input potentials & (combined)
-            # incoming messages
-            inps_msgs_combined = _combine_factors_outer(
-                [input_potential, msgs_combined]
-            )
-        else:
-            # Empty messages; just consider input potential
-            inps_msgs_combined = input_potential
+        # Final binary combination of (combined) input potentials & (combined)
+        # incoming messages
+        inps_msgs_combined = _combine_factors_outer(
+            [input_potential, msgs_combined]
+        )
+    else:
+        # Empty messages; just consider input potential
+        inps_msgs_combined = input_potential
 
-        # (Partial) marginalization down to domain for the node set for this BJT node
-        output_beliefs = _marginalize_outer(inps_msgs_combined, node_set)
+    # (Partial) marginalization down to domain for the node set for this BJT node
+    output_beliefs = _marginalize_outer(inps_msgs_combined, node_set)
 
-        # Weed out any subcases that still have lingering positive atom requirements
-        # (i.e. non-complete positive clearances), then fully marginalize per case
-        output_beliefs = {
-            case: sum(
-                [
-                    val for subcase, val in inner.items()
-                    if len(subcase[0])==len(subcase[1])
-                ],
-                Polynomial(float_val=0.0)
-            )
-            for case, inner in output_beliefs.items()
-        }
+    # Weed out any subcases that still have lingering positive atom requirements
+    # (i.e. non-complete positive clearances), then fully marginalize per case
+    output_beliefs = {
+        case: sum(
+            [
+                val for subcase, val in inner.items()
+                if len(subcase[0])==len(subcase[1])
+            ],
+            Polynomial(float_val=0.0)
+        )
+        for case, inner in output_beliefs.items()
+    }
 
-        # Populate the output belief storage register for the BJT node
-        bjt.nodes[node_set]["output_beliefs"] = output_beliefs
+    # Populate the output belief storage register for the BJT node
+    bjt.nodes[node_set]["output_beliefs"] = output_beliefs
 
 
 def _compute_message(bjt, from_node_set, to_node_set):
@@ -544,6 +587,37 @@ def _combine_factors_inner(factors):
     return dict(combined_factor)
 
 
+def _combine_factors_simple(factors):
+    """
+    Subroutine for combining a set of 'simple' factors without layers (likely those
+    stored in 'output_beliefs' register for a BJT node); entries are combined by
+    multiplication
+    """
+    assert len(factors) > 0
+
+    # Compute entry values for possible cases considered
+    combined_factor = {}
+    for case in product(*factors):
+        # Union of case specification
+        case_union = frozenset.union(*case)
+
+        # Incompatible, cannot combine
+        if not _literal_set_is_consistent(case_union): continue
+
+        # Corresponding entry fetched from the factor
+        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
+
+        # Ensure combination is happening with polynomial values
+        assert isinstance(entries_per_factor[0], Polynomial)
+        assert all(type(e) == type(entries_per_factor[0]) for e in entries_per_factor)
+
+        # Outer-layer combination where entries can be considered 'mini-factors'
+        # defined per postive atom clearances
+        combined_factor[case_union] = reduce(operator.mul, entries_per_factor)
+
+    return combined_factor
+
+
 def _marginalize_outer(factor, node_set):
     """
     Subroutine for (partially) marginalizing a factor at the outer-layer (while
@@ -565,6 +639,24 @@ def _marginalize_outer(factor, node_set):
         marginalized_factor[case] = dict(outer_marginals)
 
     return marginalized_factor
+
+
+def _marginalize_simple(factor, node_set):
+    """
+    Subroutine for simple marginalization of factor without layers (likely those
+    stored in 'output_beliefs' register for a BJT node) down to some domain specified
+    by node_set
+    """
+    marginalized_factor = defaultdict(lambda: Polynomial(float_val=0.0))
+
+    for case in product(*[(ai, -ai) for ai in node_set]):
+        case = frozenset(case)
+
+        for f_case, f_val in factor.items():
+            if not f_case >= case: continue     # Irrelevant f_case
+            marginalized_factor[case] += f_val
+
+    return dict(marginalized_factor)
 
 
 def _literal_set_is_consistent(lit_set):

@@ -2,6 +2,7 @@
 from itertools import product
 
 from ..lpmln import Rule, Polynomial
+from ..lpmln.program.compile import bjt_query
 
 
 def query(bjt, q_vars, event):
@@ -161,7 +162,7 @@ def _ev_ins_to_query_key(bjt, ev_ins):
     return frozenset(query_key)
 
 
-def _query_bjt(bjt, key):
+def _query_bjt(bjt, q_key):
     """
     Subroutine for obtaining an appropriate table of unnormalized potential values
     for the provided query keys. Queries may be:
@@ -172,19 +173,18 @@ def _query_bjt(bjt, key):
             components, subtrees are taken for each component, and variable elim.
             have to be performed as necessary
     """
-    if key is None:
+    if q_key is None:
         # Unsatisfiable query
         return None
 
-    assert len(key) > 0
+    assert len(q_key) > 0
 
-    relevant_nodes = frozenset({abs(n) for n in key})
-    if len(key) == 1:
+    relevant_nodes = frozenset({abs(n) for n in q_key})
+    if len(q_key) == 1:
         # Simpler case of single-item key, just fetch the smallest BJT node covering
         # the key node, which always exist, and is guaranteed to be as small as possible
         # (since all singleton node sets are included during construction of BJT)
         return bjt.nodes[relevant_nodes]["output_beliefs"]
     else:
-        # General case; first check if this is an in-clique query...
-        # (TODO: complete this... if ever needed?)
-        raise NotImplementedError
+        # General case; call bjt_query
+        return bjt_query(bjt, q_key)
