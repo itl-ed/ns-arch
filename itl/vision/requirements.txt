@@ -1,2 +1,9 @@
 torch
+torchvision
 transformers
+timm
+pytorch-lightning
+wandb
+hydra
+nltk
+ijson

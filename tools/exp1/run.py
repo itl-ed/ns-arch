@@ -2,7 +2,6 @@
 Script for fine-grained grounding experiments; simulate natural interactions between
 agent (learner) and user (teacher) with varying configurations
 """
-import re
 import os
 import sys
 sys.path.insert(
@@ -18,15 +17,12 @@ import numpy as np
 from detectron2.structures import BoxMode
 
 from itl import ITLAgent
-from itl.opts import parse_arguments
 from tools.sim_user import SimulatedTeacher
 
 
 TAB = "\t"
 
 if __name__ == "__main__":
-    opts = parse_arguments()
-
     if opts.exp1_difficulty == "base":
         target_concepts = {
             "cls": [

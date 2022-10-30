@@ -10,10 +10,11 @@ from itertools import product
 import torch
 import numpy as np
 import torch.nn.functional as F
+import pytorch_lightning as pl
 from torchvision.ops import clip_boxes_to_image, nms, box_iou, box_area
-from transformers import OwlViTProcessor, OwlViTForObjectDetection
-from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput
 
+from .data import FewShotSGGDataModule
+from .modeling import FewShotSceneGraphGenerator
 from .utils.visualize import visualize_sg_predictions
 
 
@@ -22,11 +23,9 @@ class VisionModule:
     K = 0               # Top-k detections to leave in ensemble prediction mode
     NMS_THRES = 0.5     # IoU threshold for post-detection NMS
 
-    def __init__(self, model_path):
-        """
-        Args:
-            opts: argparse.Namespace, from parse_argument()
-        """
+    def __init__(self, cfg):
+        self.cfg = cfg
+
         self.scene = None
         self.f_vecs = None
         self.last_input = None
@@ -39,17 +38,7 @@ class VisionModule:
         # only integer sizes of inventories for now...
         self.inventories = VisualConceptInventory()
 
-        # Load a pre-trained OwL-ViT processor & model from path (huggingface hub
-        # model id or local path) provided in opts
-        cache_dir = "./assets/vision_models/"
-        self.processor = OwlViTProcessor.from_pretrained(
-            model_path, cache_dir=cache_dir
-        )
-        self.model = OwlViTForObjectDetection.from_pretrained(
-            model_path, cache_dir=cache_dir
-        )
-        if torch.cuda.is_available():
-            self.model.to("cuda")
+        self.model = FewShotSceneGraphGenerator(self.cfg)
 
     def owlvit_process(self, image, label_texts=None, label_exemplars=None):
         """
@@ -169,22 +158,43 @@ class VisionModule:
 
         return results, output, image, label_texts or label_concepts
 
+    def train(self):
+        """
+        Training few-shot visual object detection & class/attribute classification
+        model with specified dataset. Uses a pre-trained Deformable DETR as feature
+        extraction backbone and learns lightweight MLP blocks (one each for class
+        and attribute prediction) for embedding raw feature vectors onto a metric
+        space where instances of the same concepts are placed closer. (Mostly likely
+        not called by end user.)
+        """
+        pl.seed_everything(self.cfg.seed)
+
+        # Prepare DataModule from data config
+        dm = FewShotSGGDataModule(self.cfg)
+        dm.setup("fit")
+        tr_loader = dm.train_dataloader()
+        for batch in iter(tr_loader):
+            print(0)
+
     def predict(
         self, image, label_texts=None, label_exemplars=None,
         bboxes=None, specs=None, visualize=True, lexicon=None
     ):
         """
         Model inference in either one of three modes:
-            1) full scene graph generation mode, where the module is only given an image
-                and needs to return its estimation of the full scene graph for the input
-            2) instance classification mode, where a number of bboxes are given along
-                with the image and category predictions are made for only those instances
-            3) instance search mode, where a specification is provided in the form of FOL
-                formula with a variable and best fitting instance(s) should be searched
+            1) full scene graph generation mode, where the module is only given
+                an image and needs to return its estimation of the full scene
+                graph for the input
+            2) instance classification mode, where a number of bboxes are given
+                along with the image and category predictions are made for only
+                those instances
+            3) instance search mode, where a specification is provided in the
+                form of FOL formula with a variable and best fitting instance(s)
+                should be searched
 
-        2) and 3) are 'incremental' in the sense that they should add to an existing scene
-        graph which is already generated with some previous execution of this method. Provide
-        bboxes arg to run in 2) mode, or spec arg to run in 3) mode.
+        2) and 3) are 'incremental' in the sense that they should add to an existing
+        scene graph which is already generated with some previous execution of this
+        method. Provide bboxes arg to run in 2) mode, or spec arg to run in 3) mode.
         """
         # Must provide either set of label texts, or set of exemplars of concepts
         assert label_texts is not None or label_exemplars is not None

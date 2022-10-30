@@ -1,0 +1,2 @@
+model:
+    detr_model: "SenseTime/deformable-detr"

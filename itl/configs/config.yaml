@@ -1,0 +1,21 @@
+defaults:
+    - vision: base
+    - lang: base
+
+paths:
+    data_dir: "${hydra:runtime.cwd}/datasets"
+    assets_dir: "${hydra:runtime.cwd}/assets"
+    outputs_dir: "${hydra:runtime.output_dir}/outputs"
+
+agent:
+    model: ???
+    strat_generic: "semOnly"
+    strat_mismatch: "zeroinit"
+
+exp1:
+    strat_feedback: "min"
+    difficulty: "nonFine"
+    num_episodes: 50
+    test_set_size: 30
+
+seed: 42

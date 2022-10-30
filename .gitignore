@@ -3,7 +3,7 @@ __pycache__/
 
 assets/
 datasets/
-output/
+outputs/
 wandb/
 
 .env
