@@ -12,7 +12,6 @@ data:
     num_loader_workers: 4
     batch_size: 32
     num_exs_per_conc: 8
-    minibatch_size: 2
 
 optim:
     algorithm: "Adam"

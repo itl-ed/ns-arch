@@ -70,8 +70,8 @@ class VisionModule:
                 LearningRateMonitor(logging_interval='step')
             ],
             logger=WandbLogger(
-                # offline=True,           # Uncomment for offline run (comment out log_model)
-                log_model=True,         # Uncomment for online run (comment out offline)
+                offline=True,           # Uncomment for offline run (comment out log_model)
+                # log_model=True,         # Uncomment for online run (comment out offline)
                 project=os.environ.get("WANDB_PROJECT"),
                 entity=os.environ.get("WANDB_ENTITY"),
                 name=self.cfg.vision.run_name,
