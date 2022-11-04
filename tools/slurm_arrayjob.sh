@@ -128,8 +128,8 @@ echo "Command ran successfully!"
 # ======================================
 echo "Moving output data back to DFS"
 
-src_path=${SCRATCH_HOME}/ns-arch/output
-dest_path=${proj_home}/output
+src_path=${SCRATCH_HOME}/ns-arch/outputs
+dest_path=${proj_home}/outputs
 mkdir -p ${dest_path}
 rsync --archive --update --compress --info=progress2 ${src_path}/ ${dest_path}
 
