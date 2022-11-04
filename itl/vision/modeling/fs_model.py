@@ -87,7 +87,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
     def training_step(self, batch, _):
         loss, metrics = self._process_batch(batch)
 
-        self.log("train_loss", loss)
+        self.log("train_loss", loss.item())
         for metric, val in metrics.items():
             self.log(f"train_{metric}", val)
 
@@ -96,11 +96,11 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
     def validation_step(self, batch, _):
         loss, metrics = self._process_batch(batch)
 
-        self.log("val_loss", loss, batch_size=len(batch[0]))
+        self.log("val_loss", loss.item(), batch_size=len(batch[0]))
         for metric, val in metrics.items():
             self.log(f"val_{metric}", val, batch_size=len(batch[0]))
 
-        return { "loss": loss, **metrics }
+        return { "loss": loss.item(), **metrics }
 
     def test_step(self, batch, _):
         _, metrics = self._process_batch(batch)
