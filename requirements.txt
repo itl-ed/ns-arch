@@ -5,5 +5,8 @@
 -r itl/practical_reasoning/requirements.txt
 -r itl/lpmln/requirements.txt
 
+python-dotenv
+iopath
+
 # Used in experiment scripts only
 inflect

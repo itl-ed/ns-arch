@@ -78,8 +78,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 img_anns, imgs_to_download = process_image_metadata(
                     dataset_path, num_images_used
                 )
-                reformat_annotations(dataset_path, num_images_used, img_anns)
                 download_images(imgs_to_download)
+                reformat_annotations(dataset_path, num_images_used, img_anns)
 
             # Finally, cleanup by removing files that are not needed anymore
             for f in ["image_data", "attribute_synsets", "scene_graphs"]:
@@ -118,7 +118,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_train
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, images_path
+                    ann_train, images_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
@@ -132,12 +132,13 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_val
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, images_path
+                    ann_val, images_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
                     self.cfg.vision.data.batch_size,
-                    self.cfg.vision.data.num_exs_per_conc
+                    self.cfg.vision.data.num_exs_per_conc,
+                    with_replacement=False
                 )
             if stage in ["fit", "test", "predict"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
@@ -146,66 +147,75 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_test
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, images_path
+                    ann_test, images_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
                     self.cfg.vision.data.batch_size,
-                    self.cfg.vision.data.num_exs_per_conc
+                    self.cfg.vision.data.num_exs_per_conc,
+                    with_replacement=False
                 )
 
     @staticmethod
     def _collate_fn(data):
         """ Custom collate_fn to pass to dataloaders """
-        imgs = [img for img, _ in data]
+        imgs = [img for img, _, _ in data]
         bboxes = tuple(
-            [bbox_tuple[i] for _, bbox_tuple in data]
+            [bbox_tuple[i] for _, bbox_tuple, _ in data]
             for i in range(len(data[0][1]))
         )
-        return imgs, bboxes
+        concepts = [conc for _, _, conc in data]
+        return imgs, bboxes, concepts
 
     def train_dataloader(self):
         return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task]["train"],
-            batch_sampler=self.samplers[self.cfg.vision.task]["train"],
+            dataset=self.datasets[self.cfg.vision.task.conc_type]["train"],
+            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["train"],
             num_workers=self.cfg.vision.data.num_loader_workers,
             collate_fn=self._collate_fn
         )
     
     def val_dataloader(self):
         return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task]["val"],
-            batch_sampler=self.samplers[self.cfg.vision.task]["val"],
+            dataset=self.datasets[self.cfg.vision.task.conc_type]["val"],
+            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["val"],
             num_workers=self.cfg.vision.data.num_loader_workers,
             collate_fn=self._collate_fn
         )
 
     def test_dataloader(self):
         return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task]["test"],
-            batch_sampler=self.samplers[self.cfg.vision.task]["test"],
+            dataset=self.datasets[self.cfg.vision.task.conc_type]["test"],
+            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["test"],
             num_workers=self.cfg.vision.data.num_loader_workers,
             collate_fn=self._collate_fn
         )
 
 
 class _SGGDataset(Dataset):
-    def __init__(self, annotations, images_path):
+    def __init__(self, annotations, images_path, concept_names):
         super().__init__()
         self.annotations = annotations
         self.images_path = images_path
+        self.concept_names = concept_names
     
     def __getitem__(self, idx):
-        assert len(idx) == 2
-        img_id, obj_ids = idx
+        assert len(idx) == 3
+        img_id, obj_ids, conc = idx
 
         image = os.path.join(self.images_path, self.annotations[img_id]["file_name"])
         image = Image.open(image)
+        if image.mode != "RGB":
+            # Cast non-RGB images (e.g. grayscale) into RGB format
+            old_image = image
+            image = Image.new("RGB", old_image.size)
+            image.paste(old_image)
+
         bboxes = tuple(
             self.annotations[img_id]["annotations"][oid]["bbox"] for oid in obj_ids
         )
 
-        return image, bboxes
+        return image, bboxes, self.concept_names[conc]
     
     def __len__(self):
         return len(self.annotations)
@@ -219,7 +229,8 @@ class _FewShotSGGDataSampler:
     as a pair of index, namely (image id, object (pair) id)
     """
     def __init__(
-        self, index_conc, hypernym_info, batch_size, num_exs_per_conc
+        self, index_conc, hypernym_info, batch_size, num_exs_per_conc,
+        with_replacement=True
     ):
         self.index_conc = index_conc
         self.hypernym_info = hypernym_info
@@ -227,29 +238,35 @@ class _FewShotSGGDataSampler:
         self.num_exs_per_conc = num_exs_per_conc
         self.num_concepts = self.batch_size // self.num_exs_per_conc
 
+        self.with_replacement = with_replacement
+
         # Let's keep things simple by making batch size divisible by number of
         # exemplars per concept (equivalently, number of concepts or 'ways')
         assert self.batch_size % self.num_exs_per_conc == 0
 
     def __iter__(self):
+        # For maintaining lists of exemplars
+        conc_exemplars = copy.deepcopy(self.index_conc)
+
         while True:
             sampled_indices = []        # To yield
+
+            if self.with_replacement:
+                # Renew exemplar lists
+                conc_exemplars = copy.deepcopy(self.index_conc)
 
             # First sample N concepts one by one, ensuring none in the sampled
             # concepts is a hypernym of another
             sampled_concepts = set()
             sample_cands = {
-                c for c, exs in self.index_conc.items()
+                c for c, exs in conc_exemplars.items()
                 if len(exs) >= self.num_exs_per_conc
             }
 
-            # For maintaining lists of exemplars without concept overlap
-            conc_exemplars = copy.deepcopy(self.index_conc)
-
             while len(sampled_concepts) < self.num_concepts:
                 if len(sample_cands) == 0:
-                    # Cannot sample from this sampler
-                    raise StopIteration
+                    # Cannot sample any more from this sampler
+                    return
 
                 conc = random.sample(list(sample_cands), 1)[0]
 
@@ -262,13 +279,14 @@ class _FewShotSGGDataSampler:
                     sample_cands -= self.hypernym_info[conc]
 
                 # Sample K exemplars from the exemplar list for the sampled concept
-                sampled_indices += random.sample(
-                    conc_exemplars[conc], self.num_exs_per_conc
-                )
+                sampled_indices += [
+                    ex_ind+(conc,) for ex_ind in 
+                    random.sample(conc_exemplars[conc], self.num_exs_per_conc)
+                ]
 
                 # Exclude the sampled indices altogether to avoid treating instances
                 # of the same concept as 'negative' pairs
-                to_del = set()
+                to_del_tmp = set(); shelter = {}
                 for conc, exs in conc_exemplars.items():
                     conc_exemplars[conc] = [
                         ind for ind in exs if ind not in sampled_indices
@@ -277,9 +295,17 @@ class _FewShotSGGDataSampler:
                     # Remove concept from list if # of unprocessed exemplars are fewer than
                     # self.num_exs_per_conc
                     if len(conc_exemplars[conc]) < self.num_exs_per_conc:
-                        to_del.add(conc)
-                
-                for conc in to_del:
+                        to_del_tmp.add(conc)
+
+                for conc in to_del_tmp:
+                    shelter[conc] = conc_exemplars.pop(conc)
+
+            # Reintroduce the temporarily excluded sample candidate concepts
+            conc_exemplars.update(shelter)
+
+            if not self.with_replacement:
+                # Pop concept from exemplar lists
+                for conc in sampled_concepts:
                     del conc_exemplars[conc]
 
             yield sampled_indices

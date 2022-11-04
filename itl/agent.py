@@ -9,7 +9,6 @@ import rlcompleter
 
 import torch
 import numpy as np
-from detectron2.structures import BoxMode
 
 from .memory import LongTermMemoryModule
 from .vision import VisionModule

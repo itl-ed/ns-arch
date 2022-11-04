@@ -1,9 +1,11 @@
+opencv-python
 torch
 torchvision
 transformers
 timm
 pytorch-lightning
 wandb
-hydra
+hydra-core
+omegaconf
 nltk
 ijson

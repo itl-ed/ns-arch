@@ -1,2 +1,2 @@
 model:
-    detr_model: "SenseTime/deformable-detr"
+    detr_model: "SenseTime/deformable-detr-with-box-refine-two-stage"

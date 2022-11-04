@@ -4,6 +4,7 @@ required by the ITL agent inference (full scene graph generation, classification
 given bbox and visual search by concept exemplars). Implemented using publicly
 released model of OWL-ViT.
 """
+import os
 from PIL import Image
 from itertools import product
 
@@ -11,6 +12,8 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchvision.ops import clip_boxes_to_image, nms, box_iou, box_area
 
 from .data import FewShotSGGDataModule
@@ -40,124 +43,6 @@ class VisionModule:
 
         self.model = FewShotSceneGraphGenerator(self.cfg)
 
-    def owlvit_process(self, image, label_texts=None, label_exemplars=None):
-        """
-        Process image using OwL-ViT model, with label space defined by either
-        label_texts or label_exemplars (but not both).
-        """
-        if isinstance(image, str):
-            # Read image data from path
-            image = Image.open(image)
-
-        # Process input image (optionally along with label texts that is not None)
-        # prepare OwL-ViT input
-        input = self.processor(images=image, text=label_texts, return_tensors="pt")
-        if torch.cuda.is_available():
-            for k, v in input.data.items():
-                input.data[k] = v.to("cuda")
-
-        if label_texts is not None:
-            # Feed processed input to model to obtain output
-            output = self.model(**input)
-        else:
-            assert label_exemplars is not None
-            # transformer's OwL-ViT implementation doesn't directly provide API for
-            # exemplar-based one-shot detection (we wouldn't provide raw image patches
-            # as exemplar after all though). Implement exemplar-based detection by
-            # combining & chaining appropriate calls to OwL-ViT component submodules,
-            # preparing appropriate label space from the exemplars.
-
-            # Extract per-token visual feature vectors
-            vision_outputs = self.model.owlvit.vision_model(
-                input.pixel_values, use_hidden_state=False
-            )
-            image_embeds = self.model.owlvit.vision_model.post_layernorm(vision_outputs[0])
-
-            # Resize class token
-            new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))
-            class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)
-
-            # Merge image embedding with class tokens
-            image_embeds = image_embeds[:, 1:, :] * class_token_out
-            image_embeds = self.model.layer_norm(image_embeds)
-
-            # Resize to [batch_size, num_patches, num_patches, hidden_size]
-            new_size = (
-                image_embeds.shape[0],
-                int(np.sqrt(image_embeds.shape[1])),
-                int(np.sqrt(image_embeds.shape[1])),
-                image_embeds.shape[-1],
-            )
-            image_embeds = image_embeds.reshape(new_size)
-
-            # Also need flattened version of image_embeds as input (B,N,N,D => B,N^2,D)
-            batch_size, num_patches, num_patches, hidden_dim = image_embeds.shape
-            image_embeds_flattened = torch.reshape(
-                image_embeds, (batch_size, num_patches * num_patches, hidden_dim)
-            )
-
-            # Prepare query embeddings from provided label exemplars; use mean prototype
-            # vectors as queries?
-            query_embeds = []; query_mask = []; label_concepts = []
-            for conc_ind, cat_type in label_exemplars.concepts_covered_gen():
-                # Track indices for each concept for future reference
-                label_concepts.append((conc_ind, cat_type))
-
-                # Compose query embeddings as mean prototypes
-                ex_vecs = label_exemplars[(conc_ind, cat_type)]
-                pos_exs = torch.tensor(ex_vecs["pos"], device=image_embeds.device)
-                neg_exs = torch.tensor(ex_vecs["neg"], device=image_embeds.device)
-                all_exs = torch.cat([pos_exs, neg_exs])
-
-                if len(pos_exs) > 0:
-                    pos_proto = pos_exs.mean(dim=0)
-                    query_mask.append(True)
-                else:
-                    pos_proto = torch.zeros_like(all_exs[0])
-                    query_mask.append(False)
-
-                if len(neg_exs) > 0:
-                    neg_proto = neg_exs.mean(dim=0)
-                    query_mask.append(True)
-                else:
-                    neg_proto = torch.zeros_like(all_exs[0])
-                    query_mask.append(False)
-
-                # Add to query embedding matrix, pos and neg
-                query_embeds += [pos_proto, neg_proto]
-
-            query_embeds = torch.stack(query_embeds)
-            query_embeds = query_embeds.reshape(batch_size, -1, query_embeds.shape[-1])
-            query_mask = torch.tensor(query_mask, device=image_embeds.device)
-
-            # Predict object classes [batch_size, num_patches, num_queries+1]
-            pred_logits, class_embeds = self.model.class_predictor(
-                image_embeds_flattened, query_embeds, query_mask
-            )
-
-            # Predict object boxes
-            pred_boxes = self.model.box_predictor(image_embeds_flattened, image_embeds)
-
-            output = OwlViTObjectDetectionOutput(
-                image_embeds=image_embeds,
-                text_embeds=query_embeds,
-                pred_boxes=pred_boxes,
-                logits=pred_logits,
-                class_embeds=class_embeds
-            )
-
-        # Post-process model output into intelligible formats
-        image_size = torch.Tensor([image.size[::-1]])
-        results = self.post_process(outputs=output, target_sizes=image_size)
-
-        # Clip boxes to image size
-        for res in results:
-            res["boxes"] = clip_boxes_to_image(
-                res["boxes"], (image.height, image.width)
-            )
-
-        return results, output, image, label_texts or label_concepts
-
     def train(self):
         """
         Training few-shot visual object detection & class/attribute classification
@@ -171,10 +56,28 @@ class VisionModule:
 
         # Prepare DataModule from data config
         dm = FewShotSGGDataModule(self.cfg)
-        dm.setup("fit")
-        tr_loader = dm.train_dataloader()
-        for batch in iter(tr_loader):
-            print(0)
+
+        # Configure and run trainer
+        trainer = pl.Trainer(
+            accelerator="auto",
+            max_steps=self.cfg.vision.optim.max_steps,
+            check_val_every_n_epoch=None,       # Iteration-based val
+            val_check_interval=100,
+            num_sanity_val_steps=0,
+            callbacks=[
+                ModelCheckpoint(monitor="val_loss"),
+                LearningRateMonitor(logging_interval='step')
+            ],
+            logger=WandbLogger(
+                # offline=True,           # Uncomment for offline run (comment out log_model)
+                log_model=True,         # Uncomment for online run (comment out offline)
+                project=os.environ.get("WANDB_PROJECT"),
+                entity=os.environ.get("WANDB_ENTITY"),
+                name=self.cfg.vision.run_name,
+                save_dir=self.cfg.paths.outputs_dir
+            )
+        )
+        trainer.fit(self.model, datamodule=dm)
 
     def predict(
         self, image, label_texts=None, label_exemplars=None,
