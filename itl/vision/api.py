@@ -62,8 +62,9 @@ class VisionModule:
             accelerator="auto",
             max_steps=self.cfg.vision.optim.max_steps,
             check_val_every_n_epoch=None,       # Iteration-based val
-            val_check_interval=100,
+            val_check_interval=200,
             num_sanity_val_steps=0,
+            log_every_n_steps=10,
             callbacks=[
                 ModelCheckpoint(monitor="val_loss"),
                 LearningRateMonitor(logging_interval='step')
