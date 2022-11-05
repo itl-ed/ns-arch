@@ -42,19 +42,19 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         # MLP heads to attach on top of decoder outputs for metric-based few-shot
         # detection (classification)
         self.fs_embed_cls = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D, hidden_dim=detr_D, output_dim=detr_D, num_layers=3
+            input_dim=detr_D, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
         self.fs_embed_att = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=3
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
 
         # MLP heads to attach on top of encoder outputs for metric-based few-shot
         # search (conditioned detection)
         self.fs_search_score = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=1, num_layers=3
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=1, num_layers=2
         )
         self.fs_search_bbox = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=3
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=2
         )
 
         # Freeze all parameters...
@@ -155,6 +155,8 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         """
         Shared subroutine for processing batch to obtain loss & performance metric
         """
+        self.detr.eval()        # DETR always eval mode
+
         images, bboxes, _ = batch
         bboxes = [torch.tensor(bbs) for bbs in bboxes]
         bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
@@ -170,19 +172,28 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         ], dim=1)           # Stack on num_queries dimension
 
         B = self.cfg.vision.data.batch_size
+        MB = self.cfg.vision.data.minibatch_size
         assert len(images) == len(bboxes) == B
+
+        if B % MB == 0:
+            minibatch_inds = [(i*MB, (i+1)*MB) for i in range(B // MB)]
+        else:
+            minibatch_inds = [(i*MB, (i+1)*MB) for i in range(B // MB + 1)]
 
         # Number of "ways" and "shots" in few-shot episodes
         N = self.cfg.vision.data.batch_size // self.cfg.vision.data.num_exs_per_conc
         K = self.cfg.vision.data.num_exs_per_conc
 
         # Processing whole images in batch all at once can be demanding w.r.t.
-        # memory usage (and for some reason, ResNet backbone is significantly
-        # sensitive to batch size???); process each one by one
+        # memory usage; let's divide batch into smaller minibatches (with size
+        # specified in config) to collect feature vectors
         batch_fvecs = []
-        for img, bb in zip(images, bboxes):
-            fvecs = self._fvec_from_images_and_bboxes([img], bb[None])
-            batch_fvecs.append(fvecs)
+        for start_ind, end_ind in minibatch_inds:
+            minibatch_fvecs = self._fvec_from_images_and_bboxes(
+                images[start_ind:end_ind], bboxes[start_ind:end_ind]
+            )
+
+            batch_fvecs.append(minibatch_fvecs)
         batch_fvecs = torch.cat(batch_fvecs)
 
         # Pass through MLP block according to specified task concept type
