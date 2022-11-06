@@ -2,27 +2,27 @@ defaults:
     - base
     - task: ???
 
-run_name: "${now:%Y-%m-%d}_${now:%H-%M-%S}"
-
 data:
     name: visual_genome
     path: "${paths.data_dir}/${vision.data.name}"
     num_images: 108077
     use_percentage: 0.1
-    num_loader_workers: 4
+    num_loader_workers: 6
     batch_size: 32
-    minibatch_size: 2
+    minibatch_size: 1
     num_exs_per_conc: 8
 
 optim:
     algorithm: "Adam"
-    init_lr_over_eps: 1e3
+    init_lr_over_eps: 1e2
     beta1_1m: 1e-1
     beta2_1m: 1e-3
-    eps: 1e-7
+    eps: 1e-6
     lr_scheduler: "MultiStepLR"
     lr_scheduler_milestones:
         - 0.8
         - 0.9
-    lr_scheduler_gamma: 1e-1
+    lr_scheduler_gamma: 3e-1
     max_steps: 10000
+
+run_name: "alpha0-${vision.optim.init_lr_over_eps}_eps-${vision.optim.eps}"

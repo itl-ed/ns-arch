@@ -50,12 +50,22 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         # MLP heads to attach on top of encoder outputs for metric-based few-shot
         # search (conditioned detection)
-        self.fs_search_score = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=1, num_layers=2
+        self.fs_search_cls = DeformableDetrMLPPredictionHead(
+            input_dim=detr_D, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
+        )
+        self.fs_search_att = DeformableDetrMLPPredictionHead(
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
         self.fs_search_bbox = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=2
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=3
         )
+
+        # Initialize self.fs_search_bbox by copying parameters from the DETR model's
+        # decoder's last layer's bbox_embed (from 2nd~ layer)
+        fs_bb_layers = self.fs_search_bbox.layers[1:]
+        dec_last_bb_layers = self.detr.model.decoder.bbox_embed[-1].layers[1:]
+        for f_l, d_l in zip(fs_bb_layers, dec_last_bb_layers):
+            f_l.load_state_dict(d_l.state_dict())
 
         # Freeze all parameters...
         for prm in self.parameters():
@@ -75,7 +85,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 raise ValueError("Invalid concept type")
         elif self.cfg.vision.task.pred_type == "fs_search":
             # Few-shot search with encoder output embeddings
-            for prm in self.fs_search_score.parameters():
+            for prm in self.fs_search_cls.parameters():
+                prm.requires_grad = True
+            for prm in self.fs_search_att.parameters():
                 prm.requires_grad = True
             for prm in self.fs_search_bbox.parameters():
                 prm.requires_grad = True
@@ -202,7 +214,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         elif self.cfg.vision.task.conc_type == "attributes":
             cls_embedding = self.fs_embed_cls(batch_fvecs[:,0,:])
             conc_embedding = self.fs_embed_att(
-                torch.cat([batch_fvecs, cls_embedding], dim=-1)
+                torch.cat([batch_fvecs[:,0,:], cls_embedding], dim=-1)
             )
         else:
             raise ValueError("Invalid concept type")
@@ -219,17 +231,20 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         loss_nca = F.softmax(-pairwise_dists_sq) * pos_dist_mask
         loss_nca = -loss_nca.sum(dim=-1).log().sum() / B
 
-        # Compute precision@k values as performance metric
+        # Compute recall@K values as performance metric
         metrics = {}
-        p_at_k = 0.0
-        topk_closest_exs = pairwise_dists_sq.topk(K, largest=False, dim=-1).indices
+        r_at_k = 0.0; r_at_2k = 0.0
+        topk_closest_exs = pairwise_dists_sq.topk(2*K, largest=False, dim=-1).indices
         for i in range(N):
             for j in range(K):
                 ind = i*K + j
-                topk = set(topk_closest_exs[ind].tolist()) - {ind}
                 gt_pos_exs = set(range(i*N, i*N+K)) - {ind}
-                p_at_k += len(topk & gt_pos_exs) / (K - 1)
-        metrics["precision@K"] = p_at_k / B
+                topk = set(topk_closest_exs[ind][:K].tolist()) - {ind}
+                top2k = set(topk_closest_exs[ind].tolist()) - {ind}
+                r_at_k += len(topk & gt_pos_exs) / (K - 1)
+                r_at_2k += len(top2k & gt_pos_exs) / (K - 1)
+        metrics["recall@K"] = r_at_k / B
+        metrics["recall@2K"] = r_at_2k / B
 
         return loss_nca, metrics
 
