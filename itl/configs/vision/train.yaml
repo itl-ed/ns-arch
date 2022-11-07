@@ -25,4 +25,4 @@ optim:
     lr_scheduler_gamma: 3e-1
     max_steps: 10000
 
-run_name: "alpha0-${vision.optim.init_lr_over_eps}_eps-${vision.optim.eps}"
+run_name: "b-${vision.data.batch_size}_shots-${vision.data.num_exs_per_conc}_alpha0-${vision.optim.init_lr_over_eps}_eps-${vision.optim.eps}"
