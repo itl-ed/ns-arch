@@ -169,44 +169,37 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         """
         self.detr.eval()        # DETR always eval mode
 
-        images, bboxes, _ = batch
-        bboxes = [torch.tensor(bbs) for bbs in bboxes]
-        bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
-        bboxes = torch.stack([
-            torch.tensor([
-                [
-                    bb[0] / images[i].width, bb[1] / images[i].height,
-                    bb[2] / images[i].width, bb[3] / images[i].height,
-                ]
-                for i, bb in enumerate(bbs)
-            ]).to(self.device)
-            for bbs in bboxes
-        ], dim=1)           # Stack on num_queries dimension
-
-        B = self.cfg.vision.data.batch_size
-        MB = self.cfg.vision.data.minibatch_size
-        assert len(images) == len(bboxes) == B
-
-        if B % MB == 0:
-            minibatch_inds = [(i*MB, (i+1)*MB) for i in range(B // MB)]
-        else:
-            minibatch_inds = [(i*MB, (i+1)*MB) for i in range(B // MB + 1)]
-
         # Number of "ways" and "shots" in few-shot episodes
         N = self.cfg.vision.data.batch_size // self.cfg.vision.data.num_exs_per_conc
         K = self.cfg.vision.data.num_exs_per_conc
 
-        # Processing whole images in batch all at once can be demanding w.r.t.
-        # memory usage; let's divide batch into smaller minibatches (with size
-        # specified in config) to collect feature vectors
-        batch_fvecs = []
-        for start_ind, end_ind in minibatch_inds:
-            minibatch_fvecs = self._fvec_from_images_and_bboxes(
-                images[start_ind:end_ind], bboxes[start_ind:end_ind]
-            )
+        # Batch size
+        B = self.cfg.vision.data.batch_size
 
-            batch_fvecs.append(minibatch_fvecs)
-        batch_fvecs = torch.cat(batch_fvecs)
+        if len(batch) == 3:
+            # Didn't find cached pre-computed vectors, need to compute
+            images, bboxes, bb_inds = batch
+            bboxes = [torch.tensor(bbs).to(self.device) for bbs in bboxes]
+            bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
+            bboxes = [
+                torch.stack([
+                    bbs[:,0] / images[i].width, bbs[:,1] / images[i].height,
+                    bbs[:,2] / images[i].width, bbs[:,3] / images[i].height,
+                ], dim=-1)
+                for i, bbs in enumerate(bboxes)
+            ]
+
+            assert len(images) == len(bboxes) == B
+
+            # Process each image with DETR one-by-one in eval mode
+            batch_fvecs = []
+            for img, bbs, bbis in zip(images, bboxes, bb_inds):
+                fvecs = self.fvecs_from_image_and_bboxes(img, bbs)
+                batch_fvecs.append(fvecs[:,bbis])
+            batch_fvecs = torch.cat(batch_fvecs)
+        else:
+            # Cached vectors for the batch found
+            batch_fvecs = batch.to(self.device)
 
         # Pass through MLP block according to specified task concept type
         if self.cfg.vision.task.conc_type == "classes":
@@ -248,18 +241,29 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         return loss_nca, metrics
 
-    def _fvec_from_images_and_bboxes(self, images, bboxes):
+    def fvecs_from_image_and_bboxes(self, image, bboxes):
         """
         Subroutine for extracting feature vectors corresponding to image-bbox
         pairs; code below is composed from snippets taken from huggingface's
         original Deformable DETR code components, appropriately abridging unused
         parts and making appropriate modifications to accommodate our needs
         """
+        encoder_outputs, valid_ratios, spatial_shapes, \
+            level_start_index, mask_flatten = self._detr_enc_outputs(image)
+        decoder_outputs = self._detr_dec_outputs(
+            encoder_outputs, bboxes,
+            valid_ratios, spatial_shapes, level_start_index, mask_flatten
+        )
+
+        return decoder_outputs
+
+    def _detr_enc_outputs(self, image):
+        """ Subroutine for processing images up to encoder outputs """
         detr_cfg = self.detr.config
 
         # Input preprocessing
         inputs = self.feature_extractor(
-            images=images, return_tensors="pt"
+            images=image, return_tensors="pt"
         )
         inputs = { k: v.to(self.device) for k, v in inputs.items() }
 
@@ -343,12 +347,45 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             valid_ratios=valid_ratios
         )
 
-        # Fifth, prepare decoder inputs. Here we don't run top-k regional proposals;
-        # instead, only prepare query embedding(s) corresponding to the provided
+        return encoder_outputs, valid_ratios, spatial_shapes, level_start_index, mask_flatten
+
+    def _detr_dec_outputs(
+        self, enc_out, bboxes,
+        valid_ratios, spatial_shapes, level_start_index, mask_flatten
+    ):
+        """ Subroutine for processing encoder outputs to obtain decoder outputs """
+        detr_cfg = self.detr.config
+
+        # Fifth, prepare decoder inputs. In addition to the top-k regional proposals
+        # for two-stage DETR, prepare query embedding(s) corresponding to the provided
         # bbox(es).
-        num_channels = encoder_outputs[0].shape[-1]
-        reference_points = bboxes
-        reference_points_logits = torch.special.logit(reference_points, eps=1e-6)
+        num_channels = enc_out[0].shape[-1]
+        object_query_embedding, output_proposals = self.detr.model.gen_encoder_output_proposals(
+            enc_out[0], ~mask_flatten, spatial_shapes
+        )
+
+        # apply a detection head to each pixel (A.4 in paper)
+        # linear projection for bounding box binary classification (i.e. foreground and background)
+        enc_outputs_class = self.detr.model.decoder.class_embed[-1](object_query_embedding)
+        # 3-layer FFN to predict bounding boxes coordinates (bbox regression branch)
+        delta_bbox = self.detr.model.decoder.bbox_embed[-1](object_query_embedding)
+        enc_outputs_coord_logits = delta_bbox + output_proposals
+
+        # only keep top scoring `config.two_stage_num_proposals` proposals
+        topk = detr_cfg.two_stage_num_proposals
+        topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1]
+        topk_coords_logits = torch.gather(
+            enc_outputs_coord_logits, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
+        )
+
+        topk_coords_logits = topk_coords_logits.detach()
+        reference_points = topk_coords_logits.sigmoid()
+
+        # Add proposals from provided bboxes
+        reference_points = torch.cat([bboxes[None], reference_points], dim=1)
+        reference_points_logits = torch.cat([
+            torch.special.logit(bboxes[None], eps=1e-6), topk_coords_logits
+        ], dim=1)
         pos_trans_out = self.detr.model.get_proposal_pos_embed(reference_points_logits)
         pos_trans_out = self.detr.model.pos_trans_norm(
             self.detr.model.pos_trans(pos_trans_out)
@@ -358,14 +395,14 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         # Feed prepared inputs to decoder; code below taken & simplified from
         # DeformableDetrDecoder.forward()
         hidden_states = target
-        for decoder_layer in self.detr.model.decoder.layers:
+        for i, decoder_layer in enumerate(self.detr.model.decoder.layers):
             reference_points_input = reference_points[:, :, None] * \
                 torch.cat([valid_ratios, valid_ratios], -1)[:, None]
             
             layer_outputs = decoder_layer(
                 hidden_states,
                 position_embeddings=query_embed,
-                encoder_hidden_states=encoder_outputs[0],
+                encoder_hidden_states=enc_out[0],
                 reference_points=reference_points_input,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
@@ -374,11 +411,14 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
             hidden_states = layer_outputs[0]
 
-            # Iterative bounding box refinement... except we don't
-            # tmp = self.detr.model.decoder.bbox_embed[i](hidden_states)
-            # new_reference_points = tmp + torch.special.logit(reference_points, eps=1e-6)
-            # new_reference_points = new_reference_points.sigmoid()
-            # reference_points = new_reference_points.detach()
+            # Iterative bounding box refinement, except for proposals with bboxes provided
+            tmp = self.detr.model.decoder.bbox_embed[i](hidden_states)
+            new_reference_points = torch.special.logit(reference_points, eps=1e-6)
+            new_reference_points[:,bboxes.shape[0]:] = \
+                tmp[:,bboxes.shape[0]:] + new_reference_points[:,bboxes.shape[0]:]
+            new_reference_points = new_reference_points.sigmoid()
+            reference_points = new_reference_points.detach()
 
-        # Return final decoder layer output
-        return hidden_states
+        # Return parts of final decoder layer output corresponding to the provided
+        # bboxes
+        return hidden_states[:,:bboxes.shape[0]]

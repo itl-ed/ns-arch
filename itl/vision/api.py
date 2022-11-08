@@ -5,16 +5,18 @@ given bbox and visual search by concept exemplars). Implemented using publicly
 released model of OWL-ViT.
 """
 import os
+import json
 from PIL import Image
 from itertools import product
 
+import tqdm
 import torch
 import numpy as np
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from torchvision.ops import clip_boxes_to_image, nms, box_iou, box_area
+from torchvision.ops import box_convert, nms, box_iou, box_area
 
 from .data import FewShotSGGDataModule
 from .modeling import FewShotSceneGraphGenerator
@@ -52,8 +54,6 @@ class VisionModule:
         space where instances of the same concepts are placed closer. (Mostly likely
         not called by end user.)
         """
-        pl.seed_everything(self.cfg.seed)
-
         # Prepare DataModule from data config
         dm = FewShotSGGDataModule(self.cfg)
 
@@ -70,8 +70,8 @@ class VisionModule:
                 LearningRateMonitor(logging_interval='step')
             ],
             logger=WandbLogger(
-                # offline=True,           # Uncomment for offline run (comment out log_model)
-                log_model=True,         # Uncomment for online run (comment out offline)
+                offline=True,           # Uncomment for offline run (comment out log_model)
+                # log_model=True,         # Uncomment for online run (comment out offline)
                 project=os.environ.get("WANDB_PROJECT"),
                 entity=os.environ.get("WANDB_ENTITY"),
                 name=self.cfg.vision.run_name,
@@ -79,6 +79,49 @@ class VisionModule:
             )
         )
         trainer.fit(self.model, datamodule=dm)
+
+    def cache_vectors(self):
+        """
+        Pre-compute and cache feature vector outputs from the DETR model to speed up
+        the training process...
+        """
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = self.model.to(device)
+        self.model.detr.eval()
+
+        dataset_path = self.cfg.vision.data.path
+        images_path = os.path.join(dataset_path, "images")
+        vectors_path = os.path.join(dataset_path, "vectors")
+        os.makedirs(vectors_path, exist_ok=True)
+
+        with open(f"{dataset_path}/annotations.json") as ann_f:
+            annotations = json.load(ann_f)
+
+        for img in tqdm.tqdm(annotations, total=len(annotations)):
+            vec_path = os.path.join(vectors_path, f"{img['file_name']}.vectors")
+
+            if len(img["annotations"]) == 0: continue
+            if os.path.exists(vec_path): continue
+
+            image_raw = os.path.join(images_path, img["file_name"])
+            image_raw = Image.open(image_raw)
+            if image_raw.mode != "RGB":
+                # Cast non-RGB images (e.g. grayscale) into RGB format
+                old_image_raw = image_raw
+                image_raw = Image.new("RGB", old_image_raw.size)
+                image_raw.paste(old_image_raw)
+
+            bboxes = [obj["bbox"] for obj in img["annotations"].values()]
+            bboxes = torch.tensor(bboxes).to(device)
+            bboxes = box_convert(bboxes, "xywh", "cxcywh")
+            bboxes = torch.stack([
+                bboxes[:,0] / image_raw.width, bboxes[:,1] / image_raw.height,
+                bboxes[:,2] / image_raw.width, bboxes[:,3] / image_raw.height,
+            ], dim=-1)
+
+            fvecs = self.model.fvecs_from_image_and_bboxes(image_raw, bboxes).cpu()[0]
+            fvecs = {oid: fv for oid, fv in zip(img["annotations"], fvecs)}
+            torch.save(fvecs, vec_path)
 
     def predict(
         self, image, label_texts=None, label_exemplars=None,

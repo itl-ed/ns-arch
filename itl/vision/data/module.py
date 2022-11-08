@@ -32,6 +32,10 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         super().__init__()
         self.cfg = cfg
 
+        # If populated, can be used to pre-compute and cache feature vectors for each
+        # object in images
+        self.fvec_extract_fn = None
+
     def prepare_data(self):
         # Create data directory at the specified path if not exists
         dataset_path = self.cfg.vision.data.path
@@ -118,7 +122,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_train
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, images_path, metadata[conc_type]
+                    ann_train, dataset_path
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
@@ -132,7 +136,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_val
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, images_path, metadata[conc_type]
+                    ann_val, dataset_path
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
@@ -147,7 +151,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_test
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, images_path, metadata[conc_type]
+                    ann_test, dataset_path
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
@@ -159,13 +163,15 @@ class FewShotSGGDataModule(pl.LightningDataModule):
     @staticmethod
     def _collate_fn(data):
         """ Custom collate_fn to pass to dataloaders """
-        imgs = [img for img, _, _ in data]
-        bboxes = tuple(
-            [bbox_tuple[i] for _, bbox_tuple, _ in data]
-            for i in range(len(data[0][1]))
-        )
-        concepts = [conc for _, _, conc in data]
-        return imgs, bboxes, concepts
+        # Enforce same data type in batch
+        assert all(type(d)==type(data[0]) for d in data)
+
+        if type(data[0]) == tuple:
+            # Vectors not cached, raw data
+            return tuple(zip(*data))
+        else:
+            # Cached vectors fetched as torch tensor
+            return torch.stack(data, dim=0)
 
     def train_dataloader(self):
         return DataLoader(
@@ -193,29 +199,42 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
 
 class _SGGDataset(Dataset):
-    def __init__(self, annotations, images_path, concept_names):
+    def __init__(self, annotations, dataset_path):
         super().__init__()
         self.annotations = annotations
-        self.images_path = images_path
-        self.concept_names = concept_names
+        self.dataset_path = dataset_path
     
     def __getitem__(self, idx):
-        assert len(idx) == 3
-        img_id, obj_ids, conc = idx
+        assert len(idx) == 2
+        img_id, obj_ids = idx
 
-        image = os.path.join(self.images_path, self.annotations[img_id]["file_name"])
-        image = Image.open(image)
-        if image.mode != "RGB":
-            # Cast non-RGB images (e.g. grayscale) into RGB format
-            old_image = image
-            image = Image.new("RGB", old_image.size)
-            image.paste(old_image)
+        images_path = os.path.join(self.dataset_path, "images")
+        vectors_path = os.path.join(self.dataset_path, "vectors")
 
-        bboxes = tuple(
-            self.annotations[img_id]["annotations"][oid]["bbox"] for oid in obj_ids
-        )
+        img_file = self.annotations[img_id]["file_name"]
+        vecs_file = f"{img_file}.vectors"
 
-        return image, bboxes, self.concept_names[conc]
+        if os.path.exists(os.path.join(vectors_path, vecs_file)):
+            vecs = torch.load(os.path.join(vectors_path, vecs_file))
+            vecs = torch.stack([vecs[oid] for oid in obj_ids], dim=0)
+
+            return vecs
+        else:
+            image_raw = os.path.join(images_path, img_file)
+            image_raw = Image.open(image_raw)
+            if image_raw.mode != "RGB":
+                # Cast non-RGB images (e.g. grayscale) into RGB format
+                old_image_raw = image_raw
+                image_raw = Image.new("RGB", old_image_raw.size)
+                image_raw.paste(old_image_raw)
+
+            oids = list(self.annotations[img_id]["annotations"])
+            bboxes = [
+                obj["bbox"] for obj in self.annotations[img_id]["annotations"].values()
+            ]
+            bb_inds = [oids.index(oid) for oid in obj_ids]
+
+            return image_raw, bboxes, bb_inds
     
     def __len__(self):
         return len(self.annotations)
@@ -279,10 +298,9 @@ class _FewShotSGGDataSampler:
                     sample_cands -= self.hypernym_info[conc]
 
                 # Sample K exemplars from the exemplar list for the sampled concept
-                sampled_indices += [
-                    ex_ind+(conc,) for ex_ind in 
-                    random.sample(conc_exemplars[conc], self.num_exs_per_conc)
-                ]
+                sampled_indices += random.sample(
+                    conc_exemplars[conc], self.num_exs_per_conc
+                )
 
                 # Exclude the sampled indices altogether to avoid treating instances
                 # of the same concept as 'negative' pairs

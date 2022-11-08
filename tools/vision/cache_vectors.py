@@ -21,7 +21,7 @@ def main(cfg):
     pl.seed_everything(cfg.seed)
 
     vision = VisionModule(cfg)
-    vision.train()
+    vision.cache_vectors()
 
 
 if __name__ == "__main__":

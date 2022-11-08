@@ -9,7 +9,6 @@ data:
     use_percentage: 0.1
     num_loader_workers: 6
     batch_size: 32
-    minibatch_size: 1
     num_exs_per_conc: 8
 
 optim:
