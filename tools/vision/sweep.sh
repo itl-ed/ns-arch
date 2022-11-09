@@ -1,6 +1,6 @@
 #!/bin/bash
-declare -a a0_exps=(-3 -4 -5)
-declare -a eps_exps=(-8 -7 -6 -5)
+declare -a a0_exps=(-4 -5 -6)
+declare -a eps_exps=(-8 -7 -6 -5 -4 -3)
 
 for eps_e in ${eps_exps[@]}
 do

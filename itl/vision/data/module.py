@@ -215,11 +215,13 @@ class _SGGDataset(Dataset):
         vecs_file = f"{img_file}.vectors"
 
         if os.path.exists(os.path.join(vectors_path, vecs_file)):
+            # Fetch and return pre-computed feature vectors for the image
             vecs = torch.load(os.path.join(vectors_path, vecs_file))
             vecs = torch.stack([vecs[oid] for oid in obj_ids], dim=0)
 
             return vecs
         else:
+            # Fetch and return raw image, bboxes and object indices
             image_raw = os.path.join(images_path, img_file)
             image_raw = Image.open(image_raw)
             if image_raw.mode != "RGB":
@@ -282,6 +284,10 @@ class _FewShotSGGDataSampler:
                 if len(exs) >= self.num_exs_per_conc
             }
 
+            # Storage of temporarily excluded sample candidates due to hyper/hyponymy
+            # constraints
+            tmp_shelter = {}
+
             while len(sampled_concepts) < self.num_concepts:
                 if len(sample_cands) == 0:
                     # Cannot sample any more from this sampler
@@ -304,7 +310,7 @@ class _FewShotSGGDataSampler:
 
                 # Exclude the sampled indices altogether to avoid treating instances
                 # of the same concept as 'negative' pairs
-                to_del_tmp = set(); shelter = {}
+                to_shelter = set()
                 for conc, exs in conc_exemplars.items():
                     conc_exemplars[conc] = [
                         ind for ind in exs if ind not in sampled_indices
@@ -313,13 +319,13 @@ class _FewShotSGGDataSampler:
                     # Remove concept from list if # of unprocessed exemplars are fewer than
                     # self.num_exs_per_conc
                     if len(conc_exemplars[conc]) < self.num_exs_per_conc:
-                        to_del_tmp.add(conc)
+                        to_shelter.add(conc)
 
-                for conc in to_del_tmp:
-                    shelter[conc] = conc_exemplars.pop(conc)
+                for conc in to_shelter:
+                    tmp_shelter.update({ conc: conc_exemplars.pop(conc) })
 
             # Reintroduce the temporarily excluded sample candidate concepts
-            conc_exemplars.update(shelter)
+            conc_exemplars.update(tmp_shelter)
 
             if not self.with_replacement:
                 # Pop concept from exemplar lists
