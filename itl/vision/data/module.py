@@ -122,7 +122,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_train
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, dataset_path
+                    ann_train, dataset_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
@@ -136,7 +136,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_val
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, dataset_path
+                    ann_val, dataset_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
@@ -151,12 +151,12 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_test
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, dataset_path
+                    ann_test, dataset_path, metadata[conc_type]
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
-                    self.cfg.vision.data.batch_size,
-                    self.cfg.vision.data.num_exs_per_conc,
+                    self.cfg.vision.data.batch_size_test,
+                    self.cfg.vision.data.num_exs_per_conc_test,
                     with_replacement=False
                 )
 
@@ -164,14 +164,17 @@ class FewShotSGGDataModule(pl.LightningDataModule):
     def _collate_fn(data):
         """ Custom collate_fn to pass to dataloaders """
         # Enforce same data type in batch
-        assert all(type(d)==type(data[0]) for d in data)
+        assert len(data[0])==2
+        assert all(type(d[0])==type(data[0][0]) for d in data)
 
-        if type(data[0]) == tuple:
+        batch_data, concept_labels = list(zip(*data))
+
+        if type(data[0][0]) == tuple:
             # Vectors not cached, raw data
-            return tuple(zip(*data))
+            return tuple(zip(*batch_data)), concept_labels
         else:
             # Cached vectors fetched as torch tensor
-            return torch.stack(data, dim=0)
+            return torch.stack(batch_data, dim=0), concept_labels
 
     def train_dataloader(self):
         return DataLoader(
@@ -199,14 +202,15 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
 
 class _SGGDataset(Dataset):
-    def __init__(self, annotations, dataset_path):
+    def __init__(self, annotations, dataset_path, concept_names):
         super().__init__()
         self.annotations = annotations
         self.dataset_path = dataset_path
+        self.concept_names = concept_names
     
     def __getitem__(self, idx):
-        assert len(idx) == 2
-        img_id, obj_ids = idx
+        assert len(idx) == 3
+        img_id, obj_ids, conc = idx
 
         images_path = os.path.join(self.dataset_path, "images")
         vectors_path = os.path.join(self.dataset_path, "vectors")
@@ -219,7 +223,7 @@ class _SGGDataset(Dataset):
             vecs = torch.load(os.path.join(vectors_path, vecs_file))
             vecs = torch.stack([vecs[oid] for oid in obj_ids], dim=0)
 
-            return vecs
+            return vecs, self.concept_names[conc]
         else:
             # Fetch and return raw image, bboxes and object indices
             image_raw = os.path.join(images_path, img_file)
@@ -236,7 +240,7 @@ class _SGGDataset(Dataset):
             ]
             bb_inds = [oids.index(oid) for oid in obj_ids]
 
-            return image_raw, bboxes, bb_inds
+            return (image_raw, bboxes, bb_inds), self.concept_names[conc]
     
     def __len__(self):
         return len(self.annotations)
@@ -304,9 +308,10 @@ class _FewShotSGGDataSampler:
                     sample_cands -= self.hypernym_info[conc]
 
                 # Sample K exemplars from the exemplar list for the sampled concept
-                sampled_indices += random.sample(
-                    conc_exemplars[conc], self.num_exs_per_conc
-                )
+                sampled_indices += [
+                    ex_ind+(conc,) for ex_ind in 
+                    random.sample(conc_exemplars[conc], self.num_exs_per_conc)
+                ]
 
                 # Exclude the sampled indices altogether to avoid treating instances
                 # of the same concept as 'negative' pairs

@@ -8,7 +8,6 @@ paths:
     outputs_dir: "${hydra:runtime.output_dir}"
 
 agent:
-    model: ???
     strat_generic: "semOnly"
     strat_mismatch: "zeroinit"
 

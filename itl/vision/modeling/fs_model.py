@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
@@ -97,7 +98,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         self.save_hyperparameters()
 
     def training_step(self, batch, _):
-        loss, metrics = self._process_batch(batch)
+        loss, metrics, _, _ = self._process_batch(batch)
 
         self.log("train_loss", loss.item())
         for metric, val in metrics.items():
@@ -106,21 +107,31 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, _):
-        loss, metrics = self._process_batch(batch)
+        loss, metrics, _, _ = self._process_batch(batch)
 
-        self.log("val_loss", loss.item(), batch_size=len(batch[0]))
+        self.log("val_loss", loss.item(), batch_size=len(batch[0][0]))
         for metric, val in metrics.items():
-            self.log(f"val_{metric}", val, batch_size=len(batch[0]))
-
-        return { "loss": loss.item(), **metrics }
+            self.log(f"val_{metric}", val, batch_size=len(batch[0][0]))
 
     def test_step(self, batch, _):
-        _, metrics = self._process_batch(batch)
+        _, metrics, embeddings, labels = self._process_batch(batch)
 
         for metric, val in metrics.items():
-            self.log(f"test_{metric}", val, batch_size=len(batch[0]))
+            self.log(f"test_{metric}", val, batch_size=len(batch[0][0]))
 
-        return metrics
+        return embeddings, labels
+    
+    def test_epoch_end(self, outputs):
+        """ Log instance embeddings """
+        embeddings, labels = tuple(zip(*outputs))
+        embeddings = torch.cat(embeddings)
+        labels = sum(labels, ())
+
+        self.logger.log_table(
+            f"embeddings_{self.cfg.vision.task.conc_type}",
+            columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
+            data=[[labels[i]]+embeddings[i].tolist() for i in range(len(embeddings))]
+        )
 
     def configure_optimizers(self):
         # Populate optimizer configs
@@ -163,22 +174,33 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             }
         }
 
+    def on_save_checkpoint(self, checkpoint):
+        """
+        No need to save weights for DETR; del DETR weights to leave param weights
+        for the newly added prediction heads only
+        """
+        state_dict_filtered = OrderedDict()
+        for k, v in checkpoint["state_dict"].items():
+            if not k.startswith("detr"):
+                state_dict_filtered[k] = v
+        checkpoint["state_dict"] = state_dict_filtered
+
     def _process_batch(self, batch):
         """
         Shared subroutine for processing batch to obtain loss & performance metric
         """
         self.detr.eval()        # DETR always eval mode
 
-        # Number of "ways" and "shots" in few-shot episodes
-        N = self.cfg.vision.data.batch_size // self.cfg.vision.data.num_exs_per_conc
-        K = self.cfg.vision.data.num_exs_per_conc
+        batch_data, conc_labels = batch
 
-        # Batch size
-        B = self.cfg.vision.data.batch_size
+        # Batch size, number of "ways" and "shots" in few-shot episodes
+        B = len(batch_data)
+        N = len(set(conc_labels))
+        K = B // N
 
-        if len(batch) == 3:
+        if len(batch_data) == 3:
             # Didn't find cached pre-computed vectors, need to compute
-            images, bboxes, bb_inds = batch
+            images, bboxes, bb_inds = batch_data
             bboxes = [torch.tensor(bbs).to(self.device) for bbs in bboxes]
             bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
             bboxes = [
@@ -199,7 +221,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             batch_fvecs = torch.cat(batch_fvecs)
         else:
             # Cached vectors for the batch found
-            batch_fvecs = batch.to(self.device)
+            batch_fvecs = batch_data.to(self.device)
 
         # Pass through MLP block according to specified task concept type
         if self.cfg.vision.task.conc_type == "classes":
@@ -239,7 +261,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         metrics["recall@K"] = r_at_k / B
         metrics["recall@2K"] = r_at_2k / B
 
-        return loss_nca, metrics
+        return loss_nca, metrics, conc_embedding, conc_labels
 
     def fvecs_from_image_and_bboxes(self, image, bboxes):
         """
