@@ -18,7 +18,6 @@ from .practical_reasoning import PracticalReasonerModule
 from .actions import AgentCompositeActions
 from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
-from .path_manager import PathManager
 from .utils.completer import DatasetImgsCompleter
 
 
@@ -32,7 +31,6 @@ class ITLAgent:
 
     def __init__(self, opts):
         self.opts = opts
-        self.path_manager = PathManager
 
         # Initialize component modules
         self.vision = VisionModule(opts.vision_model_path)

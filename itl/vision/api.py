@@ -14,6 +14,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from dotenv import find_dotenv, load_dotenv
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchvision.ops import box_convert, nms, box_iou, box_area
@@ -478,6 +479,11 @@ class VisionModule:
         space where instances of the same concepts are placed closer. (Mostly likely
         not called by end user.)
         """
+        try:
+            load_dotenv(find_dotenv(raise_error_if_not_found=True))
+        except OSError as e:
+            print(f"While reading dotenv: {e}")
+
         # Prepare DataModule from data config
         dm = FewShotSGGDataModule(self.cfg)
 
@@ -499,7 +505,7 @@ class VisionModule:
             log_every_n_steps=100,
             logger=wb_logger,
             callbacks=[
-                ModelCheckpoint(monitor="val_loss"),
+                ModelCheckpoint(monitor="val_loss", save_last=True),
                 LearningRateMonitor(logging_interval='step')
             ]
         )
