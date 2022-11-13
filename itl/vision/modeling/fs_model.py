@@ -1,4 +1,5 @@
 import os
+import random
 from collections import OrderedDict
 
 import torch
@@ -127,18 +128,29 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         embeddings = torch.cat(embeddings)
         labels = sum(labels, ())
 
+        # There are typically too many vectors, not all of them need to be logged...
+        # Let's downsample to K (as in config) per concept
+        K = self.cfg.vision.data.num_exs_per_conc_eval
+        downsampled = {
+            conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
+            for conc in set(labels)
+        }
+        data_downsampled = [
+            [conc]+embeddings[ex_i].tolist()
+            for conc, exs in downsampled.items() for ex_i in exs
+        ]
+
         self.logger.log_table(
             f"embeddings_{self.cfg.vision.task.conc_type}",
             columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
-            data=[[labels[i]]+embeddings[i].tolist() for i in range(len(embeddings))]
+            data=data_downsampled
         )
 
     def configure_optimizers(self):
         # Populate optimizer configs
         optim_kwargs = {}
-        if "init_lr_over_eps" in self.cfg.vision.optim and "eps" in self.cfg.vision.optim:
-            optim_kwargs["lr"] = \
-                self.cfg.vision.optim.init_lr_over_eps * self.cfg.vision.optim.eps
+        if "init_lr" in self.cfg.vision.optim:
+            optim_kwargs["lr"] = self.cfg.vision.optim.init_lr
         if "beta1_1m" in self.cfg.vision.optim and "beta2_1m" in self.cfg.vision.optim:
             optim_kwargs["betas"] = (
                 1-self.cfg.vision.optim.beta1_1m, 1-self.cfg.vision.optim.beta2_1m
@@ -181,7 +193,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         """
         state_dict_filtered = OrderedDict()
         for k, v in checkpoint["state_dict"].items():
-            if not k.startswith("detr"):
+            if k.startswith("fs_"):
                 state_dict_filtered[k] = v
         checkpoint["state_dict"] = state_dict_filtered
 
@@ -201,6 +213,8 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         if len(batch_data) == 3:
             # Didn't find cached pre-computed vectors, need to compute
             images, bboxes, bb_inds = batch_data
+            assert len(images) == len(bboxes) == len(bb_inds)
+
             bboxes = [torch.tensor(bbs).to(self.device) for bbs in bboxes]
             bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
             bboxes = [
@@ -210,8 +224,6 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 ], dim=-1)
                 for i, bbs in enumerate(bboxes)
             ]
-
-            assert len(images) == len(bboxes) == B
 
             # Process each image with DETR one-by-one in eval mode
             batch_fvecs = []

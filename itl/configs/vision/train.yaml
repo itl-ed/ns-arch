@@ -3,19 +3,19 @@ defaults:
     - task: ???
 
 data:
-    name: visual_genome
+    name: "visual_genome"
     path: "${paths.data_dir}/${vision.data.name}"
     num_images: 108077
     use_percentage: 0.2
     num_loader_workers: 4
     batch_size: 32
     num_exs_per_conc: 8
-    batch_size_test: 64
-    num_exs_per_conc_test: 8
+    batch_size_eval: 64
+    num_exs_per_conc_eval: 8
 
 optim:
     algorithm: "Adam"
-    init_lr_over_eps: 1e3
+    init_lr: 1e-5
     beta1_1m: 1e-1
     beta2_1m: 1e-3
     eps: 1e-8
@@ -25,5 +25,3 @@ optim:
         - 0.9
     lr_scheduler_gamma: 3e-1
     max_steps: 10000
-
-run_name: "b-${vision.data.batch_size}_shots-${vision.data.num_exs_per_conc}_alpha0-${vision.optim.init_lr_over_eps}_eps-${vision.optim.eps}"

@@ -8,6 +8,7 @@ from collections import defaultdict
 
 import nltk
 import torch
+import networkx as nx
 import pytorch_lightning as pl
 from torch.utils.data import Dataset, DataLoader
 
@@ -93,7 +94,6 @@ class FewShotSGGDataModule(pl.LightningDataModule):
     def setup(self, stage):
         # Construct _SGGDataset instance with specified dataset
         dataset_path = self.cfg.vision.data.path
-        images_path = os.path.join(dataset_path, "images")
 
         with open(f"{dataset_path}/annotations.json") as ann_f:
             annotations = json.load(ann_f)
@@ -140,8 +140,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
-                    self.cfg.vision.data.batch_size,
-                    self.cfg.vision.data.num_exs_per_conc,
+                    self.cfg.vision.data.batch_size_eval,
+                    self.cfg.vision.data.num_exs_per_conc_eval,
                     with_replacement=False
                 )
             if stage in ["fit", "test", "predict"]:
@@ -155,8 +155,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
-                    self.cfg.vision.data.batch_size_test,
-                    self.cfg.vision.data.num_exs_per_conc_test,
+                    self.cfg.vision.data.batch_size_eval,
+                    self.cfg.vision.data.num_exs_per_conc_eval,
                     with_replacement=False
                 )
 
@@ -269,73 +269,72 @@ class _FewShotSGGDataSampler:
         # exemplars per concept (equivalently, number of concepts or 'ways')
         assert self.batch_size % self.num_exs_per_conc == 0
 
+        # Build ontology tree (forest) from contained concepts and provided hypernym
+        # metadata info, find connected components; later we will sample components
+        # first and then sample concepts from the components, so as to avoid sampling
+        # from concepts belonging to connected ontology tree
+        self.ont_forest = nx.Graph()
+        for c in self.index_conc:
+            if len(self.index_conc[c]) >= self.num_exs_per_conc:
+                self.ont_forest.add_node(c)
+                if c in self.hypernym_info:
+                    for h in self.hypernym_info[c]:
+                        if h in self.index_conc and \
+                            len(self.index_conc[h]) >= self.num_exs_per_conc:
+                            self.ont_forest.add_edge(c, h)
+        self.ont_forest = [
+            list(comp) for comp in nx.connected_components(self.ont_forest)
+        ]
+
     def __iter__(self):
-        # For maintaining lists of exemplars
+        # For maintaining lists of concepts & exemplars as sampling candidates
+        conc_ontology = copy.deepcopy(self.ont_forest)
         conc_exemplars = copy.deepcopy(self.index_conc)
 
         while True:
-            sampled_indices = []        # To yield
+            if len(conc_ontology) < self.num_concepts:
+                # Exhausted, cannot sample anymore
+                return
 
-            if self.with_replacement:
-                # Renew exemplar lists
-                conc_exemplars = copy.deepcopy(self.index_conc)
+            # First sample connected components in ontology, so as to avoid sampling
+            # from more than one from same comp
+            sampled_comps = random.sample(conc_ontology, self.num_concepts)
 
-            # First sample N concepts one by one, ensuring none in the sampled
-            # concepts is a hypernym of another
-            sampled_concepts = set()
-            sample_cands = {
-                c for c, exs in conc_exemplars.items()
-                if len(exs) >= self.num_exs_per_conc
-            }
+            # Then sample one concept from each sampled component
+            sampled_concs = [random.sample(comp, 1)[0] for comp in sampled_comps]
 
-            # Storage of temporarily excluded sample candidates due to hyper/hyponymy
-            # constraints
-            tmp_shelter = {}
+            # Leave only those concepts with enough number of instances remaining
+            sampled_concs = [
+                conc for conc in sampled_concs
+                if len(conc_exemplars[conc]) >= self.num_exs_per_conc
+            ]
 
-            while len(sampled_concepts) < self.num_concepts:
-                if len(sample_cands) == 0:
-                    # Cannot sample any more from this sampler
-                    return
-
-                conc = random.sample(list(sample_cands), 1)[0]
-
-                # Add to set of sampled concepts
-                sampled_concepts.add(conc)
-
-                # Register sampled concept and hypernyms if any
-                sample_cands -= {conc}
-                if conc in self.hypernym_info:
-                    sample_cands -= self.hypernym_info[conc]
-
-                # Sample K exemplars from the exemplar list for the sampled concept
-                sampled_indices += [
-                    ex_ind+(conc,) for ex_ind in 
-                    random.sample(conc_exemplars[conc], self.num_exs_per_conc)
-                ]
-
-                # Exclude the sampled indices altogether to avoid treating instances
-                # of the same concept as 'negative' pairs
-                to_shelter = set()
-                for conc, exs in conc_exemplars.items():
-                    conc_exemplars[conc] = [
-                        ind for ind in exs if ind not in sampled_indices
-                    ]
-
-                    # Remove concept from list if # of unprocessed exemplars are fewer than
-                    # self.num_exs_per_conc
-                    if len(conc_exemplars[conc]) < self.num_exs_per_conc:
-                        to_shelter.add(conc)
-
-                for conc in to_shelter:
-                    tmp_shelter.update({ conc: conc_exemplars.pop(conc) })
-
-            # Reintroduce the temporarily excluded sample candidate concepts
-            conc_exemplars.update(tmp_shelter)
+            # Now sample K instances per sampled concepts
+            sampled_indices = [
+                (random.sample(conc_exemplars[conc], self.num_exs_per_conc), conc)
+                for conc in sampled_concs
+            ]
+            sampled_indices = [
+                ind+(conc,) for inds, conc in sampled_indices for ind in inds
+            ]           # Flatten and attach concept labels
 
             if not self.with_replacement:
-                # Pop concept from exemplar lists
-                for conc in sampled_concepts:
-                    del conc_exemplars[conc]
+                # Pop instances from exemplar lists
+                concepts_to_del = set()
+                for img_id, obj_ids, conc in sampled_indices:
+                    conc_exemplars[conc].remove((img_id, obj_ids))
+
+                    if len(conc_exemplars[conc]) < self.num_exs_per_conc:
+                        # If number of instances drops below K, remove concept
+                        # from sample candidates
+                        concepts_to_del.add(conc)
+
+                # Pop concepts to remove from ontology
+                for conc in concepts_to_del:
+                    for comp in conc_ontology:
+                        if conc in comp: comp.remove(conc)
+                    del conc_exemplars[conc]        # Not necessary but my OCD
+                conc_ontology = [comp for comp in conc_ontology if len(comp) > 0]
 
             yield sampled_indices
 

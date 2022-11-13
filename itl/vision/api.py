@@ -11,8 +11,8 @@ from itertools import product
 
 import tqdm
 import torch
-import numpy as np
 import torch.nn.functional as F
+import numpy as np
 import pytorch_lightning as pl
 from dotenv import find_dotenv, load_dotenv
 from pytorch_lightning.loggers import WandbLogger
@@ -493,16 +493,15 @@ class VisionModule:
             log_model=True,         # Uncomment for online run (comment out offline)
             project=os.environ.get("WANDB_PROJECT"),
             entity=os.environ.get("WANDB_ENTITY"),
-            name=self.cfg.vision.run_name,
             save_dir=self.cfg.paths.outputs_dir
         )
         trainer = pl.Trainer(
             accelerator="auto",
             max_steps=self.cfg.vision.optim.max_steps,
             check_val_every_n_epoch=None,       # Iteration-based val
-            val_check_interval=500,
+            val_check_interval=2000,
             num_sanity_val_steps=0,
-            log_every_n_steps=100,
+            log_every_n_steps=500,
             logger=wb_logger,
             callbacks=[
                 ModelCheckpoint(monitor="val_loss", save_last=True),
