@@ -14,7 +14,7 @@ do
         do
             for b2m in ${b2ms[@]}
             do
-                COMM="python tools/vision/train.py vision=train vision/task=fs_classify_cls seed=6466596821 vision.optim.init_lr=$a0 vision.optim.beta1_1m=$b1m vision.optim.beta2_1m=$b2m vision.optim.eps=$eps vision.data.batch_size=64 vision.data.num_exs_per_conc=8 vision.optim.max_steps=10000"
+                COMM="python tools/vision/train.py vision=train vision/task=fs_classify_cls seed=15213 vision.optim.init_lr=$a0 vision.optim.beta1_1m=$b1m vision.optim.beta2_1m=$b2m vision.optim.eps=$eps vision.data.batch_size=64 vision.data.num_exs_per_conc=8 vision.optim.max_steps=10000"
                 eval $COMM
             done
         done
