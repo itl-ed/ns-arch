@@ -48,6 +48,12 @@ class VisionModule:
 
         self.model = FewShotSceneGraphGenerator(self.cfg)
 
+        # Reading W&B config environment variables, if exists
+        try:
+            load_dotenv(find_dotenv(raise_error_if_not_found=True))
+        except OSError as e:
+            print(f"While reading dotenv: {e}")
+
         # If pre-trained vision model is specified, download and load weights
         if "fs_model" in self.cfg.vision.model:
             # Path to trained weights few-shot prediciton head, provided as either
@@ -479,11 +485,6 @@ class VisionModule:
         space where instances of the same concepts are placed closer. (Mostly likely
         not called by end user.)
         """
-        try:
-            load_dotenv(find_dotenv(raise_error_if_not_found=True))
-        except OSError as e:
-            print(f"While reading dotenv: {e}")
-
         # Prepare DataModule from data config
         dm = FewShotSGGDataModule(self.cfg)
 
@@ -510,6 +511,28 @@ class VisionModule:
         )
         trainer.validate(self.model, datamodule=dm)
         trainer.fit(self.model, datamodule=dm)
+
+    def evaluate(self):
+        """
+        Evaluate best model from a run on test dataset
+        """
+        # Prepare DataModule from data config
+        dm = FewShotSGGDataModule(self.cfg)
+
+        if self.cfg.vision.model.fs_model.startswith(WB_PREFIX):
+            wb_logger = WandbLogger(
+                # offline=True,           # Uncomment for offline run (comment out log_model)
+                project=os.environ.get("WANDB_PROJECT"),
+                entity=os.environ.get("WANDB_ENTITY"),
+                id=self.cfg.vision.model.fs_model[len(WB_PREFIX):],
+                save_dir=self.cfg.paths.outputs_dir,
+                resume="must"
+            )
+            logger = wb_logger
+        else:
+            logger = False
+
+        trainer = pl.Trainer(accelerator="auto", logger=logger)
         trainer.test(self.model, datamodule=dm)
 
     def post_process(self, outputs, target_sizes):

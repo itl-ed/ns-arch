@@ -124,27 +124,28 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
     
     def test_epoch_end(self, outputs):
         """ Log instance embeddings """
-        embeddings, labels = tuple(zip(*outputs))
-        embeddings = torch.cat(embeddings)
-        labels = sum(labels, ())
+        if self.logger is not None and hasattr(self.logger, "log_table"):
+            embeddings, labels = tuple(zip(*outputs))
+            embeddings = torch.cat(embeddings)
+            labels = sum(labels, ())
 
-        # There are typically too many vectors, not all of them need to be logged...
-        # Let's downsample to K (as in config) per concept
-        K = self.cfg.vision.data.num_exs_per_conc_eval
-        downsampled = {
-            conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
-            for conc in set(labels)
-        }
-        data_downsampled = [
-            [conc]+embeddings[ex_i].tolist()
-            for conc, exs in downsampled.items() for ex_i in exs
-        ]
+            # There are typically too many vectors, not all of them need to be logged...
+            # Let's downsample to K (as in config) per concept
+            K = self.cfg.vision.data.num_exs_per_conc_eval
+            downsampled = {
+                conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
+                for conc in set(labels)
+            }
+            data_downsampled = [
+                [conc]+embeddings[ex_i].tolist()
+                for conc, exs in downsampled.items() for ex_i in exs
+            ]
 
-        self.logger.log_table(
-            f"embeddings_{self.cfg.vision.task.conc_type}",
-            columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
-            data=data_downsampled
-        )
+            self.logger.log_table(
+                f"embeddings_{self.cfg.vision.task.conc_type}",
+                columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
+                data=data_downsampled
+            )
 
     def configure_optimizers(self):
         # Populate optimizer configs

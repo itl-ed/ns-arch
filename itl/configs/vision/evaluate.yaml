@@ -1,0 +1,15 @@
+defaults:
+    - base
+    - task: ???
+
+model:
+    fs_model: ???
+
+data:
+    name: "visual_genome"
+    path: "${paths.data_dir}/${vision.data.name}"
+    num_images: 108077
+    use_percentage: 0.2
+    num_loader_workers: 4
+    batch_size_eval: 64
+    num_exs_per_conc_eval: 8
