@@ -3,6 +3,7 @@ import random
 from collections import OrderedDict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchvision.ops import box_convert
@@ -50,12 +51,11 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
 
-        # MLP heads to attach on top of encoder outputs for metric-based few-shot
-        # search (conditioned detection)
-        self.fs_search_cls = DeformableDetrMLPPredictionHead(
-            input_dim=detr_D, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
-        )
-        self.fs_search_att = DeformableDetrMLPPredictionHead(
+        # MLP heads to attach on top of encoder & embedder outputs for metric-based
+        # few-shot search (conditioned detection)
+        self.fs_spec_proj_cls = nn.Linear(detr_D, detr_D)
+        self.fs_spec_proj_att = nn.Linear(detr_D, detr_D)
+        self.fs_spec_fuse = DeformableDetrMLPPredictionHead(
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
         self.fs_search_bbox = DeformableDetrMLPPredictionHead(
@@ -88,9 +88,11 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                     raise ValueError("Invalid concept type")
             elif self.cfg.vision.task.pred_type == "fs_search":
                 # Few-shot search with encoder output embeddings
-                for prm in self.fs_search_cls.parameters():
+                for prm in self.fs_spec_proj_cls.parameters():
                     prm.requires_grad = True
-                for prm in self.fs_search_att.parameters():
+                for prm in self.fs_spec_proj_att.parameters():
+                    prm.requires_grad = True
+                for prm in self.fs_spec_fuse.parameters():
                     prm.requires_grad = True
                 for prm in self.fs_search_bbox.parameters():
                     prm.requires_grad = True
