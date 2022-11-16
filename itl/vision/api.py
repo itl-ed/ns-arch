@@ -453,8 +453,12 @@ class VisionModule:
         for img in tqdm.tqdm(annotations, total=len(annotations)):
             vec_path = os.path.join(vectors_path, f"{img['file_name']}.vectors")
 
-            if len(img["annotations"]) == 0: continue
             if os.path.exists(vec_path): continue
+            if len(img["annotations"]) == 0:
+                # Still save an empty dict to maintain 1-to-1 file correspondence...
+                # for sanity's sake
+                torch.save({}, vec_path)
+                continue
 
             image_raw = os.path.join(images_path, img["file_name"])
             image_raw = Image.open(image_raw)

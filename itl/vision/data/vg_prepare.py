@@ -54,6 +54,7 @@ def download_images(imgs_to_download):
     downloaded = 0
     for result in pbar:
         downloaded += result[1]
+    logger.info(f"{downloaded} images downloaded")
 
 
 def download_from_url(url, target_path):
