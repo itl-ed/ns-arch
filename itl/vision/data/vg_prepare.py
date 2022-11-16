@@ -7,8 +7,9 @@ import json
 import logging
 import zipfile
 import requests
-import urllib.request
 import multiprocessing
+from urllib.request import urlretrieve
+from urllib.error import URLError
 from collections import defaultdict
 from multiprocessing.pool import ThreadPool
 
@@ -82,7 +83,14 @@ def _download_indiv_image(url_and_path):
     url, path = url_and_path
 
     if not os.path.exists(path):
-        urllib.request.urlretrieve(url, path)
+        try:
+            urlretrieve(url, path)
+        except URLError as e:
+            logger.info(f"{e}: Retrying download {url}...")
+            _download_indiv_image(url_and_path)
+        except e:
+            raise e
+
         return True
     else:
         return False

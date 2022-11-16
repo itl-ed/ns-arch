@@ -1,6 +1,5 @@
 defaults:
     - base
-    - task: ???
 
 data:
     name: "visual_genome"
@@ -8,14 +7,16 @@ data:
     num_images: 108077
     use_percentage: 0.2
     num_loader_workers: 4
-    batch_size: 32
+    batch_size: 64
     num_exs_per_conc: 8
     batch_size_eval: 64
     num_exs_per_conc_eval: 8
 
 optim:
-    algorithm: "Adam"
-    init_lr: 1e-5
+    init_lr: 1e-3
+    algorithm: "SGD"
+    momentum_1m: 1e-1
+    # algorithm: "Adam"
     beta1_1m: 1e-1
     beta2_1m: 1e-3
     eps: 1e-8

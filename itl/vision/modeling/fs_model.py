@@ -74,27 +74,28 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             prm.requires_grad = False
 
         # ... except those required for training the specified task
-        if self.cfg.vision.task.pred_type == "fs_classify":
-            if self.cfg.vision.task.conc_type == "classes":
-                # Few-shot class prediction with decoder output embeddings
-                for prm in self.fs_embed_cls.parameters():
+        if "task" in self.cfg.vision:
+            if self.cfg.vision.task.pred_type == "fs_classify":
+                if self.cfg.vision.task.conc_type == "classes":
+                    # Few-shot class prediction with decoder output embeddings
+                    for prm in self.fs_embed_cls.parameters():
+                        prm.requires_grad = True
+                elif self.cfg.vision.task.conc_type == "attributes":
+                    # Few-shot attribute prediction with decoder output embeddings
+                    for prm in self.fs_embed_att.parameters():
+                        prm.requires_grad = True
+                else:
+                    raise ValueError("Invalid concept type")
+            elif self.cfg.vision.task.pred_type == "fs_search":
+                # Few-shot search with encoder output embeddings
+                for prm in self.fs_search_cls.parameters():
                     prm.requires_grad = True
-            elif self.cfg.vision.task.conc_type == "attributes":
-                # Few-shot attribute prediction with decoder output embeddings
-                for prm in self.fs_embed_att.parameters():
+                for prm in self.fs_search_att.parameters():
+                    prm.requires_grad = True
+                for prm in self.fs_search_bbox.parameters():
                     prm.requires_grad = True
             else:
-                raise ValueError("Invalid concept type")
-        elif self.cfg.vision.task.pred_type == "fs_search":
-            # Few-shot search with encoder output embeddings
-            for prm in self.fs_search_cls.parameters():
-                prm.requires_grad = True
-            for prm in self.fs_search_att.parameters():
-                prm.requires_grad = True
-            for prm in self.fs_search_bbox.parameters():
-                prm.requires_grad = True
-        else:
-            raise ValueError("Invalid task type for training")
+                raise ValueError("Invalid task type for training")
         
         self.save_hyperparameters()
 
@@ -152,12 +153,16 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         optim_kwargs = {}
         if "init_lr" in self.cfg.vision.optim:
             optim_kwargs["lr"] = self.cfg.vision.optim.init_lr
-        if "beta1_1m" in self.cfg.vision.optim and "beta2_1m" in self.cfg.vision.optim:
-            optim_kwargs["betas"] = (
-                1-self.cfg.vision.optim.beta1_1m, 1-self.cfg.vision.optim.beta2_1m
-            )
-        if "eps" in self.cfg.vision.optim:
-            optim_kwargs["eps"] = self.cfg.vision.optim.eps
+        if self.cfg.vision.optim.algorithm == "SGD":
+            if "momentum_1m" in self.cfg.vision.optim:
+                optim_kwargs["momentum"] = 1-self.cfg.vision.optim.momentum_1m
+        if self.cfg.vision.optim.algorithm == "Adam":
+            if "beta1_1m" in self.cfg.vision.optim and "beta2_1m" in self.cfg.vision.optim:
+                optim_kwargs["betas"] = (
+                    1-self.cfg.vision.optim.beta1_1m, 1-self.cfg.vision.optim.beta2_1m
+                )
+            if "eps" in self.cfg.vision.optim:
+                optim_kwargs["eps"] = self.cfg.vision.optim.eps
 
         # Construct optimizer instance
         Optimizer = getattr(torch.optim, self.cfg.vision.optim.algorithm)
