@@ -1,3 +1,3 @@
-from .fs_model import FewShotSceneGraphGenerator
+from .module import FewShotSceneGraphGenerator
 
 __all__ = ["FewShotSceneGraphGenerator"]

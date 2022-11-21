@@ -4,13 +4,14 @@ import json
 import random
 import logging
 from PIL import Image
+from itertools import product
 from collections import defaultdict
 
 import nltk
 import torch
 import networkx as nx
 import pytorch_lightning as pl
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, default_collate
 
 from .vg_prepare import (
     download_and_unzip,
@@ -32,10 +33,6 @@ class FewShotSGGDataModule(pl.LightningDataModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-
-        # If populated, can be used to pre-compute and cache feature vectors for each
-        # object in images
-        self.fvec_extract_fn = None
 
     def prepare_data(self):
         # Create data directory at the specified path if not exists
@@ -99,11 +96,13 @@ class FewShotSGGDataModule(pl.LightningDataModule):
             annotations = json.load(ann_f)
         with open(f"{dataset_path}/metadata.json") as meta_f:
             metadata = json.load(meta_f)
+        
+        for_search_task = self.cfg.vision.task.pred_type == "fs_search"
 
         # Train/val/test split of dataset by *concepts* (not by images) for few-shot
         # training
         self.datasets = {}; self.samplers = {}
-        for conc_type in ["classes", "attributes", "relations"]:
+        for conc_type in ["classes", "attributes"]: #, "relations"]:
             self.datasets[conc_type] = {}
             self.samplers[conc_type] = {}
 
@@ -122,12 +121,13 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_train
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, dataset_path, metadata[conc_type]
+                    ann_train, dataset_path, conc_type, metadata[conc_type]
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
                     self.cfg.vision.data.batch_size,
-                    self.cfg.vision.data.num_exs_per_conc
+                    self.cfg.vision.data.num_exs_per_conc,
+                    with_replacement=True
                 )
             if stage in ["fit", "validate"]:
                 # Validation set required for "fit"/"validate" stage setup
@@ -136,13 +136,13 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_val
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, dataset_path, metadata[conc_type]
+                    ann_val, dataset_path, conc_type, metadata[conc_type]
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
                     self.cfg.vision.data.batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    with_replacement=False
+                    once_per_concept=for_search_task
                 )
             if stage in ["fit", "test", "predict"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
@@ -151,66 +151,167 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, concepts_test
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, dataset_path, metadata[conc_type]
+                    ann_test, dataset_path, conc_type, metadata[conc_type]
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
                     self.cfg.vision.data.batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    with_replacement=False
+                    once_per_concept=for_search_task
                 )
+
+        # Also setup class+attribute hybrid dataloader for few-shot search task
+        if for_search_task:
+            self.datasets["classes_and_attributes"] = {}
+            self.samplers["classes_and_attributes"] = {}
+
+            splits = set(self.datasets["classes"])
+            assert set(self.datasets["classes"]) == set(self.datasets["attributes"])
+
+            # Small helper class for handling getting concept name tuples
+            class _ConcNameGetter:
+                def __init__(self, names):
+                    self.names = names
+                def __getitem__(self, idxs):
+                    assert len(idxs) == len(self.names)
+                    return tuple(self.names[ni][idx] for ni, idx in enumerate(idxs))
+
+            for spl in splits:
+                # Merged _SGGDataset
+                cls_data = self.datasets["classes"][spl]
+                att_data = self.datasets["attributes"][spl]
+
+                self.datasets["classes_and_attributes"][spl] = _SGGDataset(
+                    { **cls_data.annotations, **att_data.annotations },
+                    dataset_path, (cls_data.conc_type, att_data.conc_type),
+                    _ConcNameGetter([cls_data.conc_names, att_data.conc_names])
+                )
+
+                # Batch sampler for the merged _SGGDataset
+                cls_sampler = self.samplers["classes"][spl]
+                att_sampler = self.samplers["attributes"][spl]
+
+                # Join index_conc to form class+attribute combination entries
+                combi_index_conc = {}
+                K = cls_sampler.num_exs_per_conc; x = 0
+                cls_att_combis = product(
+                    [k for k, v in cls_sampler.index_conc.items() if len(v) > K],
+                    [k for k, v in att_sampler.index_conc.items() if len(v) > K]
+                )
+                for ci, ai in cls_att_combis:
+                    x += 1
+                    cls_exs = set(cls_sampler.index_conc[ci])
+                    att_exs = set(att_sampler.index_conc[ai])
+                    combi_exs = cls_exs & att_exs
+
+                    if len(combi_exs) < K:
+                        # Not enough occurrences of the cls+att combination
+                        continue
+                    combi_index_conc[(ci, ai)] = list(combi_exs)
+
+                # Compose hypernym info; among cls+att combinations present, if either
+                # cls or att is hypernym of respective type, add as hypernym
+                combi_hypernym_info = {
+                    (ci1, ai1): {
+                        (ci2, ai2) for ci2, ai2 in combi_index_conc
+                        if (ci1 in cls_sampler.hypernym_info and \
+                            ci2 in cls_sampler.hypernym_info[ci1]) or \
+                            (ai1 in att_sampler.hypernym_info and \
+                            ai2 in att_sampler.hypernym_info[ai1])
+                    }
+                    for ci1, ai1 in combi_index_conc
+                }
+                combi_hypernym_info = {
+                    (ci, ai): hypernyms
+                    for (ci, ai), hypernyms in combi_hypernym_info.items()
+                    if len(hypernyms) > 0
+                }
+
+                self.samplers["classes_and_attributes"][spl] = _FewShotSGGDataSampler(
+                    combi_index_conc, combi_hypernym_info,
+                    cls_sampler.batch_size, cls_sampler.num_exs_per_conc,
+                    with_replacement=cls_sampler.with_replacement
+                )
+
+    def train_dataloader(self):
+        return self._return_dataloaders("train")
+    
+    def val_dataloader(self):
+        return self._return_dataloaders("val")
+
+    def test_dataloader(self):
+        return self._return_dataloaders("test")
+
+    def _return_dataloaders(self, split):
+        if self.cfg.vision.task.pred_type == "fs_classify":
+            # For few-shot classification task, return single dataloader for the
+            # corresponding concept type and split
+            return self._fetch_dataloader(self.cfg.vision.task.conc_type, split)
+        elif self.cfg.vision.task.pred_type == "fs_search":
+            # For few-shot search task, return list of dataloaders for the split,
+            # class-only loader, attribute-only loader and class+attribute loader
+            return [
+                self._fetch_dataloader("classes", split),
+                self._fetch_dataloader("attributes", split),
+                self._fetch_dataloader("classes_and_attributes", split)
+            ]
+        else:
+            raise ValueError("Invalid prediction task type")
+
+    def _fetch_dataloader(self, conc_type, split):
+        return DataLoader(
+            dataset=self.datasets[conc_type][split],
+            batch_sampler=self.samplers[conc_type][split],
+            num_workers=self.cfg.vision.data.num_loader_workers,
+            collate_fn=self._collate_fn
+        )
 
     @staticmethod
     def _collate_fn(data):
-        """ Custom collate_fn to pass to dataloaders """
-        # Enforce same data type in batch
-        assert len(data[0])==2
-        assert all(type(d[0])==type(data[0][0]) for d in data)
+        """ Custom collate_fn to pass to dataloaders """        
+        assert all(len(d)==2 for d in data)
+        conc_type = data[0][1]
 
-        batch_data, concept_labels = list(zip(*data))
+        assert all(isinstance(d[0], dict) for d in data)
+        assert all(conc_type == d[1] for d in data)
 
-        if type(data[0][0]) == tuple:
-            # Vectors not cached, raw data
-            return tuple(zip(*batch_data)), concept_labels
-        else:
-            # Cached vectors fetched as torch tensor
-            return torch.stack(batch_data, dim=0), concept_labels
+        collated = {}
+        for field in data[0][0]:
+            assert all(field in d[0] for d in data)
 
-    def train_dataloader(self):
-        return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task.conc_type]["train"],
-            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["train"],
-            num_workers=self.cfg.vision.data.num_loader_workers,
-            collate_fn=self._collate_fn
-        )
-    
-    def val_dataloader(self):
-        return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task.conc_type]["val"],
-            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["val"],
-            num_workers=self.cfg.vision.data.num_loader_workers,
-            collate_fn=self._collate_fn
-        )
+            if field == "image":
+                # PyTorch default collate function cannot recognize PIL Images
+                collated[field] = [d[0][field] for d in data]
+            elif field == "bboxes" or field == "bb_all":
+                # Data may be of variable size
+                collated[field] = [torch.tensor(d[0][field]) for d in data]
+            elif field == "concept_label":
+                # Let's leave em as-is...
+                collated[field] = [d[0][field] for d in data]
+            else:
+                # Otherwise, process with default collate fn
+                collated[field] = default_collate([d[0][field] for d in data])
 
-    def test_dataloader(self):
-        return DataLoader(
-            dataset=self.datasets[self.cfg.vision.task.conc_type]["test"],
-            batch_sampler=self.samplers[self.cfg.vision.task.conc_type]["test"],
-            num_workers=self.cfg.vision.data.num_loader_workers,
-            collate_fn=self._collate_fn
-        )
+        return collated, conc_type
 
 
 class _SGGDataset(Dataset):
-    def __init__(self, annotations, dataset_path, concept_names):
+    def __init__(self, annotations, dataset_path, conc_type, conc_names):
         super().__init__()
         self.annotations = annotations
         self.dataset_path = dataset_path
-        self.concept_names = concept_names
+        self.conc_names = conc_names
+        self.conc_type = conc_type
     
     def __getitem__(self, idx):
         assert len(idx) == 3
         img_id, obj_ids, conc = idx
+
+        # Return value
+        data_dict = {}
+
+        # Concept label; not directly consumed by model, for readability
+        data_dict["concept_label"] = self.conc_names[conc]
 
         images_path = os.path.join(self.dataset_path, "images")
         vectors_path = os.path.join(self.dataset_path, "vectors")
@@ -218,29 +319,47 @@ class _SGGDataset(Dataset):
         img_file = self.annotations[img_id]["file_name"]
         vecs_file = f"{img_file}.vectors"
 
+        # Fetch and return raw image, bboxes and object indices
+        image_raw = os.path.join(images_path, img_file)
+        image_raw = Image.open(image_raw)
+        if image_raw.mode != "RGB":
+            # Cast non-RGB images (e.g. grayscale) into RGB format
+            old_image_raw = image_raw
+            image_raw = Image.new("RGB", old_image_raw.size)
+            image_raw.paste(old_image_raw)
+
+        # Raw image
+        data_dict["image"] = image_raw
+
+        # Bounding boxes in the image
+        oids = list(self.annotations[img_id]["annotations"])
+        bboxes = [
+            obj["bbox"] for obj in self.annotations[img_id]["annotations"].values()
+        ]
+        data_dict["bboxes"] = bboxes
+
+        # Ind(s) of the designated object(s), with which to fetch bounding box(es)
+        data_dict["bb_inds"] = tuple(oids.index(oid) for oid in obj_ids)
+
+        # Inds of *all* objects of the same concept in the same image; only consumed
+        # in few-shot search task
+        search_spec = list(zip(
+            (self.conc_type,) if type(self.conc_type) != tuple else self.conc_type,
+            (conc,) if type(conc) != tuple else conc
+        ))
+        data_dict["bb_all"] = [
+            oids.index(oid)
+            for oid, ann in self.annotations[img_id]["annotations"].items()
+            if all(c in ann[ctype] for ctype, c in search_spec)
+        ]
+
         if os.path.exists(os.path.join(vectors_path, vecs_file)):
             # Fetch and return pre-computed feature vectors for the image
             vecs = torch.load(os.path.join(vectors_path, vecs_file))
             vecs = torch.stack([vecs[oid] for oid in obj_ids], dim=0)
-
-            return vecs, self.concept_names[conc]
-        else:
-            # Fetch and return raw image, bboxes and object indices
-            image_raw = os.path.join(images_path, img_file)
-            image_raw = Image.open(image_raw)
-            if image_raw.mode != "RGB":
-                # Cast non-RGB images (e.g. grayscale) into RGB format
-                old_image_raw = image_raw
-                image_raw = Image.new("RGB", old_image_raw.size)
-                image_raw.paste(old_image_raw)
-
-            oids = list(self.annotations[img_id]["annotations"])
-            bboxes = [
-                obj["bbox"] for obj in self.annotations[img_id]["annotations"].values()
-            ]
-            bb_inds = [oids.index(oid) for oid in obj_ids]
-
-            return (image_raw, bboxes, bb_inds), self.concept_names[conc]
+            data_dict["dec_out_cached"] = vecs
+        
+        return data_dict, self.conc_type
     
     def __len__(self):
         return len(self.annotations)
@@ -255,7 +374,7 @@ class _FewShotSGGDataSampler:
     """
     def __init__(
         self, index_conc, hypernym_info, batch_size, num_exs_per_conc,
-        with_replacement=True
+        with_replacement=False, once_per_concept=False
     ):
         self.index_conc = index_conc
         self.hypernym_info = hypernym_info
@@ -264,6 +383,7 @@ class _FewShotSGGDataSampler:
         self.num_concepts = self.batch_size // self.num_exs_per_conc
 
         self.with_replacement = with_replacement
+        self.once_per_concept = once_per_concept
 
         # Let's keep things simple by making batch size divisible by number of
         # exemplars per concept (equivalently, number of concepts or 'ways')
@@ -324,10 +444,14 @@ class _FewShotSGGDataSampler:
                 for img_id, obj_ids, conc in sampled_indices:
                     conc_exemplars[conc].remove((img_id, obj_ids))
 
-                    if len(conc_exemplars[conc]) < self.num_exs_per_conc:
-                        # If number of instances drops below K, remove concept
-                        # from sample candidates
+                    if self.once_per_concept:
+                        # One few-shot episode per concept -- for time's interest...
                         concepts_to_del.add(conc)
+                    else:
+                        if len(conc_exemplars[conc]) < self.num_exs_per_conc:
+                            # If number of instances drops below K, remove concept
+                            # from sample candidates
+                            concepts_to_del.add(conc)
 
                 # Pop concepts to remove from ontology
                 for conc in concepts_to_del:

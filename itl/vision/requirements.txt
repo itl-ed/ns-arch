@@ -1,8 +1,10 @@
 opencv-python
 torch
 torchvision
+torchmetrics
 transformers
 timm
+scipy
 pytorch-lightning
 wandb
 hydra-core
