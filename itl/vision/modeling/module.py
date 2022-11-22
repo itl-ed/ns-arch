@@ -3,7 +3,6 @@ import random
 from collections import OrderedDict, defaultdict
 
 import torch
-import torch.nn as nn
 import pytorch_lightning as pl
 from torchvision.ops import box_convert
 from transformers import AutoFeatureExtractor, DeformableDetrForObjectDetection

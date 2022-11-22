@@ -18,7 +18,6 @@ from itl.vision.data import FewShotSGGDataModule
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
-    
     pl.seed_everything(cfg.seed)
 
     dm = FewShotSGGDataModule(cfg)

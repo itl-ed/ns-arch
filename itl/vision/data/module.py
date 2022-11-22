@@ -81,7 +81,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     dataset_path, num_images_used
                 )
                 download_images(imgs_to_download)
-                reformat_annotations(dataset_path, num_images_used, img_anns)
+                reformat_annotations(dataset_path, num_images_used, img_anns, self.cfg.seed)
 
             # Finally, cleanup by removing files that are not needed anymore
             for f in ["image_data", "attribute_synsets", "scene_graphs"]:
@@ -99,29 +99,24 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         
         for_search_task = self.cfg.vision.task.pred_type == "fs_search"
 
-        # Train/val/test split of dataset by *concepts* (not by images) for few-shot
-        # training
+        # Prepare dataloaders and samplers according to train/val/test split provided
+        # in metadata
         self.datasets = {}; self.samplers = {}
         for conc_type in ["classes", "attributes"]: #, "relations"]:
             self.datasets[conc_type] = {}
             self.samplers[conc_type] = {}
 
-            split1 = int(len(metadata[conc_type]) * 0.8)
-            split2 = int(len(metadata[conc_type]) * 0.9)
-
-            concepts = torch.randperm(len(metadata[conc_type]))
             hypernym_info = metadata[f"{conc_type}_hypernyms"] \
                 if f"{conc_type}_hypernyms" in metadata else {}
             hypernym_info = { int(k): set(v) for k, v in hypernym_info.items() }
 
             if stage in ["fit"]:
                 # Training set required for "fit" stage setup
-                concepts_train = concepts[:split1]
                 ann_train, index_train = _annotations_by_concept(
-                    annotations, conc_type, concepts_train
+                    annotations, conc_type, metadata[f"{conc_type}_train_split"]
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, dataset_path, conc_type, metadata[conc_type]
+                    ann_train, dataset_path, conc_type, metadata[f"{conc_type}_names"]
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
@@ -131,12 +126,11 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
             if stage in ["fit", "validate"]:
                 # Validation set required for "fit"/"validate" stage setup
-                concepts_val = concepts[split1:split2]
                 ann_val, index_val = _annotations_by_concept(
-                    annotations, conc_type, concepts_val
+                    annotations, conc_type, metadata[f"{conc_type}_val_split"]
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, dataset_path, conc_type, metadata[conc_type]
+                    ann_val, dataset_path, conc_type, metadata[f"{conc_type}_names"]
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
@@ -146,12 +140,11 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
             if stage in ["fit", "test", "predict"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
-                concepts_test = concepts[split2:]
                 ann_test, index_test = _annotations_by_concept(
-                    annotations, conc_type, concepts_test
+                    annotations, conc_type, metadata[f"{conc_type}_test_split"]
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, dataset_path, conc_type, metadata[conc_type]
+                    ann_test, dataset_path, conc_type, metadata[f"{conc_type}_names"]
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,

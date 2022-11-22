@@ -14,6 +14,7 @@ from collections import defaultdict
 from multiprocessing.pool import ThreadPool
 
 import ijson
+import torch
 from tqdm import tqdm
 from nltk.corpus import wordnet as wn
 from nltk.corpus.reader.wordnet import WordNetError
@@ -130,7 +131,7 @@ def process_image_metadata(target_dir, img_count):
     return img_anns, imgs_to_download
 
 
-def reformat_annotations(target_dir, img_count, img_anns):
+def reformat_annotations(target_dir, img_count, img_anns, seed):
     """
     Convert the original VG annotations into a simpler format, indexing concepts
     (class/attribute/relation) in order encountered. In effect, the re-formatting
@@ -251,17 +252,33 @@ def reformat_annotations(target_dir, img_count, img_anns):
                 # Likely only would apply to the custom relation concept "of.r.01"...
                 logger.info(f"Synset '{c}' is not found in WordNet")
 
-    # Store predicate indexing and hyper/hyponymy info as metadata
-    with open(f"{target_dir}/metadata.json", "w") as meta_f:
-        metadata = {
-            "classes": _ind_dict_to_list(cls_ids),
-            "attributes": _ind_dict_to_list(att_ids),
-            "relations": _ind_dict_to_list(rel_ids),
-            "classes_hypernyms": cls_hypernyms,
-            "attributes_hypernyms": att_hypernyms,
-            "relations_hypernyms": rel_hypernyms,
-        }
+    # Store predicate indexing and hyper/hyponymy info and splits as metadata
+    metadata = {
+        "classes_names": _ind_dict_to_list(cls_ids),
+        "attributes_names": _ind_dict_to_list(att_ids),
+        "relations_names": _ind_dict_to_list(rel_ids),
+        "classes_hypernyms": cls_hypernyms,
+        "attributes_hypernyms": att_hypernyms,
+        "relations_hypernyms": rel_hypernyms,
+        "split_seed": seed
+    }
 
+    # Train/val/test split of dataset by *concepts* (not by images) for few-shot
+    # training
+    for conc_type in ["classes", "attributes", "relations"]:
+        conc_names = metadata[f"{conc_type}_names"]
+
+        split1 = int(len(conc_names) * 0.8)
+        split2 = int(len(conc_names) * 0.9)
+
+        concepts_shuffled = torch.randperm(len(conc_names)).tolist()
+
+        metadata[f"{conc_type}_train_split"] = concepts_shuffled[:split1]
+        metadata[f"{conc_type}_val_split"] = concepts_shuffled[split1:split2]
+        metadata[f"{conc_type}_test_split"] = concepts_shuffled[split2:]
+
+    # Write metadata to file
+    with open(f"{target_dir}/metadata.json", "w") as meta_f:
         json.dump(metadata, meta_f)
 
 
