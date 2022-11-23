@@ -16,19 +16,19 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 
 def compute_loss_and_metrics(
-    model, pred_type, conc_type, detr_enc_outs, detr_dec_outs,
+    model, task, conc_type, detr_enc_outs, detr_dec_outs,
     B, N, K, bboxes_search_targets
 ):
     assert B == len(detr_dec_outs)
     assert N * K == B
 
-    if pred_type == "fs_classify":
+    if task == "fs_classify":
         assert bboxes_search_targets is None
         return _compute_fs_classify(
             model, conc_type, detr_dec_outs, B, N, K
         )
     else:
-        assert pred_type == "fs_search"
+        assert task == "fs_search"
         assert bboxes_search_targets is not None
         return _compute_fs_search(
             model, conc_type, detr_enc_outs, detr_dec_outs,
@@ -151,7 +151,9 @@ def _compute_fs_search(
 
         # Obtain 'search compatibility score' (as dot product btw. object queries and
         # spec embeddings) and bbox proposal for each pixel
-        search_scores = torch.einsum("bqd,d->bq", object_query_embeddings, spec_emb)
+        search_scores = torch.einsum(
+            "bqd,d->bq", object_query_embeddings, model.fs_search_match(spec_emb)
+        )
         search_coord_deltas = model.fs_search_bbox(embs_concat)
         search_coord_logits = search_coord_deltas + output_proposals
 

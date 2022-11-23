@@ -3,6 +3,7 @@ import random
 from collections import OrderedDict, defaultdict
 
 import torch
+import torch.nn as nn
 import pytorch_lightning as pl
 from torchvision.ops import box_convert
 from transformers import AutoFeatureExtractor, DeformableDetrForObjectDetection
@@ -57,6 +58,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         self.fs_spec_fuse = DeformableDetrMLPPredictionHead(
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
+        self.fs_search_match = nn.Linear(detr_D, detr_D)
         self.fs_search_bbox = DeformableDetrMLPPredictionHead(
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=3
         )
@@ -74,20 +76,17 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         # ... except those required for training the specified task
         if "task" in self.cfg.vision:
-            if self.cfg.vision.task.pred_type == "fs_classify":
-                if self.cfg.vision.task.conc_type == "classes":
-                    # Few-shot class prediction with decoder output embeddings
-                    for prm in self.fs_embed_cls.parameters():
-                        prm.requires_grad = True
-                elif self.cfg.vision.task.conc_type == "attributes":
-                    # Few-shot attribute prediction with decoder output embeddings
-                    for prm in self.fs_embed_att.parameters():
-                        prm.requires_grad = True
-                else:
-                    raise ValueError("Invalid concept type")
-            elif self.cfg.vision.task.pred_type == "fs_search":
+            if self.cfg.vision.task == "fs_classify":
+                # Few-shot concept classification with decoder output embeddings
+                for prm in self.fs_embed_cls.parameters():
+                    prm.requires_grad = True
+                for prm in self.fs_embed_att.parameters():
+                    prm.requires_grad = True
+            elif self.cfg.vision.task == "fs_search":
                 # Few-shot search with encoder output embeddings
                 for prm in self.fs_spec_fuse.parameters():
+                    prm.requires_grad = True
+                for prm in self.fs_search_match.parameters():
                     prm.requires_grad = True
                 for prm in self.fs_search_bbox.parameters():
                     prm.requires_grad = True
@@ -168,37 +167,56 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
     def test_step(self, batch, *_):
         _, metrics, embeddings, labels = self._process_batch(batch)
-
-        for metric, val in metrics.items():
-            self.log(f"test_{metric}_{batch[1]}", val, batch_size=len(batch[0][0]))
-
-        return embeddings, labels
+        return metrics, embeddings, labels, batch[1]
     
     def test_epoch_end(self, outputs):
-        if self.cfg.vision.task.pred_type == "fs_classify" and \
-            self.logger is not None and hasattr(self.logger, "log_table"):
+        if len(self.trainer.test_dataloaders) == 1:
+            outputs = [outputs]
 
-            embeddings, labels = tuple(zip(*outputs))
-            embeddings = torch.cat(embeddings)
-            labels = sum(labels, ())
+        for outputs_per_dataloader in outputs:
+            conc_type = outputs_per_dataloader[0][3]
+            if isinstance(conc_type, tuple):
+                conc_type = "+".join(conc_type)
 
-            # There are typically too many vectors, not all of them need to be logged...
-            # Let's downsample to K (as in config) per concept
-            K = self.cfg.vision.data.num_exs_per_conc_eval
-            downsampled = {
-                conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
-                for conc in set(labels)
-            }
-            data_downsampled = [
-                [conc]+embeddings[ex_i].tolist()
-                for conc, exs in downsampled.items() for ex_i in exs
-            ]
+            # Log epoch average metrics
+            avg_metrics = defaultdict(list)
+            for metric_type in outputs_per_dataloader[0][0]:
+                for metrics, _, _, _ in outputs_per_dataloader:
+                    avg_metrics[metric_type].append(metrics[metric_type])
+            
+            for metric_type, vals in avg_metrics.items():
+                avg_val = sum(vals) / len(vals)
+                self.log(
+                    f"test_{metric_type}_{conc_type}", avg_val, add_dataloader_idx=False
+                )
 
-            self.logger.log_table(
-                f"embeddings_{self.cfg.vision.task.conc_type}",
-                columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
-                data=data_downsampled
-            )
+            # For visual inspection of embedding vector (instance or few-shot prototypes)
+            if self.logger is not None and hasattr(self.logger, "log_table"):
+                _, embeddings, labels, conc_types = tuple(zip(*outputs_per_dataloader))
+                assert all(ct==outputs_per_dataloader[0][3] for ct in conc_types)
+
+                embeddings = torch.cat(embeddings)
+                labels = sum(labels, [])
+                if isinstance(conc_types[0], tuple):
+                    raise NotImplementedError
+
+                # There are typically too many vectors, not all of them need to be logged...
+                # Let's downsample to K (as in config) per concept
+                K = self.cfg.vision.data.num_exs_per_conc_eval
+                downsampled = {
+                    conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
+                    for conc in set(labels)
+                }
+                data_downsampled = [
+                    [conc]+embeddings[ex_i].tolist()
+                    for conc, exs in downsampled.items() for ex_i in exs
+                ]
+
+                self.logger.log_table(
+                    f"embeddings_{conc_type}",
+                    columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
+                    data=data_downsampled
+                )
 
     def configure_optimizers(self):
         # Populate optimizer configs
@@ -263,22 +281,28 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         batch_data, conc_type = batch
 
-        images = batch_data["image"]
-        bboxes = batch_data["bboxes"]
-        bb_inds = batch_data["bb_inds"]
         conc_labels = batch_data["concept_label"]
 
-        bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
-        bboxes = [
-            torch.stack([
-                bbs[:,0] / images[i].width, bbs[:,1] / images[i].height,
-                bbs[:,2] / images[i].width, bbs[:,3] / images[i].height,
-            ], dim=-1)
-            for i, bbs in enumerate(bboxes)
-        ]
+        if "image" in batch_data:
+            images = batch_data["image"]
+            bboxes = batch_data["bboxes"]
+            bb_inds = batch_data["bb_inds"]
 
-        # Batch size, number of "ways" and "shots" in few-shot episodes
-        B = len(images)
+            bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
+            bboxes = [
+                torch.stack([
+                    bbs[:,0] / images[i].width, bbs[:,1] / images[i].height,
+                    bbs[:,2] / images[i].width, bbs[:,3] / images[i].height,
+                ], dim=-1)
+                for i, bbs in enumerate(bboxes)
+            ]
+
+            # Batch size, number of "ways" and "shots" in few-shot episodes
+            B = len(images)
+        else:
+            assert "dec_out_cached" in batch_data
+            B = len(batch_data["dec_out_cached"])
+
         N = len(set(conc_labels))
         K = B // N
 
@@ -289,7 +313,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             # Decoder outputs are pre-computed and retrieved
             detr_dec_outs = batch_data["dec_out_cached"]
 
-            if self.cfg.vision.task.pred_type == "fs_search":
+            if self.cfg.vision.task == "fs_search":
                 # Few-shot search task needs encoder outputs (per-pixel vectors)
                 assert images is not None
                 for img in images:
@@ -305,14 +329,14 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 enc_out, dec_out = self.fvecs_from_image_and_bboxes(img, bbs)
                 detr_dec_outs.append(dec_out[:,bbis])
 
-                if self.cfg.vision.task.pred_type == "fs_search":
+                if self.cfg.vision.task == "fs_search":
                     # Few-shot search task needs encoder outputs (per-pixel vectors)
                     detr_enc_outs.append(enc_out)
 
             detr_dec_outs = torch.cat(detr_dec_outs)
 
         # Search targets in few-shot search mode
-        if self.cfg.vision.task.pred_type == "fs_search":
+        if self.cfg.vision.task == "fs_search":
             bboxes_search_targets = [
                 bbs[bbis] for bbs, bbis in zip(bboxes, batch_data["bb_all"])
             ]
@@ -321,7 +345,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         # Computing appropriate loss & metric values according to task specification
         loss, metrics, embeddings = compute_loss_and_metrics(
-            self, self.cfg.vision.task.pred_type, conc_type,
+            self, self.cfg.vision.task, conc_type,
             detr_enc_outs, detr_dec_outs, B, N, K, bboxes_search_targets
         )
 

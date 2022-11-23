@@ -97,7 +97,7 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         with open(f"{dataset_path}/metadata.json") as meta_f:
             metadata = json.load(meta_f)
         
-        for_search_task = self.cfg.vision.task.pred_type == "fs_search"
+        for_search_task = self.cfg.vision.task == "fs_search"
 
         # Prepare dataloaders and samplers according to train/val/test split provided
         # in metadata
@@ -116,7 +116,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, metadata[f"{conc_type}_train_split"]
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
-                    ann_train, dataset_path, conc_type, metadata[f"{conc_type}_names"]
+                    ann_train, dataset_path, conc_type, metadata[f"{conc_type}_names"],
+                    for_search_task=for_search_task
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
                     index_train, hypernym_info,
@@ -130,13 +131,14 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, metadata[f"{conc_type}_val_split"]
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
-                    ann_val, dataset_path, conc_type, metadata[f"{conc_type}_names"]
+                    ann_val, dataset_path, conc_type, metadata[f"{conc_type}_names"],
+                    for_search_task=for_search_task
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
                     index_val, hypernym_info,
                     self.cfg.vision.data.batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    once_per_concept=for_search_task
+                    for_search_task=for_search_task
                 )
             if stage in ["fit", "test", "predict"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
@@ -144,13 +146,14 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     annotations, conc_type, metadata[f"{conc_type}_test_split"]
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
-                    ann_test, dataset_path, conc_type, metadata[f"{conc_type}_names"]
+                    ann_test, dataset_path, conc_type, metadata[f"{conc_type}_names"],
+                    for_search_task=for_search_task
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
                     index_test, hypernym_info,
                     self.cfg.vision.data.batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    once_per_concept=for_search_task
+                    for_search_task=for_search_task
                 )
 
         # Also setup class+attribute hybrid dataloader for few-shot search task
@@ -236,11 +239,14 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         return self._return_dataloaders("test")
 
     def _return_dataloaders(self, split):
-        if self.cfg.vision.task.pred_type == "fs_classify":
+        if self.cfg.vision.task == "fs_classify":
             # For few-shot classification task, return single dataloader for the
             # corresponding concept type and split
-            return self._fetch_dataloader(self.cfg.vision.task.conc_type, split)
-        elif self.cfg.vision.task.pred_type == "fs_search":
+            return [
+                self._fetch_dataloader("classes", split),
+                self._fetch_dataloader("attributes", split)
+            ]
+        elif self.cfg.vision.task == "fs_search":
             # For few-shot search task, return list of dataloaders for the split,
             # class-only loader, attribute-only loader and class+attribute loader
             return [
@@ -289,12 +295,15 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
 
 class _SGGDataset(Dataset):
-    def __init__(self, annotations, dataset_path, conc_type, conc_names):
+    def __init__(
+        self, annotations, dataset_path, conc_type, conc_names, for_search_task=False
+    ):
         super().__init__()
         self.annotations = annotations
         self.dataset_path = dataset_path
         self.conc_names = conc_names
         self.conc_type = conc_type
+        self.for_search_task = for_search_task
     
     def __getitem__(self, idx):
         assert len(idx) == 3
@@ -313,38 +322,42 @@ class _SGGDataset(Dataset):
         vecs_file = f"{img_file}.vectors"
 
         # Fetch and return raw image, bboxes and object indices
-        image_raw = os.path.join(images_path, img_file)
-        image_raw = Image.open(image_raw)
-        if image_raw.mode != "RGB":
-            # Cast non-RGB images (e.g. grayscale) into RGB format
-            old_image_raw = image_raw
-            image_raw = Image.new("RGB", old_image_raw.size)
-            image_raw.paste(old_image_raw)
+        if self.for_search_task or \
+            not os.path.exists(os.path.join(vectors_path, vecs_file)):
 
-        # Raw image
-        data_dict["image"] = image_raw
+            image_raw = os.path.join(images_path, img_file)
+            image_raw = Image.open(image_raw)
+            if image_raw.mode != "RGB":
+                # Cast non-RGB images (e.g. grayscale) into RGB format
+                old_image_raw = image_raw
+                image_raw = Image.new("RGB", old_image_raw.size)
+                image_raw.paste(old_image_raw)
 
-        # Bounding boxes in the image
-        oids = list(self.annotations[img_id]["annotations"])
-        bboxes = [
-            obj["bbox"] for obj in self.annotations[img_id]["annotations"].values()
-        ]
-        data_dict["bboxes"] = bboxes
+            # Raw image
+            data_dict["image"] = image_raw
 
-        # Ind(s) of the designated object(s), with which to fetch bounding box(es)
-        data_dict["bb_inds"] = tuple(oids.index(oid) for oid in obj_ids)
+            # Bounding boxes in the image
+            oids = list(self.annotations[img_id]["annotations"])
+            bboxes = [
+                obj["bbox"] for obj in self.annotations[img_id]["annotations"].values()
+            ]
+            data_dict["bboxes"] = bboxes
 
-        # Inds of *all* objects of the same concept in the same image; only consumed
-        # in few-shot search task
-        search_spec = list(zip(
-            (self.conc_type,) if type(self.conc_type) != tuple else self.conc_type,
-            (conc,) if type(conc) != tuple else conc
-        ))
-        data_dict["bb_all"] = [
-            oids.index(oid)
-            for oid, ann in self.annotations[img_id]["annotations"].items()
-            if all(c in ann[ctype] for ctype, c in search_spec)
-        ]
+            # Ind(s) of the designated object(s), with which to fetch bounding box(es)
+            data_dict["bb_inds"] = tuple(oids.index(oid) for oid in obj_ids)
+
+            if self.for_search_task:
+                # Inds of *all* objects of the same concept in the same image; only
+                # consumed in few-shot search task
+                search_spec = list(zip(
+                    (self.conc_type,) if type(self.conc_type) != tuple else self.conc_type,
+                    (conc,) if type(conc) != tuple else conc
+                ))
+                data_dict["bb_all"] = [
+                    oids.index(oid)
+                    for oid, ann in self.annotations[img_id]["annotations"].items()
+                    if all(c in ann[ctype] for ctype, c in search_spec)
+                ]
 
         if os.path.exists(os.path.join(vectors_path, vecs_file)):
             # Fetch and return pre-computed feature vectors for the image
@@ -367,7 +380,7 @@ class _FewShotSGGDataSampler:
     """
     def __init__(
         self, index_conc, hypernym_info, batch_size, num_exs_per_conc,
-        with_replacement=False, once_per_concept=False
+        with_replacement=False, for_search_task=False
     ):
         self.index_conc = index_conc
         self.hypernym_info = hypernym_info
@@ -376,7 +389,7 @@ class _FewShotSGGDataSampler:
         self.num_concepts = self.batch_size // self.num_exs_per_conc
 
         self.with_replacement = with_replacement
-        self.once_per_concept = once_per_concept
+        self.for_search_task = for_search_task
 
         # Let's keep things simple by making batch size divisible by number of
         # exemplars per concept (equivalently, number of concepts or 'ways')
@@ -437,7 +450,7 @@ class _FewShotSGGDataSampler:
                 for img_id, obj_ids, conc in sampled_indices:
                     conc_exemplars[conc].remove((img_id, obj_ids))
 
-                    if self.once_per_concept:
+                    if self.for_search_task:
                         # One few-shot episode per concept -- for time's interest...
                         concepts_to_del.add(conc)
                     else:

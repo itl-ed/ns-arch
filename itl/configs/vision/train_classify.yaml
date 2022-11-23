@@ -1,9 +1,7 @@
 defaults:
     - base
 
-task:
-    conc_type: "attributes"
-    pred_type: "fs_classify"
+task: "fs_classify"
 
 data:
     name: "visual_genome"

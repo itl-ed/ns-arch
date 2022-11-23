@@ -1,8 +1,7 @@
 defaults:
     - base
 
-task:
-    pred_type: "fs_search"
+task: "fs_search"
 
 data:
     name: "visual_genome"
