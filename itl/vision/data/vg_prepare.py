@@ -8,6 +8,7 @@ import logging
 import zipfile
 import requests
 import multiprocessing
+from itertools import product
 from urllib.request import urlretrieve
 from urllib.error import URLError
 from collections import defaultdict
@@ -150,6 +151,15 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
     att_ids = defaultdict(lambda: len(att_ids))
     rel_ids = defaultdict(lambda: len(rel_ids))
 
+    # Indexing concept occurrences
+    cls_occurrences = defaultdict(lambda: defaultdict(set))
+    att_occurrences = defaultdict(lambda: defaultdict(set))
+    rel_occurrences = defaultdict(lambda: defaultdict(set))
+
+    # Indexing class/attribute predicate co-occurences; for use in few-shot search
+    # training with cls-att composite search spec
+    cls_att_cooccurrences = defaultdict(lambda: defaultdict(set))
+
     # Collect scene graph annotations and split
     with open(f"{target_dir}/scene_graphs.json") as sg_f, \
         open(f"{target_dir}/annotations.json", "w") as ann_f:
@@ -178,18 +188,34 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
                 obj_id = obj["object_id"]
 
                 obj_ann = {
-                    "bbox": [obj["x"], obj["y"], obj["w"], obj["h"]],
-                    "classes": [cls_ids[s] for s in obj["synsets"]]
+                    "bbox": [obj["x"], obj["y"], obj["w"], obj["h"]]
                 }
+
+                classes = []
+                for s in obj["synsets"]:
+                    classes.append(cls_ids[s])
+                    cls_occurrences[cls_ids[s]][img_id].add(obj_id)
+
+                obj_ann["classes"] = classes
 
                 if "attributes" in obj:
                     # Consider canonicalized attributes only
-                    atts = [a for a in obj["attributes"] if a in att2ss]
-                    obj_ann["attributes"] = [att_ids[att2ss[a]] for a in atts]
+                    atts_valid = [a for a in obj["attributes"] if a in att2ss]
+
+                    attributes = []
+                    for a in atts_valid:
+                        attributes.append(att_ids[att2ss[a]])
+                        att_occurrences[att_ids[att2ss[a]]][img_id].add(obj_id)
+                    
+                    obj_ann["attributes"] = attributes
                 else:
                     obj_ann["attributes"] = []
 
                 anno[obj_id] = obj_ann
+
+                # Bookkeeping class-attribute co-occurrences
+                for c, a in product(obj_ann["classes"], obj_ann["attributes"]):
+                    cls_att_cooccurrences[(c, a)][img_id].add(obj_id)
 
             # Insert relation annotations as well -- by relation subjects
             for r in sg["relationships"]:
@@ -211,10 +237,14 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
 
                 # Adding (relation predicate, object id) pairs as tuples to relation sets,
                 # so as to remove duplicates (why do they have duplicates after all?)
-                anno[r["subject_id"]]["relations"].add((
-                    tuple([rel_ids[s] for s in r["synsets"]]),
-                    r["object_id"]
-                ))
+                relations = []
+                for s in r["synsets"]:
+                    relations.append(rel_ids[s])
+                    rel_occurrences[rel_ids[s]][img_id].add((obj_id, r["object_id"]))
+
+                anno[r["subject_id"]]["relations"].add(
+                    (tuple(relations), r["object_id"])
+                )
 
             # Tuples back to lists
             for o in anno.values():
@@ -233,6 +263,27 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
         
         # Close json arrays output
         ann_f.write("]")
+
+    # Defaultdicts to dicts
+    cls_ids = dict(cls_ids); att_ids = dict(att_ids); rel_ids = dict(rel_ids)
+    cls_occurrences = {
+        c: { img: list(insts) for img, insts in per_img.items() }
+        for c, per_img in cls_occurrences.items()
+    }
+    att_occurrences = {
+        a: { img: list(insts) for img, insts in per_img.items() }
+        for a, per_img in att_occurrences.items()
+    }
+    rel_occurrences = {
+        r: { img: list(insts) for img, insts in per_img.items() }
+        for r, per_img in rel_occurrences.items()
+    }
+    cls_att_cooccurrences = {
+        "_".join([str(c), str(a)]): {
+            img: list(insts) for img, insts in per_img.items()
+        }
+        for (c, a), per_img in cls_att_cooccurrences.items()
+    }
 
     # Check if each concept is hyper/hyponymy of another
     cls_hypernyms = {}; att_hypernyms = {}; rel_hypernyms = {}
@@ -276,6 +327,12 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
         metadata[f"{conc_type}_train_split"] = concepts_shuffled[:split1]
         metadata[f"{conc_type}_val_split"] = concepts_shuffled[split1:split2]
         metadata[f"{conc_type}_test_split"] = concepts_shuffled[split2:]
+
+    # All witnessed concept (pair) instances
+    metadata["classes_instances"] = cls_occurrences
+    metadata["attributes_instances"] = att_occurrences
+    metadata["relations_instances"] = rel_occurrences
+    metadata["classes_attributes_pair_instances"] = cls_att_cooccurrences
 
     # Write metadata to file
     with open(f"{target_dir}/metadata.json", "w") as meta_f:

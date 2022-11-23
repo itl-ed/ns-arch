@@ -4,7 +4,6 @@ import json
 import random
 import logging
 from PIL import Image
-from itertools import product
 from collections import defaultdict
 
 import nltk
@@ -112,8 +111,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
             if stage in ["fit"]:
                 # Training set required for "fit" stage setup
-                ann_train, index_train = _annotations_by_concept(
-                    annotations, conc_type, metadata[f"{conc_type}_train_split"]
+                index_train, ann_train = _annotations_by_concept(
+                    annotations, metadata, conc_type, "train"
                 )
                 self.datasets[conc_type]["train"] = _SGGDataset(
                     ann_train, dataset_path, conc_type, metadata[f"{conc_type}_names"],
@@ -127,8 +126,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
             if stage in ["fit", "validate"]:
                 # Validation set required for "fit"/"validate" stage setup
-                ann_val, index_val = _annotations_by_concept(
-                    annotations, conc_type, metadata[f"{conc_type}_val_split"]
+                index_val, ann_val = _annotations_by_concept(
+                    annotations, metadata, conc_type, "val"
                 )
                 self.datasets[conc_type]["val"] = _SGGDataset(
                     ann_val, dataset_path, conc_type, metadata[f"{conc_type}_names"],
@@ -142,8 +141,8 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 )
             if stage in ["fit", "test", "predict"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
-                ann_test, index_test = _annotations_by_concept(
-                    annotations, conc_type, metadata[f"{conc_type}_test_split"]
+                index_test, ann_test = _annotations_by_concept(
+                    annotations, metadata, conc_type, "test"
                 )
                 self.datasets[conc_type]["test"] = _SGGDataset(
                     ann_test, dataset_path, conc_type, metadata[f"{conc_type}_names"],
@@ -172,6 +171,14 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     assert len(idxs) == len(self.names)
                     return tuple(self.names[ni][idx] for ni, idx in enumerate(idxs))
 
+            cls_att_pairs = {
+                tuple(int(i) for i in ci_ai.split("_")): [
+                    (int(img_id), (oi,))
+                    for img_id, obj_ids in insts.items() for oi in obj_ids
+                ]
+                for ci_ai, insts in metadata["classes_attributes_pair_instances"].items()
+            }
+
             for spl in splits:
                 # Merged _SGGDataset
                 cls_data = self.datasets["classes"][spl]
@@ -179,8 +186,9 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
                 self.datasets["classes_and_attributes"][spl] = _SGGDataset(
                     { **cls_data.annotations, **att_data.annotations },
-                    dataset_path, (cls_data.conc_type, att_data.conc_type),
-                    _ConcNameGetter([cls_data.conc_names, att_data.conc_names])
+                    dataset_path, ("classes", "attributes"),
+                    _ConcNameGetter([cls_data.conc_names, att_data.conc_names]),
+                    for_search_task=True
                 )
 
                 # Batch sampler for the merged _SGGDataset
@@ -189,21 +197,13 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
                 # Join index_conc to form class+attribute combination entries
                 combi_index_conc = {}
-                K = cls_sampler.num_exs_per_conc; x = 0
-                cls_att_combis = product(
-                    [k for k, v in cls_sampler.index_conc.items() if len(v) > K],
-                    [k for k, v in att_sampler.index_conc.items() if len(v) > K]
-                )
-                for ci, ai in cls_att_combis:
-                    x += 1
-                    cls_exs = set(cls_sampler.index_conc[ci])
-                    att_exs = set(att_sampler.index_conc[ai])
-                    combi_exs = cls_exs & att_exs
+                K = cls_sampler.num_exs_per_conc
+                for (ci, ai), insts in cls_att_pairs.items():
+                    if ci not in cls_sampler.index_conc: continue
+                    if ai not in att_sampler.index_conc: continue
+                    if len(insts) < K: continue
 
-                    if len(combi_exs) < K:
-                        # Not enough occurrences of the cls+att combination
-                        continue
-                    combi_index_conc[(ci, ai)] = list(combi_exs)
+                    combi_index_conc[(ci, ai)] = insts
 
                 # Compose hypernym info; among cls+att combinations present, if either
                 # cls or att is hypernym of respective type, add as hypernym
@@ -362,7 +362,7 @@ class _SGGDataset(Dataset):
         if os.path.exists(os.path.join(vectors_path, vecs_file)):
             # Fetch and return pre-computed feature vectors for the image
             vecs = torch.load(os.path.join(vectors_path, vecs_file))
-            vecs = torch.stack([vecs[oid] for oid in obj_ids], dim=0)
+            vecs = torch.stack([vecs[str(oid)] for oid in obj_ids], dim=0)
             data_dict["dec_out_cached"] = vecs
         
         return data_dict, self.conc_type
@@ -472,32 +472,31 @@ class _FewShotSGGDataSampler:
         raise NotImplementedError
 
 
-def _annotations_by_concept(annotations, conc_type, concepts):
+def _annotations_by_concept(annotations, metadata, conc_type, split):
     """
     Subroutine for filtering annotated images by specified concepts; returns
     filtered list of images & index by concepts
     """
-    annotations_filtered = {}
-    index_by_concept = defaultdict(list)
+    index_by_concept = {
+        int(c): [
+            (int(img), (obj_ids,) if type(obj_ids) else tuple(obj_ids))
+            for img, insts_per_img in insts.items() for obj_ids in insts_per_img
+        ]
+        for c, insts in metadata[f"{conc_type}_instances"].items()
+        if int(c) in metadata[f"{conc_type}_{split}_split"]
+    }
+    occurring_img_ids = set.union(*[
+        {img_id for img_id, _ in insts} for insts in index_by_concept.values()
+    ])
+    annotations_filtered = {
+        img["image_id"]: img for img in annotations
+        if img["image_id"] in occurring_img_ids
+    }
+
+    # Object ids in annotation are read as str from metadata json; convert to int
     for img in annotations:
-        img_added = False
-        for obj_id, anno in img["annotations"].items():
-            if conc_type == "classes" or conc_type == "attributes":
-                for ci in anno[conc_type]:
-                    if ci in concepts:
-                        index_by_concept[ci].append((img["image_id"], (obj_id,)))
-                        img_added = True
-            else:
-                assert conc_type == "relations"
-                for r in anno[conc_type]:
-                    for ci in r["relation"]:
-                        if ci in concepts:
-                            index_by_concept[ci].append(
-                                (img["image_id"], (obj_id, str(r["object_id"])))
-                            )
-                            img_added = True
+        img["annotations"] = {
+            int(obj_id): ann for obj_id, ann in img["annotations"].items()
+        }
 
-        if img_added:
-            annotations_filtered[img["image_id"]] = img
-
-    return annotations_filtered, dict(index_by_concept)
+    return index_by_concept, annotations_filtered
