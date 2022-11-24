@@ -4,13 +4,13 @@ defaults:
 task: "fs_search"
 
 data:
-    name: "visual_genome"
+    name: ???
     path: "${paths.data_dir}/${vision.data.name}"
     num_images: 108077
     use_percentage: 0.2
     num_loader_workers: 4
-    batch_size: 10
-    num_exs_per_conc: 10
+    batch_size: 5
+    num_exs_per_conc: 5
     batch_size_eval: 10
     num_exs_per_conc_eval: 10
 
@@ -28,5 +28,5 @@ optim:
         - 0.9
     lr_scheduler_gamma: 3e-1
     max_steps: 6000
-    log_interval: 200
+    log_interval: 50
     val_interval: 2000

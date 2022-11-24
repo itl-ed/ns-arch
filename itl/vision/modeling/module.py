@@ -198,7 +198,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 embeddings = torch.cat(embeddings)
                 labels = sum(labels, [])
                 if isinstance(conc_types[0], tuple):
-                    raise NotImplementedError
+                    labels = ["+".join(cl_al) for cl_al in labels]
 
                 # There are typically too many vectors, not all of them need to be logged...
                 # Let's downsample to K (as in config) per concept

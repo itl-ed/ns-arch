@@ -214,8 +214,8 @@ def reformat_annotations(target_dir, img_count, img_anns, seed):
                 anno[obj_id] = obj_ann
 
                 # Bookkeeping class-attribute co-occurrences
-                for c, a in product(obj_ann["classes"], obj_ann["attributes"]):
-                    cls_att_cooccurrences[(c, a)][img_id].add(obj_id)
+                for ci, ai in product(obj_ann["classes"], obj_ann["attributes"]):
+                    cls_att_cooccurrences[(ci, ai)][img_id].add(obj_id)
 
             # Insert relation annotations as well -- by relation subjects
             for r in sg["relationships"]:

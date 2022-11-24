@@ -8,6 +8,7 @@ evaluation.
 import torch
 import torch.nn.functional as F
 
+from torchvision.ops import nms
 from transformers.models.deformable_detr.modeling_deformable_detr import (
     DeformableDetrHungarianMatcher,
     DeformableDetrLoss
@@ -114,6 +115,23 @@ def _compute_fs_search(
     fused_spec_embeddings = torch.cat([cls_loo_protos, att_loo_protos], dim=-1)
     fused_spec_embeddings = model.fs_spec_fuse(fused_spec_embeddings)
 
+    # Fuse & embedding of individual exemplars for visual analysis
+    if "classes" in conc_type:
+        indiv_cls_embeddings = cls_embeddings
+    else:
+        indiv_cls_embeddings = torch.zeros(
+            B, model.fs_embed_cls.layers[-1].out_features, device=model.device
+        )
+    if "attributes" in conc_type:
+        indiv_att_embeddings = att_embeddings
+    else:
+        indiv_att_embeddings = torch.zeros(
+            B, model.fs_embed_att.layers[-1].out_features, device=model.device
+        )
+    indiv_fused_spec_embeddings = torch.cat(
+        [indiv_cls_embeddings, indiv_att_embeddings], dim=-1
+    )
+
     # Setup Hungarian matcher and loss computation fn
     matcher = DeformableDetrHungarianMatcher(
         class_cost=model.detr.config.class_cost,
@@ -157,18 +175,10 @@ def _compute_fs_search(
         search_coord_deltas = model.fs_search_bbox(embs_concat)
         search_coord_logits = search_coord_deltas + output_proposals
 
-        # I think 30 would suffice for conditioned search...
-        topk = 30
-        topk_proposals = torch.topk(search_scores, topk, dim=1)
-        topk_coords_logits = torch.gather(
-            search_coord_logits, 1,
-            topk_proposals.indices.unsqueeze(-1).repeat(1, 1, 4)
-        )
-
         # Shape into format to be fed into loss computation fn
         search_outputs_for_loss = {
-            "pred_boxes": topk_coords_logits.sigmoid(),
-            "logits": topk_proposals.values[..., None]
+            "pred_boxes": search_coord_logits.sigmoid(),
+            "logits": search_scores[..., None]
         }
         search_targets_for_loss = [
             {
@@ -190,16 +200,22 @@ def _compute_fs_search(
         loss += sum(
             loss_dict[k] * weight_dict[k]
             for k in loss_dict.keys() if k in weight_dict
+        ) * 300 / search_scores.shape[1]
+
+        # For computing metrics, it would be pointlessly wasteful to consider
+        # every single pixel; let's run NMS and choose, say, top 30?
+        topk = 30; iou_thres = 0.65
+        topk_proposals = nms(
+            search_coord_logits[0].sigmoid(), search_scores[0], iou_thres
         )
 
         # Compute evaluation metrics
         search_outputs_for_metric = [
             {
-                "boxes": search_outputs_for_loss["pred_boxes"][0],
-                "scores": search_outputs_for_loss["logits"][0, :, 0],
+                "boxes": search_coord_logits[0, topk_proposals][:topk].sigmoid(),
+                "scores": search_scores[0, topk_proposals][:topk],
                 "labels": torch.zeros(
-                    search_outputs_for_loss["logits"].shape[1],
-                    dtype=torch.long, device=model.device
+                    topk, dtype=torch.long, device=model.device
                 )
             }
         ]
@@ -218,4 +234,4 @@ def _compute_fs_search(
         "mAP@75": mAPs_final["map_75"],
     }
 
-    return loss, metrics, fused_spec_embeddings
+    return loss, metrics, indiv_fused_spec_embeddings
