@@ -47,7 +47,7 @@ class AgentCompositeActions:
                     atom = rule.body[0]
                     exm_pointer = (set(), {0})
 
-                cat_type, conc_ind = atom.name.split("_")
+                conc_type, conc_ind = atom.name.split("_")
                 conc_ind = int(conc_ind)
                 args = [a for a, _ in atom.args]
 
@@ -56,12 +56,12 @@ class AgentCompositeActions:
                 ]
 
                 # Fetch current score for the asserted fact
-                if cat_type == "cls":
+                if conc_type == "cls":
                     f_vec = self.agent.vision.f_vecs[args[0]]
-                elif cat_type == "att":
+                elif conc_type == "att":
                     f_vec = self.agent.vision.f_vecs[args[0]]
                 else:
-                    assert cat_type == "rel"
+                    assert conc_type == "rel"
                     raise NotImplementedError   # Step back for relation prediction...
 
                 # Add new concept exemplars to memory, as feature vectors at the
@@ -71,9 +71,9 @@ class AgentCompositeActions:
 
                 self.agent.lt_mem.exemplars.add_exs(
                     sources=[(np.asarray(self.agent.vision.last_input), ex_bboxes)],
-                    f_vecs={ cat_type: f_vec[None,:] },
-                    pointers_src={ cat_type: pointers_src },
-                    pointers_exm={ cat_type: pointers_exm }
+                    f_vecs={ conc_type: f_vec[None,:] },
+                    pointers_src={ conc_type: pointers_src },
+                    pointers_exm={ conc_type: pointers_exm }
                 )
 
                 # This now shouldn't strike the agent as surprise, at least in this

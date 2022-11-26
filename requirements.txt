@@ -6,7 +6,3 @@
 -r itl/lpmln/requirements.txt
 
 python-dotenv
-iopath
-
-# Used in experiment scripts only
-inflect

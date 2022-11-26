@@ -4,11 +4,13 @@ Outermost wrapper containing ITL agent API
 import os
 import math
 import pickle
+import logging
 import readline
 import rlcompleter
 
 import torch
 import numpy as np
+from pytorch_lightning.loggers import WandbLogger
 
 from .memory import LongTermMemoryModule
 from .vision import VisionModule
@@ -20,6 +22,8 @@ from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
 from .utils.completer import DatasetImgsCompleter
 
+logger = logging.getLogger(__name__)
+
 
 # FT_THRES = 0.5              # Few-shot learning trigger score threshold
 SR_THRES = -math.log(0.5)    # Mismatch surprisal threshold
@@ -27,14 +31,16 @@ U_IN_PR = 1.00               # How much the agent values information provided by
 EPS = 1e-10                  # Value used for numerical stabilization
 TAB = "\t"                   # For use in format strings
 
+WB_PREFIX = "wandb://"
+
 class ITLAgent:
 
-    def __init__(self, opts):
-        self.opts = opts
+    def __init__(self, cfg):
+        self.cfg = cfg
 
         # Initialize component modules
-        self.vision = VisionModule(opts.vision_model_path)
-        self.lang = LanguageModule(opts.grammar_image_path, opts.ace_binary_path)
+        self.vision = VisionModule(cfg)
+        self.lang = LanguageModule(cfg)
         self.symbolic = SymbolicReasonerModule()
         self.practical = PracticalReasonerModule()
         self.lt_mem = LongTermMemoryModule()
@@ -44,15 +50,15 @@ class ITLAgent:
         self.comp_actions = AgentCompositeActions(self)
 
         # Load agent model from specified path
-        if opts.agent_model_path is not None:
-            self.load_model(opts.agent_model_path)
+        if "model_path" in cfg.agent:
+            self.load_model(cfg.agent.model_path)
 
         # Show visual UI and plots
         self.vis_ui_on = True
 
         # Image file selection CUI
-        self.dcompleter = DatasetImgsCompleter(opts.data_dir_path)
-        readline.parse_and_bind("tab: complete")
+        # self.dcompleter = DatasetImgsCompleter(cfg.paths.data_dir)
+        # readline.parse_and_bind("tab: complete")
 
     def __call__(self):
         """Main function: Kickstart infinite ITL agent loop with user interface"""
@@ -195,7 +201,7 @@ class ITLAgent:
             for c in concepts
         ]
         denotations = [self.lt_mem.lexicon.s2d[(c, "n")][0] for c in denotations]
-        denotations = [f"{cat_type}_{conc_ind}" for conc_ind, cat_type in denotations]
+        denotations = [f"{conc_type}_{conc_ind}" for conc_ind, conc_type in denotations]
 
         agent_answers = {
             c: True if (d,) in answers_raw and answers_raw[(d,)] > 0.5 else False
@@ -223,7 +229,8 @@ class ITLAgent:
         """
         ckpt = {
             "vision": {
-                "inventories": self.vision.inventories
+                "inventories": self.vision.inventories,
+                "fs_model_path": self.cfg.vision.model.fs_model
             },
             "lt_mem": {
                 "exemplars": vars(self.lt_mem.exemplars),
@@ -232,8 +239,9 @@ class ITLAgent:
             }
         }
         torch.save(ckpt, ckpt_path)
+        logger.info(f"Saved current agent model at {ckpt_path}")
 
-    def load_model(self, agent_model_path):
+    def load_model(self, ckpt_path):
         """
         Load from a torch checkpoint to initialize the agent; the checkpoint may contain
         a snapshot of agent knowledge obtained as an output of self.save_model() evoked
@@ -241,12 +249,23 @@ class ITLAgent:
         as output of the vision module's training API)
         """
         # Resolve path to checkpoint
-        ckpt_path = agent_model_path
-        if not os.path.isfile(ckpt_path):
-            local_ckpt_path = self.path_manager.get_local_path(ckpt_path)
-            assert os.path.isfile(local_ckpt_path), \
-                "Checkpoint {} not found!".format(local_ckpt_path)
+        if ckpt_path.startswith(WB_PREFIX):
+            # Storing agent models in W&B; not implemented yet
+            raise NotImplementedError
+
+            wb_entity = os.environ.get("WANDB_ENTITY")
+            wb_project = os.environ.get("WANDB_PROJECT")
+            wb_run_id = self.fs_model_path[len(WB_PREFIX):]
+
+            local_ckpt_path = WandbLogger.download_artifact(
+                artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
+                save_dir=os.path.join(
+                    self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
+                )
+            )
+            local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
         else:
+            assert os.path.exists(ckpt_path)
             local_ckpt_path = ckpt_path
 
         # Load agent model checkpoint file
@@ -265,7 +284,23 @@ class ITLAgent:
                         setattr(component, component_prop, prop_data)
                 else:
                     module = getattr(self, module_name)
+                    prev_component_data = getattr(module, module_component)
                     setattr(module, module_component, component_data)
+                
+                # Handling vision.fs_model_path data
+                if module_name == "vision":
+                    if module_component == "fs_model_path":
+                        if prev_component_data is not None and \
+                            prev_component_data != component_data:
+                            logger.warn(
+                                "Path to few-shot components in vision module is already provided "
+                                "in config and is inconsistent with the pointer saved in the agent "
+                                f"model specified (config: {prev_component_data} vs. agent_model: "
+                                f"{component_data}). Agent vision module might exhibit unexpected "
+                                "behaviors."
+                            )
+                        
+                        self.vision.load_weights()
 
     def _vis_inp(self, usr_in=None):
         """Image input prompt (Choosing from dataset for now)"""
@@ -273,7 +308,7 @@ class ITLAgent:
         input_provided = usr_in is not None
 
         # Register autocompleter for REPL
-        readline.set_completer(self.dcompleter.complete)
+        # readline.set_completer(self.dcompleter.complete)
 
         print("")
 
@@ -313,7 +348,7 @@ class ITLAgent:
                 break
 
         # Restore default completer
-        readline.set_completer(rlcompleter.Completer().complete)
+        # readline.set_completer(rlcompleter.Completer().complete)
     
     def _lang_inp(self, usr_in=None):
         """Language input prompt (from user)"""
@@ -562,16 +597,16 @@ class ITLAgent:
                     # visual concept, and perform few-shot learning if appropriate
                     pos, name = sym
                     if pos == "n":
-                        cat_type = "cls"
+                        conc_type = "cls"
                     elif pos == "a":
-                        cat_type = "att"
+                        conc_type = "att"
                     else:
                         assert pos == "v" or pos == "r"
-                        cat_type = "rel"
+                        conc_type = "rel"
 
                     # Expand corresponding visual concept inventory
-                    concept_ind = self.vision.add_concept(cat_type)
-                    novel_concept = (concept_ind, cat_type)
+                    concept_ind = self.vision.add_concept(conc_type)
+                    novel_concept = (concept_ind, conc_type)
 
                     # Acquire novel concept by updating lexicon (and vision.predicates)
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
@@ -591,12 +626,12 @@ class ITLAgent:
                             self.lang.dialogue.referents["env"][a]["bbox"] for a in args
                         ]
 
-                        if cat_type == "cls":
+                        if conc_type == "cls":
                             f_vec = self.vision.f_vecs[args[0]]
-                        elif cat_type == "att":
+                        elif conc_type == "att":
                             f_vec = self.vision.f_vecs[args[0]]
                         else:
-                            assert cat_type == "rel"
+                            assert conc_type == "rel"
                             raise NotImplementedError   # Step back for relation prediction...
                         
                         pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
@@ -604,9 +639,9 @@ class ITLAgent:
 
                         self.lt_mem.exemplars.add_exs(
                             sources=[(np.asarray(self.vision.last_input), ex_bboxes)],
-                            f_vecs={ cat_type: f_vec[None,:] },
-                            pointers_src={ cat_type: pointers_src },
-                            pointers_exm={ cat_type: pointers_exm }
+                            f_vecs={ conc_type: f_vec[None,:] },
+                            pointers_src={ conc_type: pointers_src },
+                            pointers_exm={ conc_type: pointers_exm }
                         )
 
                         # Set flag that XB is updated
@@ -616,7 +651,7 @@ class ITLAgent:
                         # loop (Ideally this doesn't need to be enforced this way, if the
                         # few-shot learning capability is perfect)
                         self.doubt_no_more.add(Rule(
-                            head=Literal(f"{cat_type}_{concept_ind}", wrap_args(*args))
+                            head=Literal(f"{conc_type}_{concept_ind}", wrap_args(*args))
                         ))
                 else:
                     # Otherwise not immediately resolvable

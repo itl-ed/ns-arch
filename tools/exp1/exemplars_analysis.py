@@ -1,6 +1,5 @@
 """
-Script for fine-grained grounding experiments; simulate natural interactions between
-agent (learner) and user (teacher) with varying configurations
+Visual analysis of concept exemplar vectors in low-dimensional space
 """
 import os
 import sys
@@ -11,68 +10,71 @@ sys.path.insert(
 import warnings
 warnings.filterwarnings("ignore")
 
-import cv2
-import torch
-import numpy as np
+import umap
+import umap.plot
+import hydra
 import tqdm as tqdm
+import numpy as np
+import pandas as pd
+from omegaconf import OmegaConf
+from bokeh.io import save
+from bokeh.models import Title
+from bokeh.layouts import column
 
 from itl import ITLAgent
-from itl.opts import parse_arguments
 
 
 TAB = "\t"
 
-if __name__ == "__main__":
-    opts = parse_arguments()
+@hydra.main(config_path="../../itl/configs", config_name="config")
+def main(cfg):
+    print(OmegaConf.to_yaml(cfg))
 
-    agent = ITLAgent(opts)
+    # Set up agent
+    agent = ITLAgent(cfg)
     exemplars = agent.lt_mem.exemplars
 
-    from torch.utils.tensorboard import SummaryWriter
+    for conc_type in ["att", "rel"]:
+        if conc_type == "cls" or conc_type == "att":
+            vectors = exemplars.storage_vec[conc_type]
+            pos_exs_inds = exemplars.exemplars_pos[conc_type]
+            neg_exs_inds = exemplars.exemplars_neg[conc_type]
 
-    for cat_type in ["cls", "att", "rel"]:
-        if cat_type == "cls" or cat_type == "att":
-            writer = SummaryWriter("output/ex_embs")
+            # Dimensionality reduction down to 2D by UMAP, for visual inspection
+            mapper = umap.UMAP().fit(vectors)
 
-            fvecs_to_label = exemplars.storage_vec[cat_type]
-            # fvecs_imgs = [
-            #     exemplars.vec2img[cat_type][fv_i] for fv_i in range(len(fvecs_to_label))
-            # ]
-            # fvecs_imgs = [
-            #     (
-            #         exemplars.storage_img[ii]["image"] / 255,
-            #         exemplars.storage_img[ii]["objects"][oi],
-            #         exemplars.storage_img[ii]["original_width"],
-            #         exemplars.storage_img[ii]["original_height"]
-            #     )
-            #     for ii, oi in fvecs_imgs
-            # ]
-            # label_imgs = []
-            # for img, bbox, ow, oh in tqdm.tqdm(fvecs_imgs, total=len(fvecs_imgs)):
-            #     resized = cv2.resize(img, dsize=(ow, oh))
-            #     img_patch = resized[bbox[1]:bbox[3], bbox[0]:bbox[2]]
-            #     img_patch = cv2.resize(img_patch, dsize=(80,80))
-            #     label_imgs.append(img_patch)
-
-            labels_header = [
-                agent.lt_mem.lexicon.d2s[(c, cat_type)][0][0]
-                for c in exemplars.exemplars_pos[cat_type]
-            ]
-
-            labels = []
-            for fv_i in range(len(fvecs_to_label)):
-                label_row = [
-                    "p" if fv_i in exemplars.exemplars_pos[cat_type][c]
-                    else "n" if fv_i in exemplars.exemplars_neg[cat_type][c]
-                    else "."
-                    for c in exemplars.exemplars_pos[cat_type]
-                ]
-                labels.append(label_row)
-
-            writer.add_embedding(
-                fvecs_to_label,
-                metadata=labels,
-                metadata_header=labels_header,
-                tag=f"Exemplar vectors ({cat_type})"
+            # Plot for each concept
+            umap.plot.output_file(
+                os.path.join(cfg.paths.outputs_dir, f"{conc_type}_embs.html")
             )
-            writer.close()
+
+            plots = []
+            for c in tqdm.tqdm(pos_exs_inds, total=len(pos_exs_inds), desc=f"{conc_type}_embs"):
+                concept_name = agent.lt_mem.lexicon.d2s[(c, conc_type)][0][0]
+                concept_name = concept_name.replace("/", "_")
+
+                labels = [
+                    "p" if fv_i in pos_exs_inds[c]
+                        else "n" if fv_i in neg_exs_inds[c] else "."
+                    for fv_i in range(len(vectors))
+                ]
+                hover_data = pd.DataFrame(
+                    {
+                        "index": np.arange(len(vectors)),
+                        "label": labels
+                    }
+                )
+
+                # Plot data and save
+                p = umap.plot.interactive(
+                    mapper, labels=labels, hover_data=hover_data,
+                    color_key={ "p": "#3333FF", "n": "#CC0000", ".": "#A0A0A0" },
+                    point_size=5
+                )
+                p.add_layout(Title(text=concept_name, align="center"), "above")
+                plots.append(p)
+
+            save(column(*plots))
+
+if __name__ == "__main__":
+    main()

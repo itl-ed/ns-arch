@@ -131,11 +131,16 @@ def detr_dec_outputs(
     topk_coords_logits = topk_coords_logits.detach()
     reference_points = topk_coords_logits.sigmoid()
 
-    # Add proposals from provided bboxes
-    reference_points = torch.cat([bboxes[None], reference_points], dim=1)
-    reference_points_logits = torch.cat([
-        torch.special.logit(bboxes[None], eps=1e-6), topk_coords_logits
-    ], dim=1)
+    if bboxes is not None:
+        # Add proposals from provided bboxes
+        reference_points = torch.cat([bboxes[None], reference_points], dim=1)
+        reference_points_logits = torch.cat([
+            torch.special.logit(bboxes[None], eps=1e-6), topk_coords_logits
+        ], dim=1)
+    else:
+        # No boxes to add, vanilla ensemble prediction
+        reference_points_logits = topk_coords_logits
+
     pos_trans_out = detr_model.model.get_proposal_pos_embed(reference_points_logits)
     pos_trans_out = detr_model.model.pos_trans_norm(
         detr_model.model.pos_trans(pos_trans_out)
@@ -170,5 +175,6 @@ def detr_dec_outputs(
         reference_points = new_reference_points.detach()
 
     # Return parts of final decoder layer output corresponding to the provided
-    # bboxes
-    return hidden_states[:,:bboxes.shape[0]]
+    # bboxes, and last layer's reference point output (needed for final bounding
+    # box computation in ensemble prediction)
+    return hidden_states, reference_points

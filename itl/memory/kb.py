@@ -123,11 +123,11 @@ class KnowledgeBase:
         # below the threshold because they're mentioned in KB
         preds_in_kb = set(self.entries_by_pred)
         preds_in_kb = {
-            cat_type: {
-                int(name.strip(f"{cat_type}_")) for name in preds_in_kb
-                if name.startswith(cat_type)
+            conc_type: {
+                int(name.strip(f"{conc_type}_")) for name in preds_in_kb
+                if name.startswith(conc_type)
             }
-            for cat_type in ["cls", "att", "rel"]
+            for conc_type in ["cls", "att", "rel"]
         }
 
         return inference_prog, preds_in_kb

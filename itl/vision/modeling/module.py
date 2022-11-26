@@ -273,6 +273,62 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 state_dict_filtered[k] = v
         checkpoint["state_dict"] = state_dict_filtered
 
+    def forward(self, image, bboxes=None):
+        """
+        Purposed as the most general endpoint of the vision module for inference,
+        which takes an image as input and returns 'raw output' consisting of the
+        following types of data:
+            1) a class-centric embedding (projection from DETR decoder output)
+            2) an attribute-centric embedding (projection from DETR decoder output)
+            3) a bounding box (from DETR decoder)
+        for each object (candidate) detected.
+        
+        Can be optionally provided with a list of additional bounding boxes as
+        references to regions which are guaranteed to enclose an object each --
+        so that their concept identities can be classified.
+        """
+        # Corner- to center-format, then absolute to relative bbox dimensions
+        bboxes = box_convert(bboxes, "xywh", "cxcywh")
+        bboxes = torch.stack([
+            bboxes[:,0] / image.width, bboxes[:,1] / image.height,
+            bboxes[:,2] / image.width, bboxes[:,3] / image.height,
+        ], dim=-1)
+
+        encoder_outputs_all = detr_enc_outputs(
+            self.detr, image, self.feature_extractor
+        )
+        encoder_outputs, valid_ratios, spatial_shapes, \
+            level_start_index, mask_flatten = encoder_outputs_all
+
+        decoder_outputs, last_reference_points = detr_dec_outputs(
+            self.detr, encoder_outputs, bboxes,
+            valid_ratios, spatial_shapes, level_start_index, mask_flatten
+        )
+
+        # Class/attribute-centric feature vectors
+        cls_embeddings = self.fs_embed_cls(decoder_outputs[0])
+        att_embeddings = self.fs_embed_att(
+            torch.cat([decoder_outputs[0], cls_embeddings], dim=-1)
+        )
+
+        # Obtain final bbox estimates
+        dec_last_layer_ind = self.detr.config.decoder_layers
+        last_bbox_embed = self.detr.bbox_embed[dec_last_layer_ind-1]
+        delta_bbox = last_bbox_embed(decoder_outputs[0])
+
+        final_bboxes = delta_bbox + torch.special.logit(last_reference_points[0])
+        final_bboxes = final_bboxes.sigmoid()
+        final_bboxes = torch.cat([bboxes, final_bboxes[bboxes.shape[0]:]])
+
+        # Relative to absolute bbox dimensions, then center- to corner-format
+        final_bboxes = torch.stack([
+            final_bboxes[:,0] * image.width, final_bboxes[:,1] * image.height,
+            final_bboxes[:,2] * image.width, final_bboxes[:,3] * image.height,
+        ], dim=-1)
+        final_bboxes = box_convert(final_bboxes, "cxcywh", "xywh")
+
+        return cls_embeddings, att_embeddings, final_bboxes
+
     def _process_batch(self, batch):
         """
         Shared subroutine for processing batch to obtain loss & performance metric
@@ -364,9 +420,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         encoder_outputs, valid_ratios, spatial_shapes, \
             level_start_index, mask_flatten = encoder_outputs_all
 
-        decoder_outputs = detr_dec_outputs(
+        decoder_outputs, _ = detr_dec_outputs(
             self.detr, encoder_outputs, bboxes,
             valid_ratios, spatial_shapes, level_start_index, mask_flatten
         )
 
-        return encoder_outputs_all, decoder_outputs
+        return encoder_outputs_all, decoder_outputs[:,:bboxes.shape[0]]

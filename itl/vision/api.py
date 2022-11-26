@@ -6,6 +6,7 @@ released model of OWL-ViT.
 """
 import os
 import json
+import logging
 from PIL import Image
 from itertools import product
 
@@ -23,6 +24,8 @@ from .data import FewShotSGGDataModule
 from .modeling import FewShotSceneGraphGenerator
 from .utils.visualize import visualize_sg_predictions
 
+logger = logging.getLogger(__name__)
+
 
 WB_PREFIX = "wandb://"
 
@@ -38,6 +41,8 @@ class VisionModule:
         self.f_vecs = None
         self.last_input = None
         self.last_output = None
+
+        self.fs_model_path = None
 
         # Inventory of distinct visual concepts that the module (and thus the agent
         # equipped with this module) is aware of, one per concept category. Right now
@@ -56,25 +61,35 @@ class VisionModule:
 
         # If pre-trained vision model is specified, download and load weights
         if "fs_model" in self.cfg.vision.model:
-            # Path to trained weights few-shot prediciton head, provided as either
-            # W&B run id or local path to checkpoint file
-            if self.cfg.vision.model.fs_model.startswith(WB_PREFIX):
-                wb_entity = os.environ.get("WANDB_ENTITY")
-                wb_project = os.environ.get("WANDB_PROJECT")
-                wb_run_id = self.cfg.vision.model.fs_model[len(WB_PREFIX):]
+            self.fs_model_path = self.cfg.vision.model.fs_model
+            self.load_weights()
 
-                local_ckpt_path = WandbLogger.download_artifact(
-                    artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
-                    save_dir=os.path.join(
-                        self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
-                    )
+    def load_weights(self):
+        """ Load model parameter weights from specified source (self.fs_model) """
+        # Path to trained weights few-shot prediciton head is provided as either
+        # W&B run id or local path to checkpoint file
+        assert self.fs_model_path is not None
+
+        if self.fs_model_path.startswith(WB_PREFIX):
+            wb_entity = os.environ.get("WANDB_ENTITY")
+            wb_project = os.environ.get("WANDB_PROJECT")
+            wb_run_id = self.fs_model_path[len(WB_PREFIX):]
+
+            local_ckpt_path = WandbLogger.download_artifact(
+                artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
+                save_dir=os.path.join(
+                    self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
                 )
-                local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
-            else:
-                local_ckpt_path = self.cfg.vision.model.fs_model
+            )
+            local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
+        else:
+            local_ckpt_path = self.fs_model_path
 
-            ckpt = torch.load(local_ckpt_path)
-            self.model.load_state_dict(ckpt["state_dict"], strict=False)
+        logger.info(F"Loading few-shot component weights from {self.fs_model_path}")
+
+        ckpt = torch.load(local_ckpt_path)
+        self.model.load_state_dict(ckpt["state_dict"], strict=False)
+
 
     def predict(
         self, image, label_texts=None, label_exemplars=None,
@@ -112,12 +127,12 @@ class VisionModule:
                 self.last_output = (results, output, label_concepts)
 
                 label_concepts_per_catType = {
-                    cat_type: {
+                    conc_type: {
                         conc_ind: i
-                        for i, (conc_ind, this_cat_type) in enumerate(label_concepts)
-                        if this_cat_type==cat_type
+                        for i, (conc_ind, this_conc_type) in enumerate(label_concepts)
+                        if this_conc_type==conc_type
                     }
-                    for cat_type in ["cls", "att"]
+                    for conc_type in ["cls", "att"]
                 }
 
                 patch_boxes = results[0]["boxes"]
@@ -206,12 +221,12 @@ class VisionModule:
                 results, output, label_concepts = self.last_output
 
                 label_concepts_per_catType = {
-                    cat_type: {
+                    conc_type: {
                         conc_ind: i
-                        for i, (conc_ind, this_cat_type) in enumerate(label_concepts)
-                        if this_cat_type==cat_type
+                        for i, (conc_ind, this_conc_type) in enumerate(label_concepts)
+                        if this_conc_type==conc_type
                     }
-                    for cat_type in ["cls", "att"]
+                    for conc_type in ["cls", "att"]
                 }
 
                 if bboxes is not None:
@@ -243,19 +258,19 @@ class VisionModule:
                         patch_compatibilities = []
 
                         for d_lit in dscr:
-                            cat_type, conc_ind = d_lit.name.split("_")
+                            conc_type, conc_ind = d_lit.name.split("_")
                             conc_ind = int(conc_ind)
 
-                            if cat_type == "cls" or cat_type == "att":
+                            if conc_type == "cls" or conc_type == "att":
                                 # For now we will only consider cases where ensemble prediction
                                 # has been made with all known concepts as query labels already,
                                 # and additional concept tests are not needed. This may have to
                                 # be relaxed later for cases when inventories of visual concepts
                                 # grow too large and some sort of restriction of query label space
                                 # has to happen (i.e. don't consider parts, rare concepts, etc.).
-                                assert conc_ind in label_concepts_per_catType[cat_type]
+                                assert conc_ind in label_concepts_per_catType[conc_type]
 
-                                query_ind = label_concepts_per_catType[cat_type][conc_ind]
+                                query_ind = label_concepts_per_catType[conc_type][conc_ind]
 
                                 conc_pos_logits = output.logits[0,:,::2][:,query_ind]
                                 conc_neg_logits = output.logits[0,:,1::2][:,query_ind]
@@ -264,7 +279,7 @@ class VisionModule:
                                 comp_scores = F.softmax(comp_scores, dim=0)[0]
                             else:
                                 # Cannot process relations other than "have" for now...
-                                assert cat_type == "rel" and conc_ind == 0
+                                assert conc_type == "rel" and conc_ind == 0
 
                                 # Cannot process search specs with more than one variables for
                                 # now (not planning to address that for a good while!)
@@ -425,11 +440,11 @@ class VisionModule:
         if visualize:
             if lexicon is not None:
                 lexicon = {
-                    cat_type: {
-                        ci: lexicon.d2s[(ci, cat_type)][0][0].split("/")[0]
-                        for ci in range(getattr(self.inventories, cat_type))
+                    conc_type: {
+                        ci: lexicon.d2s[(ci, conc_type)][0][0].split("/")[0]
+                        for ci in range(getattr(self.inventories, conc_type))
                     }
-                    for cat_type in ["cls", "att"]
+                    for conc_type in ["cls", "att"]
                 }
             self.summ = visualize_sg_predictions(self.last_input, self.scene, lexicon)
 
@@ -568,7 +583,7 @@ class VisionModule:
 
         return results
     
-    def add_concept(self, cat_type):
+    def add_concept(self, conc_type):
         """
         Register a novel visual concept to the model, expanding the concept inventory of
         corresponding category type (class/attribute/relation). Note that visual concepts
@@ -579,8 +594,8 @@ class VisionModule:
 
         Returns the index of the newly added concept.
         """
-        C = getattr(self.inventories, cat_type)
-        setattr(self.inventories, cat_type, C+1)
+        C = getattr(self.inventories, conc_type)
+        setattr(self.inventories, conc_type, C+1)
         return C
 
 

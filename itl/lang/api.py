@@ -11,12 +11,14 @@ from .dialogue import DialogueManager
 
 class LanguageModule:
 
-    def __init__(self, grammar_image_path, ace_binary_path):
+    def __init__(self, cfg):
         """
         Args:
             opts: argparse.Namespace, from parse_argument()
         """
-        self.semantic = SemanticParser(grammar_image_path, ace_binary_path)
+        self.semantic = SemanticParser(
+            cfg.lang.paths.grammar_image, cfg.lang.paths.ace_binary
+        )
         self.dialogue = DialogueManager()
 
         self.vis_raw = None

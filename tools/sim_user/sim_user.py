@@ -11,17 +11,17 @@ from collections import defaultdict
 
 import inflect
 import numpy as np
-from detectron2.structures import BoxMode
 
 
 class SimulatedTeacher:
     
-    def __init__(self, target_concepts, strat_feedback, test_set_size, seed):
-        with open("datasets/tabletop/annotations.json") as data_file:
+    def __init__(self, cfg, target_concepts):
+        tabletop_data_dir = os.path.join(cfg.paths.data_dir, "tabletop")
+        with open(os.path.join(tabletop_data_dir, "annotations.json")) as data_file:
             self.data_annotation = json.load(data_file)
-        with open("datasets/tabletop/metadata.json") as md_file:
+        with open(os.path.join(tabletop_data_dir, "metadata.json")) as md_file:
             self.metadata = json.load(md_file)
-        with open("tools/sim_user/tabletop_domain.json") as dom_file:
+        with open(os.path.join(cfg.paths.root_dir, "tools/sim_user/tabletop_domain.json")) as dom_file:
             self.domain_knowledge = {
                 concept_string.split(".")[0].replace("_", " "): data
                 for concept_string, data in json.load(dom_file).items()
@@ -31,70 +31,49 @@ class SimulatedTeacher:
             img["image_id"]: img for img in self.data_annotation
         }
 
-        self.image_dir_prefix = "datasets/tabletop/images"
+        self.image_dir_prefix = os.path.join(tabletop_data_dir, "images")
 
         # Target concepts to teach to agent; naturally controls ITL difficulty
         self.target_concepts = target_concepts
 
-        # Indexing instances in images by concept in advance
-        self.exemplars_cls = defaultdict(dict)
-        self.exemplars_att = defaultdict(dict)
-        self.exemplars_rel = defaultdict(dict)
-
-        for img in self.data_annotation:
-            indexing_per_img = {
-                "cls": defaultdict(list),
-                "att": defaultdict(list),
-                "rel": defaultdict(list)
+        # Concept instances, re-indexed by string name
+        self.exemplars_cls = {
+            self.metadata["classes_names"][int(ci)]: {
+                int(k): v for k, v in insts.items()
             }
-
-            for oi, obj in enumerate(img["annotations"]):
-                # Index by class
-                for c in obj["classes"]:
-                    indexing_per_img["cls"][c].append(oi)
-                
-                # Index by attribute
-                for a in obj["attributes"]:
-                    indexing_per_img["att"][a].append(oi)
-
-                # Index by relation
-                for rels in obj["relations"]:
-                    for r in rels["relation"]:
-                        indexing_per_img["rel"][r].append((oi, rels["object_id"]))
-
-            # Collate by img and append
-            for c, objs in indexing_per_img["cls"].items():
-                c_name = self.metadata["classes"][c]
-                self.exemplars_cls[c_name][img["image_id"]] = objs
-            for a, objs in indexing_per_img["att"].items():
-                a_name = self.metadata["attributes"][a]
-                self.exemplars_att[a_name][img["image_id"]] = objs
-            for r, obj_pairs in indexing_per_img["rel"].items():
-                r_name = self.metadata["relations"][r]
-                self.exemplars_rel[r_name][img["image_id"]] = obj_pairs
-        
-        self.exemplars_cls = dict(self.exemplars_cls)
-        self.exemplars_att = dict(self.exemplars_att)
-        self.exemplars_rel = dict(self.exemplars_rel)
+            for ci, insts in self.metadata["classes_instances"].items()
+        }
+        self.exemplars_att = {
+            self.metadata["attributes_names"][int(ai)]: {
+                int(k): v for k, v in insts.items()
+            }
+            for ai, insts in self.metadata["attributes_instances"].items()
+        }
+        self.exemplars_rel = {
+            self.metadata["relations_names"][int(ci)]: {
+                int(k): v for k, v in insts.items()
+            }
+            for ci, insts in self.metadata["relations_instances"].items()
+        }
 
         # Set seed
-        random.seed(seed)
+        random.seed(cfg.seed)
 
         # Split exemplars for training and testing per concept
         self.training_exemplars = {}; self.test_exemplars = {}
-        for cat_type, concepts in target_concepts.items():
-            if cat_type not in self.training_exemplars:
-                self.training_exemplars[cat_type] = {}
-            if cat_type not in self.test_exemplars:
-                self.test_exemplars[cat_type] = {}
+        for conc_type, concepts in target_concepts.items():
+            if conc_type not in self.training_exemplars:
+                self.training_exemplars[conc_type] = {}
+            if conc_type not in self.test_exemplars:
+                self.test_exemplars[conc_type] = {}
 
             for conc in concepts:
                 all_exs = copy.deepcopy(list(
-                    getattr(self, f"exemplars_{cat_type}")[conc].items()
+                    getattr(self, f"exemplars_{conc_type}")[conc].items()
                 ))
                 random.shuffle(all_exs)
-                self.training_exemplars[cat_type][conc] = all_exs[:-test_set_size]
-                self.test_exemplars[cat_type][conc] = all_exs[-test_set_size:]
+                self.training_exemplars[conc_type][conc] = all_exs[:-cfg.exp1.test_set_size]
+                self.test_exemplars[conc_type][conc] = all_exs[-cfg.exp1.test_set_size:]
 
         # History of ITL episode records
         self.episode_records = []
@@ -105,7 +84,7 @@ class SimulatedTeacher:
         # Teacher's strategy on how to give feedback upon student's wrong answer
         # (provided the student has taken initiative for extended ITL interactions
         # by asking further questions after correct answer feedback)
-        self.strat_feedback = strat_feedback
+        self.strat_feedback = cfg.exp1.strat_feedback
 
     def initiate_episode(self):
         """

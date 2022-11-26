@@ -131,6 +131,7 @@ def _compute_fs_search(
     indiv_fused_spec_embeddings = torch.cat(
         [indiv_cls_embeddings, indiv_att_embeddings], dim=-1
     )
+    indiv_fused_spec_embeddings = model.fs_spec_fuse(indiv_fused_spec_embeddings)
 
     # Setup Hungarian matcher and loss computation fn
     matcher = DeformableDetrHungarianMatcher(
@@ -193,14 +194,14 @@ def _compute_fs_search(
         # Compute and weight loss values, then aggregate to total loss
         loss_dict = loss_fn(search_outputs_for_loss, search_targets_for_loss)
         weight_dict = {
-            "loss_ce": 1,
+            "loss_ce": 300 / search_scores.shape[1],
             "loss_bbox": model.detr.config.bbox_loss_coefficient,
             "loss_giou": model.detr.config.giou_loss_coefficient
         }
         loss += sum(
             loss_dict[k] * weight_dict[k]
             for k in loss_dict.keys() if k in weight_dict
-        ) * 300 / search_scores.shape[1]
+        )
 
         # For computing metrics, it would be pointlessly wasteful to consider
         # every single pixel; let's run NMS and choose, say, top 30?

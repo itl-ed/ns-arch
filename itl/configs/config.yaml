@@ -3,8 +3,9 @@ defaults:
     - lang: base
 
 paths:
-    data_dir: "${hydra:runtime.cwd}/datasets"
-    assets_dir: "${hydra:runtime.cwd}/assets"
+    root_dir: "${hydra:runtime.cwd}"
+    data_dir: "${paths.root_dir}/datasets"
+    assets_dir: "${paths.root_dir}/assets"
     outputs_dir: "${hydra:runtime.output_dir}"
 
 agent:
