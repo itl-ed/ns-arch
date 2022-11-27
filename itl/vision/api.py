@@ -491,7 +491,8 @@ class VisionModule:
                 bboxes[:,2] / image_raw.width, bboxes[:,3] / image_raw.height,
             ], dim=-1)
 
-            _, fvecs = self.model.fvecs_from_image_and_bboxes(image_raw, bboxes).cpu()[0]
+            _, fvecs = self.model.fvecs_from_image_and_bboxes(image_raw, bboxes)
+            fvecs = fvecs.cpu()[0]
             fvecs = {oid: fv for oid, fv in zip(img["annotations"], fvecs)}
             torch.save(fvecs, vec_path)
 
@@ -518,6 +519,7 @@ class VisionModule:
         trainer = pl.Trainer(
             accelerator="auto",
             max_steps=self.cfg.vision.optim.max_steps,
+            gradient_clip_val=1.0,
             check_val_every_n_epoch=None,       # Iteration-based val
             log_every_n_steps=self.cfg.vision.optim.log_interval,
             val_check_interval=self.cfg.vision.optim.val_interval,

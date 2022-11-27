@@ -4,7 +4,7 @@ defaults:
 task: "fs_search"
 
 data:
-    name: ???
+    name: "visual_genome"
     path: "${paths.data_dir}/${vision.data.name}"
     num_images: 108077
     use_percentage: 0.2

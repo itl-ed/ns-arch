@@ -135,6 +135,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         avg_losses = []
         for outputs_per_dataloader in outputs:
+            if len(outputs_per_dataloader) == 0:
+                continue
+
             conc_type = outputs_per_dataloader[0][2]
             if isinstance(conc_type, tuple):
                 conc_type = "+".join(conc_type)
@@ -174,6 +177,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             outputs = [outputs]
 
         for outputs_per_dataloader in outputs:
+            if len(outputs_per_dataloader) == 0:
+                continue
+
             conc_type = outputs_per_dataloader[0][3]
             if isinstance(conc_type, tuple):
                 conc_type = "+".join(conc_type)
@@ -381,15 +387,16 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             # Need to compute from images in batch
 
             # Process each image with DETR - one-by-one
-            for img, bbs, bbis in zip(images, bboxes, bb_inds):
+            for img, bbs, bbis in zip(images, bboxes, zip(*bb_inds)):
+                bbis = torch.stack(bbis)
                 enc_out, dec_out = self.fvecs_from_image_and_bboxes(img, bbs)
-                detr_dec_outs.append(dec_out[:,bbis])
+                detr_dec_outs.append(dec_out[0,bbis])
 
                 if self.cfg.vision.task == "fs_search":
                     # Few-shot search task needs encoder outputs (per-pixel vectors)
                     detr_enc_outs.append(enc_out)
 
-            detr_dec_outs = torch.cat(detr_dec_outs)
+            detr_dec_outs = torch.stack(detr_dec_outs, dim=0)
 
         # Search targets in few-shot search mode
         if self.cfg.vision.task == "fs_search":

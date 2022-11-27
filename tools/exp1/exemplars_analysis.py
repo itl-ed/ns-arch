@@ -34,7 +34,7 @@ def main(cfg):
     agent = ITLAgent(cfg)
     exemplars = agent.lt_mem.exemplars
 
-    for conc_type in ["att", "rel"]:
+    for conc_type in ["cls", "att", "rel"]:
         if conc_type == "cls" or conc_type == "att":
             vectors = exemplars.storage_vec[conc_type]
             pos_exs_inds = exemplars.exemplars_pos[conc_type]

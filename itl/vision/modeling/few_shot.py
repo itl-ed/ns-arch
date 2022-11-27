@@ -11,7 +11,8 @@ import torch.nn.functional as F
 from torchvision.ops import nms
 from transformers.models.deformable_detr.modeling_deformable_detr import (
     DeformableDetrHungarianMatcher,
-    DeformableDetrLoss
+    DeformableDetrLoss,
+    sigmoid_focal_loss
 )
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
@@ -139,10 +140,12 @@ def _compute_fs_search(
         bbox_cost=model.detr.config.bbox_cost,
         giou_cost=model.detr.config.giou_cost,
     )
-    loss_fn = DeformableDetrLoss(
+    loss_fn = _DeformableDetrLossWithGamma(
         matcher=matcher, num_classes=1,     # Search as binary classification
-        focal_alpha=model.detr.config.focal_alpha, losses=["labels", "boxes"]
-    ).to(model.device)
+        focal_alpha=0.75, losses=["labels", "boxes"]
+    )
+    loss_fn.focal_gamma = 2
+    loss_fn = loss_fn.to(model.device)
 
     # Setup metric computation module
     metric_logs = MeanAveragePrecision(box_format="cxcywh")
@@ -158,20 +161,19 @@ def _compute_fs_search(
         # object queries and proposal bboxes from encoder outputs (to be consumed for
         # conditioned detection)
         gen_proposals_fn = model.detr.model.gen_encoder_output_proposals
-        object_query_embeddings, output_proposals = gen_proposals_fn(
+        _, output_proposals = gen_proposals_fn(
             enc_emb, ~mask_flatten, spatial_shapes
         )
 
         # Concat object query embeddings + search spec embeddings
         embs_concat = torch.cat([
-            object_query_embeddings,
-            spec_emb[None, None].expand_as(object_query_embeddings)
+            enc_emb, spec_emb[None, None].expand_as(enc_emb)
         ], dim=-1)
 
         # Obtain 'search compatibility score' (as dot product btw. object queries and
         # spec embeddings) and bbox proposal for each pixel
         search_scores = torch.einsum(
-            "bqd,d->bq", object_query_embeddings, model.fs_search_match(spec_emb)
+            "bqd,d->bq", enc_emb, model.fs_search_match(spec_emb)
         )
         search_coord_deltas = model.fs_search_bbox(embs_concat)
         search_coord_logits = search_coord_deltas + output_proposals
@@ -194,7 +196,7 @@ def _compute_fs_search(
         # Compute and weight loss values, then aggregate to total loss
         loss_dict = loss_fn(search_outputs_for_loss, search_targets_for_loss)
         weight_dict = {
-            "loss_ce": 300 / search_scores.shape[1],
+            "loss_ce": 1,
             "loss_bbox": model.detr.config.bbox_loss_coefficient,
             "loss_giou": model.detr.config.giou_loss_coefficient
         }
@@ -236,3 +238,40 @@ def _compute_fs_search(
     }
 
     return loss, metrics, indiv_fused_spec_embeddings
+
+
+class _DeformableDetrLossWithGamma(DeformableDetrLoss):
+    """
+    DeformableDetrLoss extended, to modify loss_label() method to enable control
+    of gamma parameter for focal loss computation as well
+    """
+    def loss_labels(self, outputs, targets, indices, num_boxes):
+        if "logits" not in outputs:
+            raise KeyError("No logits were found in the outputs")
+        source_logits = outputs["logits"]
+
+        idx = self._get_source_permutation_idx(indices)
+        target_classes_o = torch.cat([t["class_labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes = torch.full(
+            source_logits.shape[:2], self.num_classes, dtype=torch.int64, device=source_logits.device
+        )
+        target_classes[idx] = target_classes_o
+
+        target_classes_onehot = torch.zeros(
+            [source_logits.shape[0], source_logits.shape[1], source_logits.shape[2] + 1],
+            dtype=source_logits.dtype,
+            layout=source_logits.layout,
+            device=source_logits.device,
+        )
+        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+
+        target_classes_onehot = target_classes_onehot[:, :, :-1]
+        loss_ce = (
+            sigmoid_focal_loss(
+                source_logits, target_classes_onehot, num_boxes,
+                alpha=self.focal_alpha, gamma=self.focal_gamma
+            ) * source_logits.shape[1]
+        )
+        losses = {"loss_ce": loss_ce}
+
+        return losses
