@@ -13,8 +13,11 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import tqdm
+import hydra
+import torch
 import numpy as np
-from detectron2.structures import BoxMode
+from torchvision.ops import box_convert
+from omegaconf import OmegaConf
 
 from itl import ITLAgent
 from tools.sim_user import SimulatedTeacher
@@ -22,8 +25,11 @@ from tools.sim_user import SimulatedTeacher
 
 TAB = "\t"
 
-if __name__ == "__main__":
-    if opts.exp1_difficulty == "base":
+@hydra.main(config_path="../../itl/configs", config_name="config")
+def main(cfg):
+    print(OmegaConf.to_yaml(cfg))
+
+    if cfg.exp1.difficulty == "nonFine":
         target_concepts = {
             "cls": [
                 "banana.n.01",
@@ -31,7 +37,7 @@ if __name__ == "__main__":
                 "brandy_glass.n.*"
             ]
         }
-    elif opts.exp1_difficulty == "easy":
+    elif cfg.exp1.difficulty == "fineEasy":
         target_concepts = {
             "cls": [
                 "champagne_coupe.n.*",
@@ -43,25 +49,20 @@ if __name__ == "__main__":
         raise NotImplementedError
 
     # Number of episodes = Episode per concept * Number of concepts
-    num_eps = opts.exp1_num_episodes * len(target_concepts["cls"])
+    num_eps = cfg.exp1.num_episodes * len(target_concepts["cls"])
 
     # Set up agent & user
-    agent = ITLAgent(opts)
-    user = SimulatedTeacher(
-        target_concepts=target_concepts,
-        strat_feedback=opts.exp1_strat_feedback,
-        test_set_size=opts.exp1_test_set_size,
-        seed=opts.exp1_random_seed
-    )
+    agent = ITLAgent(cfg)
+    user = SimulatedTeacher(cfg, target_concepts)
 
     # Turn off UI pop up on predict
     agent.vis_ui_on = False
 
     # Experiment name suffix
-    tail = f"{opts.exp1_difficulty}_" \
-        f"{opts.exp1_strat_feedback}_" \
-        f"{opts.strat_mismatch}_" \
-        f"{opts.exp1_random_seed}"
+    tail = f"{cfg.exp1.difficulty}_" \
+        f"{cfg.exp1.strat_feedback}_" \
+        f"{cfg.agent.strat_generic}_" \
+        f"{cfg.seed}"
 
     for i in tqdm.tqdm(range(num_eps), total=num_eps):
         print("")
@@ -83,7 +84,7 @@ if __name__ == "__main__":
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 
-    res_dir = os.path.join(opts.output_dir_path, "exp1_res")
+    res_dir = os.path.join(cfg.paths.outputs_dir, "exp1_res")
     os.makedirs(res_dir, exist_ok=True)
 
     with open(os.path.join(res_dir, f"curve_{tail}.csv"), "w") as out_csv:
@@ -116,48 +117,46 @@ if __name__ == "__main__":
             img = user.data_annotation[img]
             img_f = img["file_name"]
 
-            instance = instances[0]
-            instance_bbox = np.array(img["annotations"][instance]["bbox"])
-            instance_bbox = BoxMode.convert(
-                instance_bbox[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
-            )[0]
+            instance = str(instances[0])
+            instance_bbox = torch.tensor(img["annotations"][instance]["bbox"])
+            instance_bbox = box_convert(instance_bbox[None], "xywh", "xyxy")[0].numpy()
 
-            # Temporary code for preparing 'cheat sheet', for checking whether logical
-            # reasoners perform better if the agent's poor vision module's performance 
-            # is replaced by oracle ground truths about object parts and their properties
-            instance_parts = [
-                r for r in img["annotations"][instance]["relations"]
-                if "have.v.01" in [user.metadata["relations"][ri] for ri in r["relation"]]
-            ]
-            instance_parts = [
-                img["annotations"][r["object_id"]] for r in instance_parts
-            ]
-            instance_parts = [
-                (obj, [user.metadata["classes"][ci] for ci in obj["classes"]])
-                for obj in instance_parts
-            ]
-            cheat_sheet = [
-                (
-                    BoxMode.convert(
-                        np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
-                    )[0],
-                    classes[0].split(".")[0],
-                    [
-                        user.metadata["attributes"][ai].split(".")[0] + \
-                            "/" + classes[0].split(".")[0]
-                        for ai in obj["attributes"]
-                    ]
-                )
-                for obj, classes in instance_parts
-                if "bowl.n.01" in classes or "stem.n.03" in classes
-            ]
+            # # Temporary code for preparing 'cheat sheet', for checking whether logical
+            # # reasoners perform better if the agent's poor vision module's performance 
+            # # is replaced by oracle ground truths about object parts and their properties
+            # instance_parts = [
+            #     r for r in img["annotations"][instance]["relations"]
+            #     if "have.v.01" in [user.metadata["relations"][ri] for ri in r["relation"]]
+            # ]
+            # instance_parts = [
+            #     img["annotations"][r["object_id"]] for r in instance_parts
+            # ]
+            # instance_parts = [
+            #     (obj, [user.metadata["classes"][ci] for ci in obj["classes"]])
+            #     for obj in instance_parts
+            # ]
+            # cheat_sheet = [
+            #     (
+            #         BoxMode.convert(
+            #             np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
+            #         )[0],
+            #         classes[0].split(".")[0],
+            #         [
+            #             user.metadata["attributes"][ai].split(".")[0] + \
+            #                 "/" + classes[0].split(".")[0]
+            #             for ai in obj["attributes"]
+            #         ]
+            #     )
+            #     for obj, classes in instance_parts
+            #     if "bowl.n.01" in classes or "stem.n.03" in classes
+            # ]
 
             # Binary concept testing mode
             agent_answers = agent.test_binary(
                 os.path.join(user.image_dir_prefix, img_f),
                 instance_bbox,
                 user.target_concepts["cls"],
-                cheat_sheet
+                # cheat_sheet
             )
             for conc_test in user.test_exemplars["cls"]:
                 if agent_answers[conc_test]:
@@ -194,7 +193,7 @@ if __name__ == "__main__":
     concepts_ordered = list(exam_result)
 
     with open(os.path.join(res_dir, f"confMat_{tail}.csv"), "w") as out_csv:
-        out_csv.write(str(opts.exp1_test_set_size)+"\n")
+        out_csv.write(str(cfg.exp1.test_set_size)+"\n")
         out_csv.write(",".join(concepts_ordered)+"\n")          # Binary mode
         # out_csv.write(",".join(concepts_ordered+["NA"])+"\n")   # Multiple choice mode
         for i in range(C):
@@ -202,8 +201,12 @@ if __name__ == "__main__":
                 conc_i = concepts_ordered[i]
                 conc_j = concepts_ordered[j]
 
-                data[i,j] = exam_result[conc_i][conc_j] / opts.exp1_test_set_size
+                data[i,j] = exam_result[conc_i][conc_j] / cfg.exp1.test_set_size
                 # When multiple choice mode
                 # data[i,-1] = exam_result[conc_i]["NA"] / opts.exp1_test_set_size
 
             out_csv.write(",".join([str(d) for d in data[i]])+"\n")
+
+
+if __name__ == "__main__":
+    main()

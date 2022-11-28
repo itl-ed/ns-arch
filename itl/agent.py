@@ -5,11 +5,12 @@ import os
 import math
 import pickle
 import logging
-import readline
-import rlcompleter
+# import readline
+# import rlcompleter
 
 import torch
 import numpy as np
+from torchvision.ops import box_convert
 from pytorch_lightning.loggers import WandbLogger
 
 from .memory import LongTermMemoryModule
@@ -20,7 +21,7 @@ from .practical_reasoning import PracticalReasonerModule
 from .actions import AgentCompositeActions
 from .lpmln import Rule, Literal
 from .lpmln.utils import wrap_args
-from .utils.completer import DatasetImgsCompleter
+# from .utils.completer import DatasetImgsCompleter
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ class ITLAgent:
 
         # First, ensemble prediction
         self.vision.predict(
-            v_input, label_exemplars=self.lt_mem.exemplars,
+            v_input, self.lt_mem.exemplars,
             visualize=False, lexicon=self.lt_mem.lexicon
         )
 
@@ -98,69 +99,68 @@ class ITLAgent:
         bboxes = {
             "o0": {
                 "bbox": target_bbox,
-                "bbox_mode": BoxMode.XYXY_ABS
+                "bbox_mode": "xyxy"
             }
         }
         self.vision.predict(
-            None, label_exemplars=self.lt_mem.exemplars,
-            bboxes=bboxes, visualize=False
+            None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
         )
 
         # Temporary injection of ground-truth object parts and their attributes
-        if cheat_sheet is not None and len(cheat_sheet) > 0:
-        # if False:
-            ent_map = [
-                f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-            ]
-            bboxes = {}
-            for i, (bbox, _, _) in enumerate(cheat_sheet):
-                bboxes[ent_map[i]] = {
-                    "bbox": bbox,
-                    "bbox_mode": BoxMode.XYXY_ABS,
-                    "objectness_scores": None
-                }
-                self.lang.dialogue.referents["env"][ent_map[i]] = {
-                    "bbox": bbox,
-                    "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-                }
-                self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
+        # if cheat_sheet is not None and len(cheat_sheet) > 0:
+        # # if False:
+        #     ent_map = [
+        #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
+        #     ]
+        #     bboxes = {}
+        #     for i, (bbox, _, _) in enumerate(cheat_sheet):
+        #         bboxes[ent_map[i]] = {
+        #             "bbox": bbox,
+        #             "bbox_mode": BoxMode.XYXY_ABS,
+        #             "objectness_scores": None
+        #         }
+        #         self.lang.dialogue.referents["env"][ent_map[i]] = {
+        #             "bbox": bbox,
+        #             "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
+        #         }
+        #         self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
 
-            # Incrementally predict on the designated bbox
-            if len(bboxes) > 0:
-                self.vision.predict(
-                    None, label_exemplars=self.lt_mem.exemplars,
-                    bboxes=bboxes, visualize=False
-                )
+        #     # Incrementally predict on the designated bbox
+        #     if len(bboxes) > 0:
+        #         self.vision.predict(
+        #             None, label_exemplars=self.lt_mem.exemplars,
+        #             bboxes=bboxes, visualize=False
+        #         )
 
-                # Ensure scores are high enough for appropriate classes, attributes
-                # and relations that should be positive, and low enough for ones 
-                # that should be negative
-                HIGH_SCORE = 0.8
-                for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-                    ent_preds = self.vision.scene[ent_map[i]]
-                    whole_preds = self.vision.scene["o0"]
+        #         # Ensure scores are high enough for appropriate classes, attributes
+        #         # and relations that should be positive, and low enough for ones 
+        #         # that should be negative
+        #         HIGH_SCORE = 0.8
+        #         for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
+        #             ent_preds = self.vision.scene[ent_map[i]]
+        #             whole_preds = self.vision.scene["o0"]
 
-                    # Object part class scores
-                    gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-                    for ci, score in enumerate(ent_preds["pred_classes"]):
-                        if ci == gt_c and score < HIGH_SCORE:
-                            ent_preds["pred_classes"][ci] = HIGH_SCORE
-                        if ci != gt_c and score > 1-HIGH_SCORE:
-                            ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
+        #             # Object part class scores
+        #             gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
+        #             for ci, score in enumerate(ent_preds["pred_classes"]):
+        #                 if ci == gt_c and score < HIGH_SCORE:
+        #                     ent_preds["pred_classes"][ci] = HIGH_SCORE
+        #                 if ci != gt_c and score > 1-HIGH_SCORE:
+        #                     ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
 
-                    # Object part attribute scores
-                    gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-                    for ai, score in enumerate(ent_preds["pred_attributes"]):
-                        if ai in gt_as and score < HIGH_SCORE:
-                            ent_preds["pred_attributes"][ai] = HIGH_SCORE
-                        if ai not in gt_as and score > 1-HIGH_SCORE:
-                            ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
+        #             # Object part attribute scores
+        #             gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
+        #             for ai, score in enumerate(ent_preds["pred_attributes"]):
+        #                 if ai in gt_as and score < HIGH_SCORE:
+        #                     ent_preds["pred_attributes"][ai] = HIGH_SCORE
+        #                 if ai not in gt_as and score > 1-HIGH_SCORE:
+        #                     ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
 
-                    # Object part relation score w.r.t. o0
-                    if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-                        whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-                    if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-                        ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
+        #             # Object part relation score w.r.t. o0
+        #             if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
+        #                 whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
+        #             if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
+        #                 ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
 
         # Inform the language module of the visual context
         self.lang.situate(self.vision.last_input, self.vision.scene)
@@ -182,8 +182,7 @@ class ITLAgent:
             search_specs = self.comp_actions._search_specs_from_kb(question, bjt_v)
             if len(search_specs) > 0:
                 self.vision.predict(
-                    None, label_exemplars=self.lt_mem.exemplars,
-                    specs=search_specs, visualize=False
+                    None, self.lt_mem.exemplars, specs=search_specs, visualize=False
                 )
 
             exported_kb = self.lt_mem.kb.export_reasoning_program()
@@ -327,12 +326,14 @@ class ITLAgent:
                     print(f"Sys> Skipped image selection")
                     break
                 elif usr_in == "r":
+                    raise NotImplementedError       # Let's disable this for a while...
                     self.vision.new_input = self.dcompleter.sample()
                 elif usr_in == "exit":
                     print(f"Sys> Terminating...")
                     quit()
                 else:
-                    if usr_in not in self.dcompleter:
+                    # if usr_in not in self.dcompleter:
+                    if not os.path.exists(usr_in):
                         raise ValueError(f"Image file {usr_in} does not exist")
                     self.vision.new_input = usr_in
 
@@ -417,7 +418,7 @@ class ITLAgent:
             if self.vision.new_input is not None or xb_updated:
                 # Ground raw visual perception with scene graph generation module
                 self.vision.predict(
-                    self.vision.last_input, label_exemplars=self.lt_mem.exemplars,
+                    self.vision.last_input, self.lt_mem.exemplars,
                     visualize=vis_ui_on, lexicon=self.lt_mem.lexicon
                 )
                 vis_ui_on = False
@@ -447,73 +448,71 @@ class ITLAgent:
                     bboxes = {
                         ent: {
                             "bbox": self.lang.dialogue.referents["env"][ent]["bbox"],
-                            "bbox_mode": BoxMode.XYXY_ABS,
-                            "objectness_scores": None
+                            "bbox_mode": "xyxy"
                         }
                         for ent in new_ents
                     }
 
                     # Incrementally predict on the designated bbox
                     self.vision.predict(
-                        None, label_exemplars=self.lt_mem.exemplars,
-                        bboxes=bboxes, visualize=False
+                        None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
                     )
-                
-                # Temporary injection of ground-truth object parts and their attributes
-                if cheat_sheet is not None and len(cheat_sheet):
-                # if False:
-                    ent_map = [
-                        f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-                    ]
-                    bboxes = {}
-                    for i, (bbox, _, _) in enumerate(cheat_sheet):
-                        bboxes[ent_map[i]] = {
-                            "bbox": bbox,
-                            "bbox_mode": BoxMode.XYXY_ABS,
-                            "objectness_scores": None
-                        }
-                        self.lang.dialogue.referents["env"][ent_map[i]] = {
-                            "bbox": bbox,
-                            "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-                        }
-                        self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
 
-                    # Incrementally predict on the designated bbox
-                    if len(bboxes) > 0:
-                        self.vision.predict(
-                            None, label_exemplars=self.lt_mem.exemplars,
-                            bboxes=bboxes, visualize=False
-                        )
+                # # Temporary injection of ground-truth object parts and their attributes
+                # if cheat_sheet is not None and len(cheat_sheet):
+                # # if False:
+                #     ent_map = [
+                #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
+                #     ]
+                #     bboxes = {}
+                #     for i, (bbox, _, _) in enumerate(cheat_sheet):
+                #         bboxes[ent_map[i]] = {
+                #             "bbox": bbox,
+                #             "bbox_mode": BoxMode.XYXY_ABS,
+                #             "objectness_scores": None
+                #         }
+                #         self.lang.dialogue.referents["env"][ent_map[i]] = {
+                #             "bbox": bbox,
+                #             "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
+                #         }
+                #         self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
 
-                        # Ensure scores are high enough for appropriate classes, attributes
-                        # and relations that should be positive, and low enough for ones 
-                        # that should be negative
-                        HIGH_SCORE = 0.8
-                        for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-                            ent_preds = self.vision.scene[ent_map[i]]
-                            whole_preds = self.vision.scene["o0"]
+                #     # Incrementally predict on the designated bbox
+                #     if len(bboxes) > 0:
+                #         self.vision.predict(
+                #             None, label_exemplars=self.lt_mem.exemplars,
+                #             bboxes=bboxes, visualize=False
+                #         )
 
-                            # Object part class scores
-                            gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-                            for ci, score in enumerate(ent_preds["pred_classes"]):
-                                if ci == gt_c and score < HIGH_SCORE:
-                                    ent_preds["pred_classes"][ci] = HIGH_SCORE
-                                if ci != gt_c and score > 1-HIGH_SCORE:
-                                    ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
+                #         # Ensure scores are high enough for appropriate classes, attributes
+                #         # and relations that should be positive, and low enough for ones 
+                #         # that should be negative
+                #         HIGH_SCORE = 0.8
+                #         for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
+                #             ent_preds = self.vision.scene[ent_map[i]]
+                #             whole_preds = self.vision.scene["o0"]
 
-                            # Object part attribute scores
-                            gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-                            for ai, score in enumerate(ent_preds["pred_attributes"]):
-                                if ai in gt_as and score < HIGH_SCORE:
-                                    ent_preds["pred_attributes"][ai] = HIGH_SCORE
-                                if ai not in gt_as and score > 1-HIGH_SCORE:
-                                    ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
+                #             # Object part class scores
+                #             gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
+                #             for ci, score in enumerate(ent_preds["pred_classes"]):
+                #                 if ci == gt_c and score < HIGH_SCORE:
+                #                     ent_preds["pred_classes"][ci] = HIGH_SCORE
+                #                 if ci != gt_c and score > 1-HIGH_SCORE:
+                #                     ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
 
-                            # Object part relation score w.r.t. o0
-                            if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-                                whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-                            if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-                                ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
+                #             # Object part attribute scores
+                #             gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
+                #             for ai, score in enumerate(ent_preds["pred_attributes"]):
+                #                 if ai in gt_as and score < HIGH_SCORE:
+                #                     ent_preds["pred_attributes"][ai] = HIGH_SCORE
+                #                 if ai not in gt_as and score > 1-HIGH_SCORE:
+                #                     ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
+
+                #             # Object part relation score w.r.t. o0
+                #             if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
+                #                 whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
+                #             if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
+                #                 ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
 
             ###################################################################
             ##       Sensemaking via synthesis of perception+knowledge       ##
@@ -623,13 +622,17 @@ class ITLAgent:
                             self.symbolic.value_assignment[arg] for arg in rule_head[0][2]
                         ]
                         ex_bboxes = [
-                            self.lang.dialogue.referents["env"][a]["bbox"] for a in args
+                            box_convert(
+                                torch.tensor(self.lang.dialogue.referents["env"][a]["bbox"]),
+                                "xyxy", "xywh"
+                            ).numpy()
+                            for a in args
                         ]
 
                         if conc_type == "cls":
-                            f_vec = self.vision.f_vecs[args[0]]
+                            f_vec = self.vision.f_vecs[args[0]][0]
                         elif conc_type == "att":
-                            f_vec = self.vision.f_vecs[args[0]]
+                            f_vec = self.vision.f_vecs[args[0]][1]
                         else:
                             assert conc_type == "rel"
                             raise NotImplementedError   # Step back for relation prediction...

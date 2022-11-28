@@ -10,7 +10,8 @@ import random
 from collections import defaultdict
 
 import inflect
-import numpy as np
+import torch
+from torchvision.ops import box_convert
 
 
 class SimulatedTeacher:
@@ -112,51 +113,49 @@ class SimulatedTeacher:
         img_cands = self.training_exemplars["cls"][self.current_target_concept]
         sampled_img, instances = img_cands.pop()
         sampled_img = self.data_by_img_id[sampled_img]
-        sampled_instance = random.sample(instances, 1)[0]
+        sampled_instance = str(random.sample(instances, 1)[0])
 
         img_f = sampled_img["file_name"]
-        instance_bbox = np.array(sampled_img["annotations"][sampled_instance]["bbox"])
-        instance_bbox = BoxMode.convert(
-            instance_bbox[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
-        )[0]
+        instance_bbox = torch.tensor(sampled_img["annotations"][sampled_instance]["bbox"])
+        instance_bbox = box_convert(instance_bbox[None], "xywh", "xyxy")[0].numpy()
 
         self.current_focus = (img_f, instance_bbox)
 
-        # Temporary code for preparing 'cheat sheet', for checking whether logical
-        # reasoners perform better if the agent's poor vision module's performance 
-        # is replaced by oracle ground truths about object parts and their properties
-        instance_parts = [
-            r for r in sampled_img["annotations"][sampled_instance]["relations"]
-            if "have.v.01" in [self.metadata["relations"][ri] for ri in r["relation"]]
-        ]
-        instance_parts = [
-            sampled_img["annotations"][r["object_id"]] for r in instance_parts
-        ]
-        instance_parts = [
-            (obj, [self.metadata["classes"][ci] for ci in obj["classes"]])
-            for obj in instance_parts
-        ]
-        cheat_sheet = [
-            (
-                BoxMode.convert(
-                    np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
-                )[0],
-                classes[0].split(".")[0],
-                [
-                    self.metadata["attributes"][ai].split(".")[0] + \
-                        "/" + classes[0].split(".")[0]
-                    for ai in obj["attributes"]
-                ]
-            )
-            for obj, classes in instance_parts
-            if "bowl.n.01" in classes or "stem.n.03" in classes
-        ]
+        # # Temporary code for preparing 'cheat sheet', for checking whether logical
+        # # reasoners perform better if the agent's poor vision module's performance 
+        # # is replaced by oracle ground truths about object parts and their properties
+        # instance_parts = [
+        #     r for r in sampled_img["annotations"][sampled_instance]["relations"]
+        #     if "have.v.01" in [self.metadata["relations"][ri] for ri in r["relation"]]
+        # ]
+        # instance_parts = [
+        #     sampled_img["annotations"][r["object_id"]] for r in instance_parts
+        # ]
+        # instance_parts = [
+        #     (obj, [self.metadata["classes"][ci] for ci in obj["classes"]])
+        #     for obj in instance_parts
+        # ]
+        # cheat_sheet = [
+        #     (
+        #         BoxMode.convert(
+        #             np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
+        #         )[0],
+        #         classes[0].split(".")[0],
+        #         [
+        #             self.metadata["attributes"][ai].split(".")[0] + \
+        #                 "/" + classes[0].split(".")[0]
+        #             for ai in obj["attributes"]
+        #         ]
+        #     )
+        #     for obj, classes in instance_parts
+        #     if "bowl.n.01" in classes or "stem.n.03" in classes
+        # ]
 
         return {
             "v_usr_in": os.path.join(".", self.image_dir_prefix, img_f),
             "l_usr_in": "What is this?",
             "pointing": { "this": [instance_bbox] },
-            "cheat_sheet": cheat_sheet
+            # "cheat_sheet": cheat_sheet
         }
 
     def react(self, agent_reaction):
@@ -220,7 +219,7 @@ class SimulatedTeacher:
                 # [minimal feedback] or the concept hasn't ever been taught
                 taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
                 is_novel_concept = concept_string not in taught_concepts
-                if self.strat_feedback != "min" or is_novel_concept:
+                if self.strat_feedback != "minHelp" or is_novel_concept:
                     result_response["l_usr_in"] += f" This is a {concept_string}."
                     result_response["pointing"]["this"].append(self.current_focus[1])
 
@@ -229,7 +228,7 @@ class SimulatedTeacher:
                 # Generic difference between intended concept vs. incorrect answer
                 # concept additionally provided if teacher strategy is 'greater'
                 # than [maximal feedback]
-                if self.strat_feedback == "max" and not is_novel_concept:
+                if self.strat_feedback == "maxHelp" and not is_novel_concept:
                     # Give generics only if not given previously, and if current target
                     # concept is not introduced for the first time
                     contrast_concepts = frozenset([concept_string, answer_content])

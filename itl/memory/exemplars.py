@@ -125,3 +125,5 @@ class Exemplars:
                         bin_clf = SVC(C=1.0, gamma=0.1, probability=True)
                         bin_clf.fit(X, y)
                         self.binary_classifiers[conc_type][conc_ind] = bin_clf
+                    else:
+                        self.binary_classifiers[conc_type][conc_ind] = None

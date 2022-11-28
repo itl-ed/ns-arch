@@ -1,6 +1,6 @@
 #!/bin/bash
-declare -a Difficulty=("base" "easy")
-declare -a TeacherStrat=("min" "med")
+declare -a Difficulty=("nonFine" "fineEasy")
+declare -a TeacherStrat=("minHelp" "medHelp")
 mkdir -p "$3/ns-arch/output/exp1_res"
 
 for diff in ${Difficulty[@]}

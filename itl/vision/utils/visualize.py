@@ -60,24 +60,26 @@ def visualize_sg_predictions(img, scene, lexicon=None):
         ax.axes.yaxis.set_visible(False)
 
         # Filter predictions to visualize by objectness threshold
-        objs_filtered = sorted(
-            {
-                oi for oi, obj in scene.items()
-                if obj["pred_objectness"] > obj_thresh
-            },
-            key=lambda t: int(t.strip("o"))
-        )
+        # objs_filtered = sorted(
+        #     {
+        #         oi for oi, obj in scene.items()
+        #         if obj["pred_objectness"] > obj_thresh
+        #     },
+        #     key=lambda t: int(t.strip("o"))
+        # )
+        objs_filtered = scene
 
         # Boxes and classes
         for oi in objs_filtered:
-            x1, y1, x2, y2 = scene[oi]["pred_boxes"]
+            x1, y1, x2, y2 = scene[oi]["pred_box"]
             r = Rectangle(
                 (x1, y1), x2-x1, y2-y1,
                 linewidth=2, edgecolor="r", facecolor="none"
             )
             ax.add_patch(r)
 
-            text_label = f"{oi}: {float(scene[oi]['pred_objectness']):.2f}:"
+            # text_label = f"{oi}: {float(scene[oi]['pred_objectness']):.2f}:"
+            text_label = f"{oi}:"
             text_label += f" {cls_labels[oi][0]} ({float(cls_labels[oi][1]):.2f})"
             text_label += f" / {att_labels[oi][0]} ({float(att_labels[oi][1]):.2f})"
             text_label = ax.text(x1, y1, text_label, color="w")
@@ -94,8 +96,8 @@ def visualize_sg_predictions(img, scene, lexicon=None):
         #         if score > rel_thresh:
         #             occurred_rels.append(pred)
 
-        #             box1 = scene[oi]["pred_boxes"]
-        #             box2 = scene[oj]["pred_boxes"]
+        #             box1 = scene[oi]["pred_box"]
+        #             box2 = scene[oj]["pred_box"]
 
         #             v_pred.draw_line(
         #                 [float(box1[0]+10), float(box2[0]+10)],

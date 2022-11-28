@@ -44,7 +44,7 @@ class LanguageModule:
 
         # Incorporate parsed scene graph into dialogue context
         for oi, obj in vis_scene.items():
-            bbox = obj["pred_boxes"]
+            bbox = obj["pred_box"]
             self.dialogue.referents["env"][oi] = {
                 "bbox": bbox,
                 "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])

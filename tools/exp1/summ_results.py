@@ -13,10 +13,10 @@ import csv
 from collections import defaultdict
 
 import tqdm
+import hydra
 import numpy as np
 import matplotlib.pyplot as plt
-
-from itl.opts import parse_arguments
+from omegaconf import OmegaConf
 
 
 ## Plot matrix
@@ -44,71 +44,84 @@ def draw_matrix(data, row_labs, col_labs, ax):
             ax.text(i, j, round(data[j, i].item(), 2), ha="center", va="center")
 
 
-if __name__ == "__main__":
-    opts = parse_arguments()
+@hydra.main(config_path="../../itl/configs", config_name="config")
+def main(cfg):
+    print(OmegaConf.to_yaml(cfg))
 
-    res_dir = os.path.join(opts.output_dir_path, "exp1_res")
+    dirs_with_results = []
+    outputs_root_dir = os.path.join(cfg.paths.root_dir, "outputs")
+    for date_dir in os.listdir(outputs_root_dir):
+        if not os.path.isdir(os.path.join(outputs_root_dir, date_dir)): continue
+
+        for time_dir in os.listdir(os.path.join(outputs_root_dir, date_dir)):
+            full_out_dir = os.path.join(outputs_root_dir, date_dir, time_dir)
+
+            if not os.path.isdir(full_out_dir):
+                continue
+            
+            if "exp1_res" in os.listdir(full_out_dir):
+                dirs_with_results.append((date_dir, time_dir))
+
     results_confMat = defaultdict(dict)
     results_curve = defaultdict(dict)
 
-    # Collect result
-    dir_contents = list(os.listdir(res_dir))
-    for data in tqdm.tqdm(dir_contents, total=len(dir_contents)):
-        name_parse = re.findall(r"(.+)_(.+)_(.+)_(.+)_(\d+)", data)[0]
-        data_type, *exp_config, seed = name_parse
-        diff, feedStratT, initStratL = exp_config
-        
-        if data_type == "confMat":
-            # Confusion matrix data
-            with open(os.path.join(res_dir, data)) as data_f:
-                reader = csv.reader(data_f)
-                test_set_size = int(next(reader)[0])
-                concepts = next(reader)
+    # Collect results
+    for res_dir in dirs_with_results:
+        res_dir = os.path.join(outputs_root_dir, *res_dir, "exp1_res")
+        dir_contents = list(os.listdir(res_dir))
 
-                confMat = np.array([[float(d) for d in row] for row in reader])
-                confMat = confMat * test_set_size
+        for data in tqdm.tqdm(dir_contents, total=len(dir_contents)):
+            name_parse = re.findall(r"(.+)_(.+)_(.+)_(.+)_(\d+)", data)[0]
+            data_type, *exp_config, seed = name_parse
+            diff, feedStratT, semStratL = exp_config
+            
+            if data_type == "confMat":
+                # Confusion matrix data
+                with open(os.path.join(res_dir, data)) as data_f:
+                    reader = csv.reader(data_f)
+                    test_set_size = int(next(reader)[0])
+                    concepts = next(reader)
 
-                if (feedStratT, initStratL) in results_confMat[diff]:
-                    stats_agg = results_confMat[diff][(feedStratT, initStratL)]
-                    stats_agg["confMat"] += confMat
-                    stats_agg["test_set_size"] += test_set_size
-                    assert stats_agg["concepts"] == concepts
-                else:
-                    results_confMat[diff][(feedStratT, initStratL)] = {
-                        "confMat": confMat,
-                        "test_set_size": test_set_size,
-                        "concepts": concepts
-                    }
+                    confMat = np.array([[float(d) for d in row] for row in reader])
+                    confMat = confMat * test_set_size
 
-        elif data_type == "curve":
-            # Learning curve data
-            with open(os.path.join(res_dir, data)) as data_f:
-                reader = csv.reader(data_f)
-                _ = next(reader)
+                    if (feedStratT, semStratL) in results_confMat[diff]:
+                        stats_agg = results_confMat[diff][(feedStratT, semStratL)]
+                        stats_agg["confMat"] += confMat
+                        stats_agg["test_set_size"] += test_set_size
+                        assert stats_agg["concepts"] == concepts
+                    else:
+                        results_confMat[diff][(feedStratT, semStratL)] = {
+                            "confMat": confMat,
+                            "test_set_size": test_set_size,
+                            "concepts": concepts
+                        }
 
-                curve = np.array([int(row[1]) for row in reader])
+            elif data_type == "curve":
+                # Learning curve data
+                with open(os.path.join(res_dir, data)) as data_f:
+                    reader = csv.reader(data_f)
+                    _ = next(reader)
 
-                if (feedStratT, initStratL) in results_curve[diff]:
-                    stats_agg = results_curve[diff][(feedStratT, initStratL)]
-                    stats_agg["curve"] += curve
-                    stats_agg["trials"] += 1
-                else:
-                    results_curve[diff][(feedStratT, initStratL)] = {
-                        "curve": curve,
-                        "trials": 1
-                    }
+                    curve = np.array([int(row[1]) for row in reader])
 
-        else:
-            continue
+                    if (feedStratT, semStratL) in results_curve[diff]:
+                        stats_agg = results_curve[diff][(feedStratT, semStratL)]
+                        stats_agg["curve"] += curve
+                        stats_agg["trials"] += 1
+                    else:
+                        results_curve[diff][(feedStratT, semStratL)] = {
+                            "curve": curve,
+                            "trials": 1
+                        }
+
+            else:
+                continue
 
     # Pre-defined ordering for listing legends
     config_ord = [
-        "zeroInit_semOnly_minHelp", "zeroInit_semOnly_medHelp", "zeroInit_semOnly_maxHelp",
-        "zeroInit_semWithImpl_minHelp", "zeroInit_semWithImpl_medHelp", "zeroInit_semWithImpl_maxHelp",
-        "mixInitV_semOnly_minHelp", "mixInitV_semOnly_medHelp", "mixInitV_semOnly_maxHelp",
-        "mixInitV_semWithImpl_minHelp", "mixInitV_semWithImpl_medHelp", "mixInitV_semWithImpl_maxHelp",
-        "mixInitVL_semOnly_minHelp", "mixInitVL_semOnly_medHelp", "mixInitVL_semOnly_maxHelp",
-        "mixInitVL_semWithImpl_minHelp", "mixInitVL_semWithImpl_medHelp", "mixInitVL_semWithImpl_maxHelp",
+        "semOnly_minHelp", "semOnly_medHelp", "semOnly_maxHelp",
+        "semWithImpl_minHelp", "semWithImpl_medHelp", "semWithImpl_maxHelp"
     ]
 
     # Aggregate and visualize: curve
@@ -116,9 +129,8 @@ if __name__ == "__main__":
         fig = plt.figure()
 
         for exp_config, data in agg_stats.items():
-            feedStratT, initStratL = exp_config
+            feedStratT, semStratL = exp_config
             ## Temp: rewriting config names
-            feedStratT = feedStratT + "Help"
             if diff == "base":
                 diff = "nonFine"
             elif diff == "easy":
@@ -129,7 +141,7 @@ if __name__ == "__main__":
             plt.plot(
                 range(1, len(data["curve"])+1),
                 data["curve"] / data["trials"],
-                label=f"zeroInit_semOnly_{feedStratT}"
+                label=f"{semStratL}_{feedStratT}"
             )
 
         # Plot curve
@@ -149,14 +161,13 @@ if __name__ == "__main__":
         plt.legend(handles, labels)
         
         plt.title(f"Learning curve for {diff} difficulty")
-        plt.savefig(os.path.join(opts.output_dir_path, f"curve_{diff}.png"))
+        plt.savefig(os.path.join(cfg.paths.outputs_dir, f"curve_{diff}.png"))
 
     # Aggregate and visualize: confusion matrix
     for diff, agg_stats in results_confMat.items():
         for exp_config, data in agg_stats.items():
-            feedStratT, initStratL = exp_config
+            feedStratT, semStratL = exp_config
             ## Temp: rewriting config names
-            feedStratT = feedStratT + "Help"
             if diff == "base":
                 diff = "nonFine"
             elif diff == "easy":
@@ -164,7 +175,7 @@ if __name__ == "__main__":
             elif diff == "hard":
                 diff = "fineHard"
 
-            config_label = f"zeroInit_semOnly_{feedStratT}"
+            config_label = f"semOnly_{feedStratT}"
 
             # Draw confusion matrix
             fig = plt.figure()
@@ -176,7 +187,7 @@ if __name__ == "__main__":
             plt.suptitle(f"Confusion matrix for {diff} difficulty", fontsize=16)
             plt.title(f"{config_label} agent", pad=18)
             plt.tight_layout()
-            plt.savefig(os.path.join(opts.output_dir_path, f"confMat_{diff}_{config_label}.png"))
+            plt.savefig(os.path.join(cfg.paths.outputs_dir, f"confMat_{diff}_{config_label}.png"))
 
             # Compute aggregate metric: mean F1 score
             P_per_concept = [
@@ -210,3 +221,7 @@ if __name__ == "__main__":
         for d in data_collected:
             print("\t"+f"{d['config_label']}: {d['mF1']}")
         print("")
+
+
+if __name__ == "__main__":
+    main()

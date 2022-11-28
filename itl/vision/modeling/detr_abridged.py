@@ -100,7 +100,7 @@ def detr_enc_outputs(detr_model, image, feature_extractor):
     return encoder_outputs[0], valid_ratios, spatial_shapes, level_start_index, mask_flatten
 
 def detr_dec_outputs(
-    detr_model, enc_out, bboxes,
+    detr_model, enc_out, bboxes, lock_provided_boxes,
     valid_ratios, spatial_shapes, level_start_index, mask_flatten
 ):
     """ Subroutine for processing encoder outputs to obtain decoder outputs """
@@ -131,15 +131,11 @@ def detr_dec_outputs(
     topk_coords_logits = topk_coords_logits.detach()
     reference_points = topk_coords_logits.sigmoid()
 
-    if bboxes is not None:
-        # Add proposals from provided bboxes
-        reference_points = torch.cat([bboxes[None], reference_points], dim=1)
-        reference_points_logits = torch.cat([
-            torch.special.logit(bboxes[None], eps=1e-6), topk_coords_logits
-        ], dim=1)
-    else:
-        # No boxes to add, vanilla ensemble prediction
-        reference_points_logits = topk_coords_logits
+    # Add proposals from provided bboxes
+    reference_points = torch.cat([bboxes[None], reference_points], dim=1)
+    reference_points_logits = torch.cat([
+        torch.special.logit(bboxes[None], eps=1e-6), topk_coords_logits
+    ], dim=1)
 
     pos_trans_out = detr_model.model.get_proposal_pos_embed(reference_points_logits)
     pos_trans_out = detr_model.model.pos_trans_norm(
@@ -166,11 +162,16 @@ def detr_dec_outputs(
 
         hidden_states = layer_outputs[0]
 
-        # Iterative bounding box refinement, except for proposals with bboxes provided
+        # Iterative bounding box refinement
         tmp = detr_model.model.decoder.bbox_embed[i](hidden_states)
         new_reference_points = torch.special.logit(reference_points, eps=1e-6)
-        new_reference_points[:,bboxes.shape[0]:] = \
-            tmp[:,bboxes.shape[0]:] + new_reference_points[:,bboxes.shape[0]:]
+        if lock_provided_boxes:
+            # ... except for proposals with bboxes provided
+            new_reference_points[:,bboxes.shape[0]:] = \
+                tmp[:,bboxes.shape[0]:] + new_reference_points[:,bboxes.shape[0]:]
+        else:
+            # ... for all
+            new_reference_points = tmp + new_reference_points
         new_reference_points = new_reference_points.sigmoid()
         reference_points = new_reference_points.detach()
 

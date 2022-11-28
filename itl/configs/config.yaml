@@ -9,12 +9,12 @@ paths:
     outputs_dir: "${hydra:runtime.output_dir}"
 
 agent:
-    strat_generic: "semOnly"
-    strat_mismatch: "zeroinit"
+    strat_generic: "semOnly"    # Options: "semOnly", "semWithImpl"
+    strat_mismatch: "zeroInit"  # Options: "zeroInit" (TODO?: other strategies)
 
 exp1:
-    strat_feedback: "min"
-    difficulty: "nonFine"
+    strat_feedback: "minHelp"
+    difficulty: "nonFine"       # Options: "nonFine", "fineEasy", "fineHard"
     num_episodes: 50
     test_set_size: 30
 

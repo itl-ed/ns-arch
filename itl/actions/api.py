@@ -10,6 +10,8 @@ from functools import reduce
 from collections import defaultdict
 
 import numpy as np
+import torch
+from torchvision.ops import box_convert
 
 from ..lpmln import Literal, Rule
 
@@ -34,7 +36,7 @@ class AgentCompositeActions:
 
         rule, _ = mismatch
 
-        if self.agent.opts.strat_mismatch == "zeroInit":
+        if self.agent.cfg.agent.strat_mismatch == "zeroInit":
             # Zero initiative from agent's end; do not ask any further question, simply
             # perform few-shot vision model updates (if possible) and acknowledge "OK"
             if rule.is_grounded() and len(rule.literals())==1:
@@ -52,14 +54,18 @@ class AgentCompositeActions:
                 args = [a for a, _ in atom.args]
 
                 ex_bboxes = [
-                    self.agent.lang.dialogue.referents["env"][a]["bbox"] for a in args
+                    box_convert(
+                        torch.tensor(self.agent.lang.dialogue.referents["env"][a]["bbox"]),
+                        "xyxy", "xywh"
+                    ).numpy()
+                    for a in args
                 ]
 
                 # Fetch current score for the asserted fact
                 if conc_type == "cls":
-                    f_vec = self.agent.vision.f_vecs[args[0]]
+                    f_vec = self.agent.vision.f_vecs[args[0]][0]
                 elif conc_type == "att":
-                    f_vec = self.agent.vision.f_vecs[args[0]]
+                    f_vec = self.agent.vision.f_vecs[args[0]][1]
                 else:
                     assert conc_type == "rel"
                     raise NotImplementedError   # Step back for relation prediction...
@@ -84,11 +90,11 @@ class AgentCompositeActions:
             if ("acknowledge", None) not in self.agent.practical.agenda:
                 self.agent.practical.agenda.append(("acknowledge", None))
 
-        elif self.agent.opts.strat_mismatch == "request_exmp":
+        elif self.agent.cfg.agent.strat_mismatch == "request_exmp":
             raise NotImplementedError
 
         else:
-            assert self.agent.opts.strat_mismatch == "request_expl"
+            assert self.agent.cfg.agent.strat_mismatch == "request_expl"
             raise NotImplementedError
 
     def attempt_answer_Q(self, ui):
@@ -145,7 +151,7 @@ class AgentCompositeActions:
             search_specs = self._search_specs_from_kb(question, bjt_vl)
             if len(search_specs) > 0:
                 self.agent.vision.predict(
-                    None, label_exemplars=self.agent.lt_mem.exemplars,
+                    None, self.agent.lt_mem.exemplars,
                     specs=search_specs, visualize=False, lexicon=self.agent.lt_mem.lexicon
                 )
 

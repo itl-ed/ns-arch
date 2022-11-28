@@ -5,7 +5,7 @@ from collections import OrderedDict, defaultdict
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from torchvision.ops import box_convert
+from torchvision.ops import box_convert, clip_boxes_to_image, nms
 from transformers import AutoFeatureExtractor, DeformableDetrForObjectDetection
 from transformers.models.deformable_detr.modeling_deformable_detr import (
     DeformableDetrMLPPredictionHead
@@ -279,7 +279,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 state_dict_filtered[k] = v
         checkpoint["state_dict"] = state_dict_filtered
 
-    def forward(self, image, bboxes=None):
+    def forward(self, image, bboxes=None, lock_provided_boxes=True):
         """
         Purposed as the most general endpoint of the vision module for inference,
         which takes an image as input and returns 'raw output' consisting of the
@@ -294,11 +294,14 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         so that their concept identities can be classified.
         """
         # Corner- to center-format, then absolute to relative bbox dimensions
-        bboxes = box_convert(bboxes, "xywh", "cxcywh")
-        bboxes = torch.stack([
-            bboxes[:,0] / image.width, bboxes[:,1] / image.height,
-            bboxes[:,2] / image.width, bboxes[:,3] / image.height,
-        ], dim=-1)
+        if bboxes is not None:
+            bboxes = box_convert(bboxes, "xywh", "cxcywh")
+            bboxes = torch.stack([
+                bboxes[:,0] / image.width, bboxes[:,1] / image.height,
+                bboxes[:,2] / image.width, bboxes[:,3] / image.height,
+            ], dim=-1)
+        else:
+            bboxes = torch.tensor([]).view(0, 4).to(self.device)
 
         encoder_outputs_all = detr_enc_outputs(
             self.detr, image, self.feature_extractor
@@ -307,7 +310,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             level_start_index, mask_flatten = encoder_outputs_all
 
         decoder_outputs, last_reference_points = detr_dec_outputs(
-            self.detr, encoder_outputs, bboxes,
+            self.detr, encoder_outputs, bboxes, lock_provided_boxes,
             valid_ratios, spatial_shapes, level_start_index, mask_flatten
         )
 
@@ -334,6 +337,71 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         final_bboxes = box_convert(final_bboxes, "cxcywh", "xywh")
 
         return cls_embeddings, att_embeddings, final_bboxes
+
+    def search(self, image, conds, k=100):
+        """
+        For few-shot search (exemplar-based conditioned detection). Given an image
+        and a list of (concept type, exemplar vector set) pairs, find and return
+        the top k **candidate** region proposals. The proposals do not intend to be
+        highly accurate at this stage, as they will be further processed by the full
+        model and tested again.
+        """
+        # Process up to encoder output
+        enc_emb, _, spatial_shapes, _, mask_flatten = detr_enc_outputs(
+            self.detr, image, self.feature_extractor
+        )
+
+        # Generate proposal templates
+        gen_proposals_fn = self.detr.model.gen_encoder_output_proposals
+        _, output_proposals = gen_proposals_fn(
+            enc_emb, ~mask_flatten, spatial_shapes
+        )
+
+        # Prepare search spec embedding
+        cls_proto_sum = torch.zeros(self.detr.config.d_model).to(self.device)
+        att_proto_sum = torch.zeros(self.detr.config.d_model).to(self.device)
+        for conc_type, pos_exs_vecs in conds:
+            pos_proto = torch.tensor(pos_exs_vecs).to(self.device).mean(dim=0)
+            if conc_type == "cls":
+                cls_proto_sum = cls_proto_sum + pos_proto
+            elif conc_type == "att":
+                att_proto_sum = att_proto_sum + pos_proto
+            else:
+                # Dunno what should happen here yet...
+                raise NotImplementedError
+
+        # Project sums of prototypes (or lack thereof) to embedding space
+        spec_emb = torch.cat([cls_proto_sum, att_proto_sum], dim=-1)
+        spec_emb = self.fs_spec_fuse(spec_emb)
+
+        embs_concat = torch.cat([
+            enc_emb, spec_emb[None, None].expand_as(enc_emb)
+        ], dim=-1)
+
+        # Perform search by computing 'compatibility scores' and predicting bboxes
+        # (delta thereof, w.r.t. the templates generated)
+        search_scores = torch.einsum(
+            "bqd,d->bq", enc_emb,
+            self.fs_search_match(spec_emb)
+        )
+        search_scores = search_scores[0].sigmoid()
+        search_coord_deltas = self.fs_search_bbox(embs_concat)
+        search_coord_logits = search_coord_deltas + output_proposals
+        search_coords = search_coord_logits[0].sigmoid()
+        search_coords = torch.stack([
+            search_coords[:,0] * image.width, search_coords[:,1] * image.height,
+            search_coords[:,2] * image.width, search_coords[:,3] * image.height
+        ], dim=-1)
+        search_coords = box_convert(search_coords, "cxcywh", "xyxy")
+        search_coords = clip_boxes_to_image(
+            search_coords, (image.height, image.width)
+        )
+
+        # Top k search outputs (after) nms
+        iou_thres = 0.65
+        topk_inds = nms(search_coords, search_scores, iou_thres)[:k]
+
+        return search_coords[topk_inds], search_scores[topk_inds]
 
     def _process_batch(self, batch):
         """
@@ -428,7 +496,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             level_start_index, mask_flatten = encoder_outputs_all
 
         decoder_outputs, _ = detr_dec_outputs(
-            self.detr, encoder_outputs, bboxes,
+            self.detr, encoder_outputs, bboxes, True,
             valid_ratios, spatial_shapes, level_start_index, mask_flatten
         )
 

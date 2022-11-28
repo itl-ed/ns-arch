@@ -37,9 +37,6 @@ def main(cfg):
     user = SimulatedTeacher(cfg, target_concepts={})
     # Also control PYTHONHASHSEED environment var (e.g. in bash script, or launch.json if in vscode)
 
-    if torch.cuda.is_available():
-        agent.vision.model.to("cuda")
-
     # Set of intermediary concepts to be injected -- parts, attributes, relations
     intermediary_concepts = {
         "cls": {        # Hand-picked; object parts
