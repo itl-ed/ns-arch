@@ -13,7 +13,7 @@ data:
     num_exs_per_conc_eval: 5
 
 optim:
-    init_lr: 3e-5
+    init_lr: 1e-4
     algorithm: "SGD"
     momentum_1m: 1e-1
     # algorithm: "Adam"

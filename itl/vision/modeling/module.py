@@ -53,12 +53,17 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
 
-        # MLP heads to attach on top of encoder & embedder outputs for metric-based
+        # MLP heads to attach on top of encoder & decoder outputs for metric-based
         # few-shot search (conditioned detection)
         self.fs_spec_fuse = DeformableDetrMLPPredictionHead(
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=detr_D, num_layers=2
         )
-        self.fs_search_match = nn.Linear(detr_D, detr_D)
+        self.fs_search_match_enc = DeformableDetrMLPPredictionHead(
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=1, num_layers=2
+        )
+        self.fs_search_match_dec = DeformableDetrMLPPredictionHead(
+            input_dim=detr_D*2, hidden_dim=detr_D, output_dim=1, num_layers=2
+        )
         self.fs_search_bbox = DeformableDetrMLPPredictionHead(
             input_dim=detr_D*2, hidden_dim=detr_D, output_dim=4, num_layers=3
         )
@@ -86,7 +91,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 # Few-shot search with encoder output embeddings
                 for prm in self.fs_spec_fuse.parameters():
                     prm.requires_grad = True
-                for prm in self.fs_search_match.parameters():
+                for prm in self.fs_search_match_enc.parameters():
+                    prm.requires_grad = True
+                for prm in self.fs_search_match_dec.parameters():
                     prm.requires_grad = True
                 for prm in self.fs_search_bbox.parameters():
                     prm.requires_grad = True
@@ -98,7 +105,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
     def training_step(self, batch, *_):
         if isinstance(batch, tuple):
             # Simpler case of single batch from single dataloader
-            loss, metrics, _, _ = self._process_batch(batch)
+            loss, metrics = self._process_batch(batch)
 
             self.log("train_loss", loss.item())
             for metric, val in metrics.items():
@@ -110,7 +117,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             # in fs_search task mode); process and log each
             loss_total = 0
             for b in batch:
-                loss, metrics, _, _ = self._process_batch(b)
+                loss, metrics = self._process_batch(b)
                 loss_total += loss
 
                 conc_type = b[1]
@@ -126,7 +133,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             return loss_total
 
     def validation_step(self, batch, *_):
-        loss, metrics, _, _ = self._process_batch(batch)
+        loss, metrics = self._process_batch(batch)
         return loss, metrics, batch[1]
 
     def validation_epoch_end(self, outputs):
@@ -169,8 +176,8 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         self.log(f"val_loss", final_avg_loss, add_dataloader_idx=False)
 
     def test_step(self, batch, *_):
-        _, metrics, embeddings, labels = self._process_batch(batch)
-        return metrics, embeddings, labels, batch[1]
+        _, metrics = self._process_batch(batch)
+        return metrics, batch[1]
     
     def test_epoch_end(self, outputs):
         if len(self.trainer.test_dataloaders) == 1:
@@ -180,48 +187,20 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             if len(outputs_per_dataloader) == 0:
                 continue
 
-            conc_type = outputs_per_dataloader[0][3]
+            conc_type = outputs_per_dataloader[0][1]
             if isinstance(conc_type, tuple):
                 conc_type = "+".join(conc_type)
 
             # Log epoch average metrics
             avg_metrics = defaultdict(list)
             for metric_type in outputs_per_dataloader[0][0]:
-                for metrics, _, _, _ in outputs_per_dataloader:
+                for metrics, _ in outputs_per_dataloader:
                     avg_metrics[metric_type].append(metrics[metric_type])
             
             for metric_type, vals in avg_metrics.items():
                 avg_val = sum(vals) / len(vals)
                 self.log(
                     f"test_{metric_type}_{conc_type}", avg_val, add_dataloader_idx=False
-                )
-
-            # For visual inspection of embedding vector (instance or few-shot prototypes)
-            if self.logger is not None and hasattr(self.logger, "log_table"):
-                _, embeddings, labels, conc_types = tuple(zip(*outputs_per_dataloader))
-                assert all(ct==outputs_per_dataloader[0][3] for ct in conc_types)
-
-                embeddings = torch.cat(embeddings)
-                labels = sum(labels, [])
-                if isinstance(conc_types[0], tuple):
-                    labels = ["+".join(cl_al) for cl_al in labels]
-
-                # There are typically too many vectors, not all of them need to be logged...
-                # Let's downsample to K (as in config) per concept
-                K = self.cfg.vision.data.num_exs_per_conc_eval
-                downsampled = {
-                    conc: random.sample([i for i, l in enumerate(labels) if conc==l], K)
-                    for conc in set(labels)
-                }
-                data_downsampled = [
-                    [conc]+embeddings[ex_i].tolist()
-                    for conc, exs in downsampled.items() for ex_i in exs
-                ]
-
-                self.logger.log_table(
-                    f"embeddings_{conc_type}",
-                    columns=["concept"] + [f"D{i}" for i in range(embeddings.shape[-1])],
-                    data=data_downsampled
                 )
 
     def configure_optimizers(self):
@@ -475,12 +454,12 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             bboxes_search_targets = None
 
         # Computing appropriate loss & metric values according to task specification
-        loss, metrics, embeddings = compute_loss_and_metrics(
+        loss, metrics = compute_loss_and_metrics(
             self, self.cfg.vision.task, conc_type,
             detr_enc_outs, detr_dec_outs, B, N, K, bboxes_search_targets
         )
 
-        return loss, metrics, embeddings, conc_labels
+        return loss, metrics
 
     def fvecs_from_image_and_bboxes(self, image, bboxes):
         """

@@ -10,6 +10,7 @@ sys.path.insert(
 )
 import re
 import csv
+import logging
 from collections import defaultdict
 
 import tqdm
@@ -17,6 +18,8 @@ import hydra
 import numpy as np
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
+
+logger = logging.getLogger(__name__)
 
 
 ## Plot matrix
@@ -217,9 +220,9 @@ def main(cfg):
         elif diff == "hard":
             diff = "fineHard"
 
-        print(f"Mean F1 scores ({diff}):")
+        logger.info(f"Mean F1 scores ({diff}):")
         for d in data_collected:
-            print("\t"+f"{d['config_label']}: {d['mF1']}")
+            logger.info("\t"+f"{d['config_label']}: {d['mF1']}")
         print("")
 
 

@@ -126,23 +126,23 @@ class SimulatedTeacher:
         # # is replaced by oracle ground truths about object parts and their properties
         # instance_parts = [
         #     r for r in sampled_img["annotations"][sampled_instance]["relations"]
-        #     if "have.v.01" in [self.metadata["relations"][ri] for ri in r["relation"]]
+        #     if "have.v.01" in [self.metadata["relations_names"][ri] for ri in r["relation"]]
         # ]
         # instance_parts = [
-        #     sampled_img["annotations"][r["object_id"]] for r in instance_parts
+        #     sampled_img["annotations"][str(r["object_id"])] for r in instance_parts
         # ]
         # instance_parts = [
-        #     (obj, [self.metadata["classes"][ci] for ci in obj["classes"]])
+        #     (obj, [self.metadata["classes_names"][ci] for ci in obj["classes"]])
         #     for obj in instance_parts
         # ]
         # cheat_sheet = [
         #     (
-        #         BoxMode.convert(
-        #             np.array(obj["bbox"])[None], BoxMode.XYWH_ABS, BoxMode.XYXY_ABS
+        #         box_convert(
+        #             torch.tensor(obj["bbox"])[None], "xywh", "xyxy"
         #         )[0],
         #         classes[0].split(".")[0],
         #         [
-        #             self.metadata["attributes"][ai].split(".")[0] + \
+        #             self.metadata["attributes_names"][ai].split(".")[0] + \
         #                 "/" + classes[0].split(".")[0]
         #             for ai in obj["attributes"]
         #         ]

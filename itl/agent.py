@@ -108,7 +108,6 @@ class ITLAgent:
 
         # Temporary injection of ground-truth object parts and their attributes
         # if cheat_sheet is not None and len(cheat_sheet) > 0:
-        # # if False:
         #     ent_map = [
         #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
         #     ]
@@ -116,8 +115,7 @@ class ITLAgent:
         #     for i, (bbox, _, _) in enumerate(cheat_sheet):
         #         bboxes[ent_map[i]] = {
         #             "bbox": bbox,
-        #             "bbox_mode": BoxMode.XYXY_ABS,
-        #             "objectness_scores": None
+        #             "bbox_mode": "xyxy"
         #         }
         #         self.lang.dialogue.referents["env"][ent_map[i]] = {
         #             "bbox": bbox,
@@ -128,8 +126,7 @@ class ITLAgent:
         #     # Incrementally predict on the designated bbox
         #     if len(bboxes) > 0:
         #         self.vision.predict(
-        #             None, label_exemplars=self.lt_mem.exemplars,
-        #             bboxes=bboxes, visualize=False
+        #             None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
         #         )
 
         #         # Ensure scores are high enough for appropriate classes, attributes
@@ -460,7 +457,6 @@ class ITLAgent:
 
                 # # Temporary injection of ground-truth object parts and their attributes
                 # if cheat_sheet is not None and len(cheat_sheet):
-                # # if False:
                 #     ent_map = [
                 #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
                 #     ]
@@ -468,8 +464,7 @@ class ITLAgent:
                 #     for i, (bbox, _, _) in enumerate(cheat_sheet):
                 #         bboxes[ent_map[i]] = {
                 #             "bbox": bbox,
-                #             "bbox_mode": BoxMode.XYXY_ABS,
-                #             "objectness_scores": None
+                #             "bbox_mode": "xyxy"
                 #         }
                 #         self.lang.dialogue.referents["env"][ent_map[i]] = {
                 #             "bbox": bbox,
@@ -480,8 +475,7 @@ class ITLAgent:
                 #     # Incrementally predict on the designated bbox
                 #     if len(bboxes) > 0:
                 #         self.vision.predict(
-                #             None, label_exemplars=self.lt_mem.exemplars,
-                #             bboxes=bboxes, visualize=False
+                #             None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
                 #         )
 
                 #         # Ensure scores are high enough for appropriate classes, attributes
