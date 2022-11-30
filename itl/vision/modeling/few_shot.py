@@ -8,7 +8,6 @@ evaluation.
 import torch
 import torch.nn.functional as F
 
-from torchvision.ops import nms
 from transformers.models.deformable_detr.modeling_deformable_detr import (
     DeformableDetrHungarianMatcher,
     DeformableDetrLoss,
@@ -19,26 +18,21 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 def compute_loss_and_metrics(
     model, task, conc_type, detr_enc_outs, detr_dec_outs,
-    B, N, K, bboxes_search_targets
+    N, K, bboxes_search_targets
 ):
-    assert B == len(detr_dec_outs)
-    assert N * K == B
-
     if task == "fs_classify":
         assert bboxes_search_targets is None
-        return _compute_fs_classify(
-            model, conc_type, detr_dec_outs, B, N, K
-        )
+        return _compute_fs_classify(model, conc_type, detr_dec_outs, N, K)
     else:
         assert task == "fs_search"
         assert bboxes_search_targets is not None
         return _compute_fs_search(
             model, conc_type, detr_enc_outs, detr_dec_outs,
-            B, N, K, bboxes_search_targets
+            N, K, bboxes_search_targets
         )
 
 
-def _compute_fs_classify(model, conc_type, detr_dec_outs, B, N, K):
+def _compute_fs_classify(model, conc_type, detr_dec_outs, N, K):
     """ Classification mode; compute NCA loss & recall@K metrics """
     # Pass through MLP block according to specified task concept type
     cls_embeddings = model.fs_embed_cls(detr_dec_outs[:,0,:])
@@ -75,6 +69,8 @@ def _compute_fs_classify(model, conc_type, detr_dec_outs, B, N, K):
             top2k = set(topk_closest_exs[ind].tolist()) - {ind}
             r_at_k += len(topk & pos_exs_inds) / (K - 1)
             r_at_2k += len(top2k & pos_exs_inds) / (K - 1)
+    
+    B = N * K
     metrics["recall@K"] = r_at_k / B
     metrics["recall@2K"] = r_at_2k / B
 
@@ -82,7 +78,7 @@ def _compute_fs_classify(model, conc_type, detr_dec_outs, B, N, K):
 
 
 def _compute_fs_search(
-    model, conc_type, detr_enc_outs, detr_dec_outs, B, N, K, bboxes_search_targets
+    model, conc_type, detr_enc_outs, detr_dec_outs, N, K, bboxes_search_targets
 ):
     """ (Conditioned) search mode; compute DETR loss & mAP metrics """
     assert K > 1        # Need more than one "shots" to perform search
@@ -103,7 +99,7 @@ def _compute_fs_search(
     # Loss computation fn for decoder outputs
     dec_loss_fn = DeformableDetrLoss(
         matcher=matcher, num_classes=1,
-        focal_alpha=0.75, losses=["labels", "boxes"]
+        focal_alpha=0.25, losses=["labels", "boxes"]
     )
     dec_loss_fn = dec_loss_fn.to(model.device)
 
@@ -116,160 +112,29 @@ def _compute_fs_search(
             ind = i*K + j
             pos_exs_inds = list(set(range(i*N, i*N+K)) - {ind})
 
-            # First, prime the two-stage encoder to produce proposals that are
-            # generally expected to comply well with the provided search specs;
-            # it's okay to take risks and include false positive here, another
-            # filtering will happend at the end.
-
-            # Compute needed concept embeddings for support instances, then average
-            # prototypes to be fused into search spec embeddings
+            # Few-shot search conditions
+            conds = []
             supp_cls_embs = model.fs_embed_cls(detr_dec_outs[pos_exs_inds,0,:])
             if "classes" in conc_type:
-                supp_cls_proto = supp_cls_embs.mean(dim=0)
-            else:
-                # No class-related condition in search spe
-                supp_cls_proto = torch.zeros(
-                    model.fs_embed_cls.layers[-1].out_features, device=model.device
-                )
+                conds.append(("cls", supp_cls_embs))
             if "attributes" in conc_type:
                 supp_att_embs = model.fs_embed_att(
                     torch.cat([detr_dec_outs[pos_exs_inds,0,:], supp_cls_embs], dim=-1)
                 )
-                supp_att_proto = supp_att_embs.mean(dim=0)
-            else:
-                # No attribute-related condition in search spec
-                supp_att_proto = torch.zeros(
-                    model.fs_embed_att.layers[-1].out_features, device=model.device
-                )
+                conds.append(("att", supp_att_embs))
 
-            # Fuse into search spec embedding
-            fused_spec_emb = torch.cat([supp_cls_proto, supp_att_proto], dim=-1)
-            fused_spec_emb = model.fs_spec_fuse(fused_spec_emb)
-
-            # Generate (conditioned) proposals from encoder output
-            enc_emb, valid_ratios, spatial_shapes, \
-                level_start_index, mask_flatten = detr_enc_outs[ind]
-
-            gen_proposals_fn = model.detr.model.gen_encoder_output_proposals
-            object_query_embedding, output_proposals = gen_proposals_fn(
-                enc_emb, ~mask_flatten, spatial_shapes
-            )
-            delta_bbox = model.detr.model.decoder.bbox_embed[-1](object_query_embedding)
-            proposals_coords_logits = delta_bbox + output_proposals
-
-            # Obtain rough 'search compatibility scores'
-            embs_concat = torch.cat([
-                enc_emb, fused_spec_emb[None, None].expand_as(enc_emb)
-            ], dim=-1)
-            search_scores = model.fs_search_match_enc(embs_concat).squeeze()
+            proposals_coords, enc_search_scores, outputs_coords, dec_search_scores \
+                = few_shot_search_img(model, detr_enc_outs[ind], conds)
 
             # Compute loss for the encoder side
             loss_enc = _search_loss_and_metric(
-                proposals_coords_logits[0].sigmoid(), search_scores,
-                bboxes_search_targets[ind],
+                proposals_coords, enc_search_scores, bboxes_search_targets[ind],
                 model, enc_loss_fn, None
             )
 
-            # Only keep top scoring 'config.two_stage_num_proposals' proposals
-            topk = model.detr.config.two_stage_num_proposals
-            topk_proposals = search_scores.topk(topk).indices
-            topk_coords_logits = torch.gather(
-                proposals_coords_logits, 1,
-                topk_proposals[None, ..., None].expand(1, -1, 4)
-            )
-            topk_coords_logits = topk_coords_logits.detach()
-            reference_points = topk_coords_logits.sigmoid()
-
-            # Now perform search based on the proposals from the encoder side
-
-            # Prepare decoder inputs
-            pos_trans_out = model.detr.model.get_proposal_pos_embed(topk_coords_logits)
-            pos_trans_out = model.detr.model.pos_trans_norm(
-                model.detr.model.pos_trans(pos_trans_out)
-            )
-            query_embed, target = torch.split(pos_trans_out, enc_emb.shape[-1], dim=2)
-
-            # Pass through the decoder; code below taken & simplified from
-            # DeformableDetrDecoder.forward()
-            hidden_states = target
-            for li, decoder_layer in enumerate(model.detr.model.decoder.layers):
-                reference_points_input = reference_points[:, :, None] * \
-                    torch.cat([valid_ratios, valid_ratios], -1)[:, None]
-                
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    position_embeddings=query_embed,
-                    encoder_hidden_states=enc_emb,
-                    reference_points=reference_points_input,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    encoder_attention_mask=mask_flatten
-                )
-
-                hidden_states = layer_outputs[0]
-
-                # Iterative bounding box refinement
-                tmp = model.detr.model.decoder.bbox_embed[li](hidden_states)
-                new_reference_points = torch.special.logit(reference_points, eps=1e-6)
-                new_reference_points = tmp + new_reference_points
-                new_reference_points = new_reference_points.sigmoid()
-                reference_points = new_reference_points.detach()
-
-            dec_embs, last_reference_points = hidden_states, reference_points
-
-            # Compute class/attribute-centric feature vectors for candidates as 
-            # needed, then prepare fused spec embedding -- this time with weighted
-            # prototypes (average feature vectors weighted by distance to support
-            # instances)
-            cand_cls_embs = model.fs_embed_cls(dec_embs)
-            if "classes" in conc_type:
-                cls_dists_sq = torch.cdist(cand_cls_embs, supp_cls_embs[None]) ** 2
-                cls_exs_weights = F.softmax(-cls_dists_sq, dim=-1)[0]
-                weighted_cls_protos = torch.einsum(
-                    "cs,sd->cd", cls_exs_weights, supp_cls_embs
-                )
-            else:
-                weighted_cls_protos = torch.zeros(
-                    topk, model.fs_embed_cls.layers[-1].out_features,
-                    device=model.device
-                )
-            if "attributes" in conc_type:
-                cand_att_embs = model.fs_embed_att(
-                    torch.cat([dec_embs, cand_cls_embs], dim=-1)
-                )
-                att_dists_sq = torch.cdist(cand_att_embs, supp_att_embs[None]) ** 2
-                att_exs_weights = F.softmax(-att_dists_sq, dim=-1)[0]
-                weighted_att_protos = torch.einsum(
-                    "cs,sd->cd", att_exs_weights, supp_att_embs
-                )
-            else:
-                weighted_att_protos = torch.zeros(
-                    topk, model.fs_embed_att.layers[-1].out_features,
-                    device=model.device
-                )
-
-            # Fuse weighted prototypes into search spec embeddings, adapted for each
-            # candidate
-            fused_adaptive_spec_embs = torch.cat(
-                [weighted_cls_protos, weighted_att_protos], dim=-1
-            )
-            fused_adaptive_spec_embs = model.fs_spec_fuse(fused_adaptive_spec_embs)
-
-            # Concat decoder outputs + adapted search spec embeddings for further
-            # prediction
-            embs_concat = torch.cat([dec_embs[0], fused_adaptive_spec_embs], dim=-1)
-
-            # Obtain (conditioned) bbox estimates
-            delta_bbox = model.fs_search_bbox(embs_concat)
-            cand_coords = delta_bbox + torch.special.logit(last_reference_points[0])
-            cand_coords = cand_coords.sigmoid()
-
-            # Search compatibility scores based on support vs. candidate embeddings
-            cand_scores = model.fs_search_match_dec(embs_concat).squeeze()
-
             # Compute loss for the decoder side, while updating stats for metrics
             loss_dec = _search_loss_and_metric(
-                cand_coords, cand_scores, bboxes_search_targets[ind],
+                outputs_coords, dec_search_scores, bboxes_search_targets[ind],
                 model, dec_loss_fn, metric_logs
             )
 
@@ -332,6 +197,152 @@ def _search_loss_and_metric(bboxes, scores, targets, model, loss_fn, metric_modu
         metric_module.update(search_outputs_for_metric, search_targets_for_metric)
 
     return loss
+
+
+def few_shot_search_img(model, enc_out, conds):
+    # First, prime the two-stage encoder to produce proposals that are
+    # generally expected to comply well with the provided search specs;
+    # it's okay to take risks and include false positive here, another
+    # filtering will happend at the end.
+
+    # Compute needed concept embeddings for support instances, then average
+    # prototypes to be fused into search spec embeddings
+    cls_proto_sum = torch.zeros(model.detr.config.d_model).to(model.device)
+    att_proto_sum = torch.zeros(model.detr.config.d_model).to(model.device)
+    for conc_type, pos_exs_vecs in conds:
+        pos_proto = torch.tensor(pos_exs_vecs).to(model.device).mean(dim=0)
+        if conc_type == "cls":
+            cls_proto_sum = cls_proto_sum + pos_proto
+        elif conc_type == "att":
+            att_proto_sum = att_proto_sum + pos_proto
+        else:
+            # Dunno what should happen here yet...
+            raise NotImplementedError
+
+    # Fuse into search spec embedding
+    fused_spec_emb = torch.cat([cls_proto_sum, att_proto_sum], dim=-1)
+    fused_spec_emb = model.fs_spec_fuse(fused_spec_emb)
+
+    # Generate (conditioned) proposals from encoder output
+    enc_emb, valid_ratios, spatial_shapes, \
+            level_start_index, mask_flatten = enc_out
+
+    gen_proposals_fn = model.detr.model.gen_encoder_output_proposals
+    object_query_embedding, output_proposals = gen_proposals_fn(
+        enc_emb, ~mask_flatten, spatial_shapes
+    )
+    delta_bbox = model.detr.model.decoder.bbox_embed[-1](object_query_embedding)
+    proposals_coords_logits = delta_bbox + output_proposals
+
+    # Obtain rough 'search compatibility scores'
+    embs_concat = torch.cat([
+        enc_emb, fused_spec_emb[None, None].expand_as(enc_emb)
+    ], dim=-1)
+    rough_scores = model.fs_search_match_enc(embs_concat).squeeze()
+
+    # Only keep top scoring 'config.two_stage_num_proposals' proposals
+    topk = model.detr.config.two_stage_num_proposals
+    topk_proposals = rough_scores.topk(topk).indices
+    topk_coords_logits = torch.gather(
+        proposals_coords_logits, 1,
+        topk_proposals[None, ..., None].expand(1, -1, 4)
+    )
+    topk_coords_logits = topk_coords_logits.detach()
+    reference_points = topk_coords_logits.sigmoid()
+
+    # Now perform search based on the proposals from the encoder side
+
+    # Prepare decoder inputs
+    pos_trans_out = model.detr.model.get_proposal_pos_embed(topk_coords_logits)
+    pos_trans_out = model.detr.model.pos_trans_norm(
+        model.detr.model.pos_trans(pos_trans_out)
+    )
+    query_embed, target = torch.split(pos_trans_out, enc_emb.shape[-1], dim=2)
+
+    # Pass through the decoder; code below taken & simplified from
+    # DeformableDetrDecoder.forward()
+    hidden_states = target
+    for li, decoder_layer in enumerate(model.detr.model.decoder.layers):
+        reference_points_input = reference_points[:, :, None] * \
+            torch.cat([valid_ratios, valid_ratios], -1)[:, None]
+        
+        layer_outputs = decoder_layer(
+            hidden_states,
+            position_embeddings=query_embed,
+            encoder_hidden_states=enc_emb,
+            reference_points=reference_points_input,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            encoder_attention_mask=mask_flatten
+        )
+
+        hidden_states = layer_outputs[0]
+
+        # Iterative bounding box refinement
+        tmp = model.detr.model.decoder.bbox_embed[li](hidden_states)
+        new_reference_points = torch.special.logit(reference_points, eps=1e-6)
+        new_reference_points = tmp + new_reference_points
+        new_reference_points = new_reference_points.sigmoid()
+        reference_points = new_reference_points.detach()
+
+    dec_embs, last_reference_points = hidden_states, reference_points
+
+    cand_cls_embs = model.fs_embed_cls(dec_embs)
+    cand_att_embs = model.fs_embed_att(torch.cat([dec_embs, cand_cls_embs], dim=-1))
+    cand_embs = { "cls": cand_cls_embs, "att": cand_att_embs }
+
+    # Compute class/attribute-centric feature vectors for candidates as 
+    # needed, then prepare fused spec embedding -- this time with weighted
+    # prototypes (average feature vectors weighted by distance to support
+    # instances)
+    cls_w_proto_sums = torch.zeros(
+        dec_embs.shape[1], model.detr.config.d_model, device=model.device
+    )
+    att_w_proto_sums = torch.zeros(
+        dec_embs.shape[1], model.detr.config.d_model, device=model.device
+    )
+    for conc_type, pos_exs_vecs in conds:
+        if not isinstance(pos_exs_vecs, torch.Tensor):
+            pos_exs_vecs = torch.tensor(pos_exs_vecs, device=model.device)
+
+        dists_sq = torch.cdist(cand_embs[conc_type], pos_exs_vecs[None]) ** 2
+        exs_weights = F.softmax(-dists_sq, dim=-1)[0]
+        pos_w_protos = torch.einsum(
+            "cs,sd->cd", exs_weights, pos_exs_vecs
+        )
+
+        if conc_type == "cls":
+            cls_w_proto_sums = cls_w_proto_sums + pos_w_protos
+        elif conc_type == "att":
+            att_w_proto_sums = att_w_proto_sums + pos_w_protos
+        else:
+            # Dunno what should happen here yet...
+            raise NotImplementedError
+
+    # Fuse weighted prototypes into search spec embeddings, adapted for each
+    # candidate
+    fused_adaptive_spec_embs = torch.cat(
+        [cls_w_proto_sums, att_w_proto_sums], dim=-1
+    )
+    fused_adaptive_spec_embs = model.fs_spec_fuse(fused_adaptive_spec_embs)
+
+    # Concat decoder outputs + adapted search spec embeddings for further
+    # prediction
+    embs_concat = torch.cat([dec_embs[0], fused_adaptive_spec_embs], dim=-1)
+
+    # Obtain (conditioned) bbox estimates
+    delta_bbox = model.fs_search_bbox(embs_concat)
+    cand_coords_logits = delta_bbox + torch.special.logit(last_reference_points[0])
+
+    # Search compatibility scores based on support vs. candidate embeddings
+    cand_scores = model.fs_search_match_dec(embs_concat).squeeze()
+
+    # Output values: Rough encoder-side proposal boxes and scores + final decoder-side
+    # prediction boxes and scores
+    return (
+        proposals_coords_logits[0].sigmoid(), rough_scores,
+        cand_coords_logits.sigmoid(), cand_scores
+    )
 
 
 class _DeformableDetrLossWithGamma(DeformableDetrLoss):

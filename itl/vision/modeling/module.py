@@ -12,7 +12,7 @@ from transformers.models.deformable_detr.modeling_deformable_detr import (
 )
 
 from .detr_abridged import detr_enc_outputs, detr_dec_outputs
-from .few_shot import compute_loss_and_metrics
+from .few_shot import compute_loss_and_metrics, few_shot_search_img
 
 
 class FewShotSceneGraphGenerator(pl.LightningModule):
@@ -317,7 +317,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         return cls_embeddings, att_embeddings, final_bboxes
 
-    def search(self, image, conds, k=100):
+    def search(self, image, conds, k=None):
         """
         For few-shot search (exemplar-based conditioned detection). Given an image
         and a list of (concept type, exemplar vector set) pairs, find and return
@@ -325,62 +325,25 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         highly accurate at this stage, as they will be further processed by the full
         model and tested again.
         """
-        # Process up to encoder output
-        enc_emb, _, spatial_shapes, _, mask_flatten = detr_enc_outputs(
-            self.detr, image, self.feature_extractor
-        )
+        enc_out = detr_enc_outputs(self.detr, image, self.feature_extractor)
+        _, _, outputs_coords, outputs_scores = \
+            few_shot_search_img(self, enc_out, conds)
 
-        # Generate proposal templates
-        gen_proposals_fn = self.detr.model.gen_encoder_output_proposals
-        _, output_proposals = gen_proposals_fn(
-            enc_emb, ~mask_flatten, spatial_shapes
-        )
-
-        # Prepare search spec embedding
-        cls_proto_sum = torch.zeros(self.detr.config.d_model).to(self.device)
-        att_proto_sum = torch.zeros(self.detr.config.d_model).to(self.device)
-        for conc_type, pos_exs_vecs in conds:
-            pos_proto = torch.tensor(pos_exs_vecs).to(self.device).mean(dim=0)
-            if conc_type == "cls":
-                cls_proto_sum = cls_proto_sum + pos_proto
-            elif conc_type == "att":
-                att_proto_sum = att_proto_sum + pos_proto
-            else:
-                # Dunno what should happen here yet...
-                raise NotImplementedError
-
-        # Project sums of prototypes (or lack thereof) to embedding space
-        spec_emb = torch.cat([cls_proto_sum, att_proto_sum], dim=-1)
-        spec_emb = self.fs_spec_fuse(spec_emb)
-
-        embs_concat = torch.cat([
-            enc_emb, spec_emb[None, None].expand_as(enc_emb)
+        # Relative to absolute bbox dimensions, then center- to corner-format
+        outputs_coords = torch.stack([
+            outputs_coords[:,0] * image.width, outputs_coords[:,1] * image.height,
+            outputs_coords[:,2] * image.width, outputs_coords[:,3] * image.height
         ], dim=-1)
-
-        # Perform search by computing 'compatibility scores' and predicting bboxes
-        # (delta thereof, w.r.t. the templates generated)
-        search_scores = torch.einsum(
-            "bqd,d->bq", enc_emb,
-            self.fs_search_match(spec_emb)
-        )
-        search_scores = search_scores[0].sigmoid()
-        search_coord_deltas = self.fs_search_bbox(embs_concat)
-        search_coord_logits = search_coord_deltas + output_proposals
-        search_coords = search_coord_logits[0].sigmoid()
-        search_coords = torch.stack([
-            search_coords[:,0] * image.width, search_coords[:,1] * image.height,
-            search_coords[:,2] * image.width, search_coords[:,3] * image.height
-        ], dim=-1)
-        search_coords = box_convert(search_coords, "cxcywh", "xyxy")
-        search_coords = clip_boxes_to_image(
-            search_coords, (image.height, image.width)
+        outputs_coords = box_convert(outputs_coords, "cxcywh", "xyxy")
+        outputs_coords = clip_boxes_to_image(
+            outputs_coords, (image.height, image.width)
         )
 
-        # Top k search outputs (after) nms
-        iou_thres = 0.65
-        topk_inds = nms(search_coords, search_scores, iou_thres)[:k]
+        if k is None:
+            k = len(outputs_coords)
+        topk_inds = outputs_scores.topk(k).indices
 
-        return search_coords[topk_inds], search_scores[topk_inds]
+        return outputs_coords[topk_inds], outputs_scores[topk_inds]
 
     def _process_batch(self, batch):
         """
@@ -456,7 +419,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         # Computing appropriate loss & metric values according to task specification
         loss, metrics = compute_loss_and_metrics(
             self, self.cfg.vision.task, conc_type,
-            detr_enc_outs, detr_dec_outs, B, N, K, bboxes_search_targets
+            detr_enc_outs, detr_dec_outs, N, K, bboxes_search_targets
         )
 
         return loss, metrics

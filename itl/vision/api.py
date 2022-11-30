@@ -348,7 +348,7 @@ class VisionModule:
                             agg_compatibility_scores = torch.minimum(
                                 agg_compatibility_scores, comp_scores
                             )
-                        
+
                         # Finally choose and keep the best search output
                         best_match_ind = agg_compatibility_scores.max(dim=0).indices
                         incr_cls_embeddings.append(cls_embeddings[best_match_ind])

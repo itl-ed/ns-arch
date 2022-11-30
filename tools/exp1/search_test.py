@@ -64,9 +64,9 @@ def main(cfg):
             pos_exs_vecs = torch.tensor(pos_exs_vecs).to(agent.vision.model.device)
 
             proposals, scores = \
-                agent.vision.model.search(image, [("cls", pos_exs_vecs)], 10)
+                agent.vision.model.search(image, [("cls", pos_exs_vecs)], 1)
 
-            # Plot result; overlay heatmap on image, then plot top-k proposals
+            # Plot result; overlay top-k proposals on image
             plt.imshow(image)
             ax = plt.gca()
 
@@ -91,6 +91,7 @@ def main(cfg):
             plt.savefig(os.path.join(
                 cfg.paths.outputs_dir, "search_test", f"{img_file.strip('.jpg')}_{part}.png"
             ))
+            plt.cla()
 
 
 if __name__ == "__main__":
