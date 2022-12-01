@@ -41,7 +41,8 @@ def main(cfg):
     intermediary_concepts = {
         "cls": {        # Hand-picked; object parts
             "handle.n.01", "body.n.08", "meat.n.01", "tine.n.01", "foot.n.03", "label.n.01",
-            "bowl.n.01", "stem.n.03", "neck.n.04", "blade.n.09", "bone.n.01"
+            "bowl.n.01", "stem.n.03", "neck.n.04", "blade.n.09", "bone.n.01",
+            "drinking_glass.n.01", "utensil.n.01", "wine_bottle.n.01"
         },
         # "cls": {        # Hand-picked; glasses and glass parts
         #     "drinking_glass.n.01",

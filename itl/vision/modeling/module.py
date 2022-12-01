@@ -5,14 +5,14 @@ from collections import OrderedDict, defaultdict
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from torchvision.ops import box_convert, clip_boxes_to_image, nms
+from torchvision.ops import box_convert, clip_boxes_to_image
 from transformers import AutoFeatureExtractor, DeformableDetrForObjectDetection
 from transformers.models.deformable_detr.modeling_deformable_detr import (
     DeformableDetrMLPPredictionHead
 )
 
 from .detr_abridged import detr_enc_outputs, detr_dec_outputs
-from .few_shot import compute_loss_and_metrics, few_shot_search_img
+from .few_shot import compute_fs_classify, compute_fs_search, few_shot_search_img
 
 
 class FewShotSceneGraphGenerator(pl.LightningModule):
@@ -88,7 +88,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                 for prm in self.fs_embed_att.parameters():
                     prm.requires_grad = True
             elif self.cfg.vision.task == "fs_search":
-                # Few-shot search with encoder output embeddings
+                # Few-shot search with encoder/decoder output embeddings
                 for prm in self.fs_spec_fuse.parameters():
                     prm.requires_grad = True
                 for prm in self.fs_search_match_enc.parameters():
@@ -317,7 +317,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         return cls_embeddings, att_embeddings, final_bboxes
 
-    def search(self, image, conds, k=None):
+    def search(self, image, conds_lists, k=None):
         """
         For few-shot search (exemplar-based conditioned detection). Given an image
         and a list of (concept type, exemplar vector set) pairs, find and return
@@ -327,7 +327,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
         """
         enc_out = detr_enc_outputs(self.detr, image, self.feature_extractor)
         _, _, outputs_coords, outputs_scores = \
-            few_shot_search_img(self, enc_out, conds)
+            few_shot_search_img(self, enc_out, conds_lists)
 
         # Relative to absolute bbox dimensions, then center- to corner-format
         outputs_coords = torch.stack([
@@ -353,12 +353,9 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         batch_data, conc_type = batch
 
-        conc_labels = batch_data["concept_label"]
-
         if "image" in batch_data:
             images = batch_data["image"]
             bboxes = batch_data["bboxes"]
-            bb_inds = batch_data["bb_inds"]
 
             bboxes = [box_convert(bbs, "xywh", "cxcywh") for bbs in bboxes]
             bboxes = [
@@ -375,54 +372,44 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             assert "dec_out_cached" in batch_data
             B = len(batch_data["dec_out_cached"])
 
-        N = len(set(conc_labels))
-        K = B // N
+        if self.cfg.vision.task == "fs_classify":
+            conc_labels = batch_data["concept_label"]
+            N = len(set(conc_labels))
+            K = B // N
 
-        # DETR Decoder output vectors, either computed from scratch or cached values
-        # retrieved from disk
-        detr_enc_outs = []; detr_dec_outs = []
-        if "dec_out_cached" in batch_data:
-            # Decoder outputs are pre-computed and retrieved
-            detr_dec_outs = batch_data["dec_out_cached"]
+            # DETR Decoder output vectors, either computed from scratch or cached
+            # values retrieved
+            detr_dec_outs = []
+            if "dec_out_cached" in batch_data:
+                # Decoder outputs are pre-computed and retrieved
+                detr_dec_outs = batch_data["dec_out_cached"]
+            else:
+                # Need to compute from images in batch
 
-            if self.cfg.vision.task == "fs_search":
-                # Few-shot search task needs encoder outputs (per-pixel vectors)
-                assert images is not None
-                for img in images:
-                    enc_out = detr_enc_outputs(
-                        self.detr, img, self.feature_extractor
-                    )
-                    detr_enc_outs.append(enc_out)
+                # Process each image with DETR - one-by-one
+                for img, bbs, bbis in zip(images, bboxes, zip(*batch_data["bb_inds"])):
+                    bbis = torch.stack(bbis)
+                    enc_out, dec_out = self.fvecs_from_image_and_bboxes(img, bbs)
+                    detr_dec_outs.append(dec_out[0,bbis])
+
+                detr_dec_outs = torch.stack(detr_dec_outs, dim=0)
+            
+            return compute_fs_classify(self, conc_type, detr_dec_outs, N, K)
+
         else:
-            # Need to compute from images in batch
+            detr_enc_outs = []
+            # Few-shot search task needs encoder outputs (per-pixel vectors)
+            assert images is not None
+            for img in images:
+                enc_out = detr_enc_outputs(
+                    self.detr, img, self.feature_extractor
+                )
+                detr_enc_outs.append(enc_out)
 
-            # Process each image with DETR - one-by-one
-            for img, bbs, bbis in zip(images, bboxes, zip(*bb_inds)):
-                bbis = torch.stack(bbis)
-                enc_out, dec_out = self.fvecs_from_image_and_bboxes(img, bbs)
-                detr_dec_outs.append(dec_out[0,bbis])
-
-                if self.cfg.vision.task == "fs_search":
-                    # Few-shot search task needs encoder outputs (per-pixel vectors)
-                    detr_enc_outs.append(enc_out)
-
-            detr_dec_outs = torch.stack(detr_dec_outs, dim=0)
-
-        # Search targets in few-shot search mode
-        if self.cfg.vision.task == "fs_search":
-            bboxes_search_targets = [
-                bbs[bbis] for bbs, bbis in zip(bboxes, batch_data["bb_all"])
-            ]
-        else:
-            bboxes_search_targets = None
-
-        # Computing appropriate loss & metric values according to task specification
-        loss, metrics = compute_loss_and_metrics(
-            self, self.cfg.vision.task, conc_type,
-            detr_enc_outs, detr_dec_outs, N, K, bboxes_search_targets
-        )
-
-        return loss, metrics
+            return compute_fs_search(
+                self, conc_type, detr_enc_outs, bboxes,
+                batch_data["bb_inds"], batch_data["supp_vecs"]
+            )
 
     def fvecs_from_image_and_bboxes(self, image, bboxes):
         """
