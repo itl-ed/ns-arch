@@ -77,19 +77,31 @@ class VisionModule:
         if self.fs_model_path.startswith(WB_PREFIX):
             wb_entity = os.environ.get("WANDB_ENTITY")
             wb_project = os.environ.get("WANDB_PROJECT")
-            wb_run_id = self.fs_model_path[len(WB_PREFIX):]
+            wb_path = self.fs_model_path[len(WB_PREFIX):].split(":")
 
+            if len(wb_path) == 1:
+                wb_run_id = wb_path[0]
+                wb_alias = "best_k"
+            else:
+                assert len(wb_path) == 2
+                wb_run_id, wb_alias = wb_path
+
+            wb_full_path = f"{wb_entity}/{wb_project}/model-{wb_run_id}:{wb_alias}"
             local_ckpt_path = WandbLogger.download_artifact(
-                artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
+                artifact=wb_full_path,
                 save_dir=os.path.join(
                     self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
                 )
             )
-            local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
+            os.rename(
+                os.path.join(local_ckpt_path, f"model.ckpt"),
+                os.path.join(local_ckpt_path, f"model_{wb_alias}.ckpt")
+            )
+            local_ckpt_path = os.path.join(local_ckpt_path, f"model_{wb_alias}.ckpt")
+            logger.info(F"Loading few-shot component weights from {wb_full_path}")
         else:
             local_ckpt_path = self.fs_model_path
-
-        logger.info(F"Loading few-shot component weights from {self.fs_model_path}")
+            logger.info(F"Loading few-shot component weights from {local_ckpt_path}")
 
         ckpt = torch.load(local_ckpt_path)
         self.model.load_state_dict(ckpt["state_dict"], strict=False)
@@ -256,8 +268,8 @@ class VisionModule:
                                 continue
 
                         # Run search method to obtain region proposals
-                        proposals, _ = self.model.search(self.last_input, search_conds)
-                        proposals = box_convert(proposals, "xyxy", "xywh")
+                        proposals, _ = self.model.search(self.last_input, [search_conds])
+                        proposals = box_convert(proposals[:,0,:], "xyxy", "xywh")
 
                         # Predict on the proposals
                         cls_embeddings, att_embeddings, bboxes_out = self.model(

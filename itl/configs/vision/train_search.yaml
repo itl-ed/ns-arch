@@ -24,7 +24,6 @@ optim:
     eps: 1e-8
     lr_scheduler: "MultiStepLR"
     lr_scheduler_milestones:
-        - 0.8
         - 0.9
     lr_scheduler_gamma: 3e-1
     max_steps: 6000

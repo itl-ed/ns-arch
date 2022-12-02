@@ -13,18 +13,15 @@ warnings.filterwarnings("ignore")
 from PIL import Image
 
 import hydra
-import cv2
 import torch
 import tqdm as tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
-from torchvision.ops import box_convert, clip_boxes_to_image, nms
 from omegaconf import OmegaConf
 
 from itl import ITLAgent
-from itl.vision.modeling.detr_abridged import detr_enc_outputs
 
 
 TAB = "\t"
@@ -32,6 +29,8 @@ TAB = "\t"
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
+
+    random.seed(cfg.seed)
 
     # Setting custom colormap where lower scores give lower alpha (more transparent)
     ncolors = 256
@@ -64,7 +63,7 @@ def main(cfg):
             pos_exs_vecs = torch.tensor(pos_exs_vecs).to(agent.vision.model.device)
 
             proposals, scores = \
-                agent.vision.model.search(image, [("cls", pos_exs_vecs)], 1)
+                agent.vision.model.search(image, [[("cls", pos_exs_vecs)]], 1)
 
             # Plot result; overlay top-k proposals on image
             plt.imshow(image)
@@ -72,7 +71,7 @@ def main(cfg):
 
             for bbox, score in zip(proposals, scores):
                 # Bounding box rectangle
-                x1, y1, x2, y2 = bbox.tolist()
+                x1, y1, x2, y2 = bbox[0].tolist()
                 rec = Rectangle(
                     (x1, y1), x2-x1, y2-y1,
                     linewidth=1, edgecolor="r", facecolor="none"
@@ -81,7 +80,7 @@ def main(cfg):
 
                 # Search score
                 text_label = ax.text(
-                    x1, y1, f"{score.item():.3f}",
+                    x1, y1, f"{score[0].item():.3f}",
                     color="w", fontsize=7
                 )
                 text_label.set_bbox(

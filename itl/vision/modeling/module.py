@@ -331,8 +331,8 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         # Relative to absolute bbox dimensions, then center- to corner-format
         outputs_coords = torch.stack([
-            outputs_coords[:,0] * image.width, outputs_coords[:,1] * image.height,
-            outputs_coords[:,2] * image.width, outputs_coords[:,3] * image.height
+            outputs_coords[:,:,0] * image.width, outputs_coords[:,:,1] * image.height,
+            outputs_coords[:,:,2] * image.width, outputs_coords[:,:,3] * image.height
         ], dim=-1)
         outputs_coords = box_convert(outputs_coords, "cxcywh", "xyxy")
         outputs_coords = clip_boxes_to_image(
@@ -341,7 +341,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
 
         if k is None:
             k = len(outputs_coords)
-        topk_inds = outputs_scores.topk(k).indices
+        topk_inds = outputs_scores.max(dim=-1).values.topk(k).indices
 
         return outputs_coords[topk_inds], outputs_scores[topk_inds]
 
