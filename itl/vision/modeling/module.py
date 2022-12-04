@@ -99,7 +99,7 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
                     prm.requires_grad = True
             else:
                 raise ValueError("Invalid task type for training")
-        
+
         self.save_hyperparameters()
 
     def training_step(self, batch, *_):
@@ -107,9 +107,13 @@ class FewShotSceneGraphGenerator(pl.LightningModule):
             # Simpler case of single batch from single dataloader
             loss, metrics = self._process_batch(batch)
 
-            self.log("train_loss", loss.item())
+            conc_type = batch[1]
+            if isinstance(conc_type, tuple):
+                conc_type = "+".join(conc_type)
+
+            self.log(f"train_loss_{conc_type}", loss.item())
             for metric, val in metrics.items():
-                self.log(f"train_{metric}", val)
+                self.log(f"train_{metric}_{conc_type}", val)
 
             return loss
         else:

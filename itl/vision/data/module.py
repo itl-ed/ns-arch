@@ -100,12 +100,23 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         # in metadata
         self.datasets = {}; self.samplers = {}
         for conc_type in ["classes", "attributes"]: #, "relations"]:
+            if len(metadata[f"{conc_type}_train_split"]) == 0 or \
+                len(metadata[f"{conc_type}_val_split"]) == 0:
+                continue
+
             self.datasets[conc_type] = {}
             self.samplers[conc_type] = {}
 
             hypernym_info = metadata[f"{conc_type}_hypernyms"] \
                 if f"{conc_type}_hypernyms" in metadata else {}
             hypernym_info = { int(k): set(v) for k, v in hypernym_info.items() }
+
+            if self.cfg.vision.task == "fs_classify":
+                batch_size = self.cfg.vision.data.batch_size
+                batch_size_eval = self.cfg.vision.data.batch_size_eval
+            else:
+                assert self.cfg.vision.task == "fs_search"
+                batch_size = batch_size_eval = 1
 
             if stage in ["fit"]:
                 # Training set required for "fit" stage setup
@@ -117,11 +128,9 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     task_type=self.cfg.vision.task
                 )
                 self.samplers[conc_type]["train"] = _FewShotSGGDataSampler(
-                    index_train, hypernym_info,
-                    self.cfg.vision.data.batch_size,
+                    index_train, hypernym_info, batch_size,
                     self.cfg.vision.data.num_exs_per_conc,
-                    task_type=self.cfg.vision.task,
-                    with_replacement=True
+                    task_type=self.cfg.vision.task
                 )
             if stage in ["fit", "validate"]:
                 # Validation set required for "fit"/"validate" stage setup
@@ -133,10 +142,11 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     task_type=self.cfg.vision.task
                 )
                 self.samplers[conc_type]["val"] = _FewShotSGGDataSampler(
-                    index_val, hypernym_info,
-                    self.cfg.vision.data.batch_size_eval,
+                    index_val, hypernym_info, batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    task_type=self.cfg.vision.task
+                    task_type=self.cfg.vision.task,
+                    with_replacement=False,
+                    compress=self.cfg.vision.optim.compress_eval
                 )
             if stage in ["test"]:
                 # Test set required for "fit"/"test"/"predict" stage setup
@@ -148,14 +158,17 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                     task_type=self.cfg.vision.task
                 )
                 self.samplers[conc_type]["test"] = _FewShotSGGDataSampler(
-                    index_test, hypernym_info,
-                    self.cfg.vision.data.batch_size_eval,
+                    index_test, hypernym_info, batch_size_eval,
                     self.cfg.vision.data.num_exs_per_conc_eval,
-                    task_type=self.cfg.vision.task
+                    task_type=self.cfg.vision.task,
+                    with_replacement=False,
+                    compress=self.cfg.vision.optim.compress_eval
                 )
 
         # Also setup class+attribute hybrid dataloader for few-shot search task
-        if self.cfg.vision.task == "fs_search":
+        if self.cfg.vision.task == "fs_search" and \
+            "classes" in self.datasets and "attributes" in self.datasets:
+
             self.datasets["classes_and_attributes"] = {}
             self.samplers["classes_and_attributes"] = {}
 
@@ -224,13 +237,15 @@ class FewShotSGGDataModule(pl.LightningDataModule):
 
                 self.samplers["classes_and_attributes"][spl] = _FewShotSGGDataSampler(
                     combi_index_conc, combi_hypernym_info,
-                    cls_sampler.batch_size, cls_sampler.num_exs_per_conc,
+                    cls_sampler.batch_size,
+                    cls_sampler.num_exs_per_conc,
                     task_type="fs_search",
-                    with_replacement=cls_sampler.with_replacement
+                    with_replacement=cls_sampler.with_replacement,
+                    compress=cls_sampler.compress
                 )
 
     def train_dataloader(self):
-        return self._return_dataloaders("train")
+        return _ChainedLoader(*self._return_dataloaders("train"))
     
     def val_dataloader(self):
         return self._return_dataloaders("val")
@@ -239,30 +254,18 @@ class FewShotSGGDataModule(pl.LightningDataModule):
         return self._return_dataloaders("test")
 
     def _return_dataloaders(self, split):
-        if self.cfg.vision.task == "fs_classify":
-            # For few-shot classification task, return single dataloader for the
-            # corresponding concept type and split
-            return [
-                self._fetch_dataloader("classes", split),
-                self._fetch_dataloader("attributes", split)
-            ]
-        elif self.cfg.vision.task == "fs_search":
-            # For few-shot search task, return list of dataloaders for the split,
-            # class-only loader, attribute-only loader and class+attribute loader
-            return [
-                self._fetch_dataloader("classes", split),
-                # self._fetch_dataloader("attributes", split),
-                # self._fetch_dataloader("classes_and_attributes", split)
-            ]
-        else:
-            raise ValueError("Invalid prediction task type")
+        return [
+            self._fetch_dataloader(conc_type, split)
+            for conc_type in self.datasets
+        ]
 
     def _fetch_dataloader(self, conc_type, split):
         return DataLoader(
             dataset=self.datasets[conc_type][split],
             batch_sampler=self.samplers[conc_type][split],
             num_workers=self.cfg.vision.data.num_loader_workers,
-            collate_fn=self._collate_fn
+            collate_fn=self._collate_fn,
+            prefetch_factor=1
         )
 
     @staticmethod
@@ -292,6 +295,17 @@ class FewShotSGGDataModule(pl.LightningDataModule):
                 collated[field] = default_collate([d[0][field] for d in data])
 
         return collated, conc_type
+
+
+class _ChainedLoader:
+    def __init__(self, *dataloaders):
+        self.dataloaders = dataloaders
+    
+    def __iter__(self):
+        iters = [iter(dl) for dl in self.dataloaders]
+        while True:
+            for it in iters:
+                yield next(it)
 
 
 class _SGGDataset(Dataset):
@@ -386,12 +400,17 @@ class _SGGDataset(Dataset):
             data_dict["bb_inds"] = [None] * len(c2i)
             data_dict["supp_vecs"] = [None] * len(c2i)
             for conc, exs in support_exs.items():
+                if isinstance(self.conc_type, tuple):
+                    conc_conds = list(zip(self.conc_type, conc))
+                else:
+                    conc_conds = [(self.conc_type, conc)]
+
                 # Bounding boxes of all instances for each concept label, with respect
                 # to the label space defined by the set of (re-indexed) concepts
                 data_dict["bb_inds"][c2i[conc]] = [
                     oids.index(oid)
                     for oid, ann in self.annotations[img_id]["annotations"].items()
-                    if conc in ann[self.conc_type]
+                    if all(ci in ann[ct] for ct, ci in conc_conds)
                 ]
 
                 # Support example vectors for each concept label
@@ -407,7 +426,7 @@ class _SGGDataset(Dataset):
                     torch.stack([all_vecs[str(oi)] for oi in ois], dim=0)
                     for all_vecs, ois in ex_vecs
                 ], dim=0)
-                
+
                 data_dict["supp_vecs"][c2i[conc]] = ex_vecs
 
             return data_dict, self.conc_type
@@ -427,7 +446,7 @@ class _FewShotSGGDataSampler:
     """
     def __init__(
         self, index_conc, hypernym_info, batch_size, num_exs_per_conc, task_type,
-        with_replacement=False,
+        with_replacement=True, compress=False
     ):
         self.index_conc = index_conc
         self.hypernym_info = hypernym_info
@@ -437,6 +456,13 @@ class _FewShotSGGDataSampler:
         self.task_type = task_type
 
         self.with_replacement = with_replacement
+        self.compress = compress
+
+        # Filter concepts to leave only those with more than K instances for use
+        self.index_conc = {
+            k: v for k, v in self.index_conc.items()
+            if len(v) >= self.num_exs_per_conc
+        }
 
         # Build ontology tree (forest) from contained concepts and provided
         # hypernym metadata info, find connected components; later we will
@@ -445,13 +471,11 @@ class _FewShotSGGDataSampler:
         # tree
         self.ont_forest = nx.Graph()
         for c in self.index_conc:
-            if len(self.index_conc[c]) >= self.num_exs_per_conc:
-                self.ont_forest.add_node(c)
-                if c in self.hypernym_info:
-                    for h in self.hypernym_info[c]:
-                        if h in self.index_conc and \
-                            len(self.index_conc[h]) >= self.num_exs_per_conc:
-                            self.ont_forest.add_edge(c, h)
+            self.ont_forest.add_node(c)
+            if c in self.hypernym_info:
+                for h in self.hypernym_info[c]:
+                    if h in self.index_conc:
+                        self.ont_forest.add_edge(c, h)
         self.ont_forest = [
             list(comp) for comp in nx.connected_components(self.ont_forest)
         ]
@@ -490,12 +514,6 @@ class _FewShotSGGDataSampler:
                 # Then sample one concept from each sampled component
                 sampled_concs = [random.sample(comp, 1)[0] for comp in sampled_comps]
 
-                # Leave only those concepts with enough number of instances remaining
-                sampled_concs = [
-                    conc for conc in sampled_concs
-                    if len(conc_exemplars[conc]) >= self.num_exs_per_conc
-                ]
-
                 # Now sample K instances per sampled concepts
                 sampled_indices = [
                     (random.sample(conc_exemplars[conc], self.num_exs_per_conc), conc)
@@ -526,50 +544,79 @@ class _FewShotSGGDataSampler:
                 yield sampled_indices
 
         if self.task_type == "fs_search":
-            # Image-based sampling of support sets for few-shot search
+            # Concept-based sampling of images for few-shot search
             images = list(self.index_img)
+            concepts_to_cover = set(self.index_conc)
 
             while True:
                 if len(images) < self.batch_size:
                     return
 
-                sampled_imgs = random.sample(images, self.batch_size)
-                if not self.with_replacement:
-                    # Pop image from image list
-                    for img in sampled_imgs:
-                        images.remove(img)
-
-                # Sample (at most) K exemplars (from other images) for each concept
-                # included
                 sampled_batch = []
-                for s_img in sampled_imgs:
-                    support_exs = {}
+                while len(sampled_batch) < self.batch_size and len(images) > 0:
+                    if self.with_replacement:
+                        # Make sure the each concept is included at most every C
+                        # samples (where C is the total number of concepts)
+                        if len(concepts_to_cover) == 0:
+                            concepts_to_cover = set(self.index_conc)
+
+                        smp_conc = random.sample(concepts_to_cover, 1)[0]
+                        smp_img = random.sample(self.index_conc[smp_conc], 1)[0][0]
+                    else:
+                        smp_img = images.pop()
+
+                        # If self.compress flag is set to True, skip images that
+                        # only contain instances of concepts already covered, in
+                        # the interest of time
+                        if self.compress:
+                            if len(set(self.index_img[smp_img]) & concepts_to_cover) == 0:
+                                continue
 
                     # Make sure many-to-one mapping is avoided by allowing only one
                     # concept from each independent ontology tree
                     belonging_trees_inds = {
                         conc: [conc in tree for tree in self.ont_forest].index(True)
-                        for conc in self.index_img[s_img]
+                        for conc in self.index_img[smp_img]
+                        if any(conc in tree for tree in self.ont_forest)
                     }
+                    concepts_by_belonging_trees = defaultdict(list)
+                    for conc, ti in belonging_trees_inds.items():
+                        concepts_by_belonging_trees[ti].append(conc)
+
                     sampled_concepts = [
-                        random.sample(self.ont_forest[ti], 1)[0]
-                        for ti in belonging_trees_inds.values()
+                        random.sample(concs, 1)[0]
+                        for concs in concepts_by_belonging_trees.values()
                     ]
 
+                    # Sample (at most) K exemplars from other images for each concept
+                    # included
+                    support_exs = {}
                     for conc in sampled_concepts:
                         exs_from_other_imgs = [
                             (img_id, obj_ids)
                             for img_id, obj_ids in self.index_conc[conc]
-                            if img_id != s_img
+                            if img_id != smp_img
                         ]
-                        if len(exs_from_other_imgs) > self.num_exs_per_conc:
+                        if len(exs_from_other_imgs) >= self.num_exs_per_conc:
                             exs_from_other_imgs = random.sample(
                                 exs_from_other_imgs, self.num_exs_per_conc
                             )
-                        
+                        else:
+                            # Not enough support instances from other images!
+                            concepts_to_cover -= {conc}
+                            continue
+
                         support_exs[conc] = exs_from_other_imgs
-                    
-                    sampled_batch.append((s_img, support_exs))
+
+                    if len(support_exs) == 0:
+                        # Nothing to detect here
+                        continue
+
+                    concepts_to_cover -= set(sampled_concepts)
+                    sampled_batch.append((smp_img, support_exs))
+
+                if len(sampled_batch) < self.batch_size:
+                    continue
 
                 yield sampled_batch
 

@@ -532,6 +532,14 @@ class VisionModule:
         # Prepare DataModule from data config
         dm = FewShotSGGDataModule(self.cfg)
 
+        # Search task -- especially with VG datasets, consisting of bigger images --
+        # is quite demanding w.r.t. memory consumption... let's accumulate gradients
+        # instead, using the batch size config.
+        if self.cfg.vision.task == "fs_search":
+            accumulate_grad_batches = self.cfg.vision.data.batch_size
+        else:
+            accumulate_grad_batches = 1
+
         # Configure and run trainer
         wb_logger = WandbLogger(
             # offline=True,           # Uncomment for offline run (comment out log_model)
@@ -543,14 +551,18 @@ class VisionModule:
         trainer = pl.Trainer(
             accelerator="auto",
             max_steps=self.cfg.vision.optim.max_steps,
-            gradient_clip_val=1.0,
+            accumulate_grad_batches=accumulate_grad_batches,
             check_val_every_n_epoch=None,       # Iteration-based val
             log_every_n_steps=self.cfg.vision.optim.log_interval,
             val_check_interval=self.cfg.vision.optim.val_interval,
             num_sanity_val_steps=0,
             logger=wb_logger,
             callbacks=[
-                ModelCheckpoint(monitor="val_loss", save_last=True),
+                ModelCheckpoint(
+                    monitor="val_loss",
+                    every_n_train_steps=self.cfg.vision.optim.val_interval,
+                    save_last=True
+                ),
                 LearningRateMonitor(logging_interval='step')
             ]
         )
