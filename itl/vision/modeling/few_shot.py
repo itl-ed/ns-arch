@@ -55,7 +55,7 @@ def compute_fs_classify(model, conc_type, detr_dec_outs, N, K):
             top2k = set(topk_closest_exs[ind].tolist()) - {ind}
             r_at_k += len(topk & pos_exs_inds) / (K - 1)
             r_at_2k += len(top2k & pos_exs_inds) / (K - 1)
-    
+
     B = N * K
     metrics["recall@K"] = r_at_k / B
     metrics["recall@2K"] = r_at_2k / B

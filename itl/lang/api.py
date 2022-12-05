@@ -366,17 +366,27 @@ class LanguageModule:
 
     def acknowledge(self):
         """ Push an acknowledging utterance to generation buffer """
-        self.dialogue.to_generate.append("OK.")
+        self.dialogue.to_generate.append((None, "OK."))
 
     def generate(self):
         """ Flush the buffer of utterances prepared """
         if len(self.dialogue.to_generate) > 0:
-            utt = " ".join(self.dialogue.to_generate)
-            print(f"A> {utt}")
+            return_val = []
+
+            for logical_forms, surface_form in self.dialogue.to_generate:
+                if logical_forms is None:
+                    logical_forms = (None, None)
+
+                new_record = ("A", logical_forms, surface_form)
+                self.dialogue.record.append(new_record)
+
+                # Print NL utterance
+                print(f"A> {surface_form}")
+                return_val.append(("generate", surface_form))
 
             self.dialogue.to_generate = []
             
-            return ("generate", utt)
+            return return_val
         else:
             return
 

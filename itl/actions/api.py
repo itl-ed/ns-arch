@@ -36,66 +36,56 @@ class AgentCompositeActions:
 
         rule, _ = mismatch
 
-        if self.agent.cfg.agent.strat_mismatch == "zeroInit":
-            # Zero initiative from agent's end; do not ask any further question, simply
-            # perform few-shot vision model updates (if possible) and acknowledge "OK"
-            if rule.is_grounded() and len(rule.literals())==1:
-                if rule.is_fact():
-                    # Positive grounded fact
-                    atom = rule.head[0]
-                    exm_pointer = ({0}, set())
-                else:
-                    # Negative grounded fact
-                    atom = rule.body[0]
-                    exm_pointer = (set(), {0})
+        if rule.is_grounded() and len(rule.literals())==1:
+            if rule.is_fact():
+                # Positive grounded fact
+                atom = rule.head[0]
+                exm_pointer = ({0}, set())
+            else:
+                # Negative grounded fact
+                atom = rule.body[0]
+                exm_pointer = (set(), {0})
 
-                conc_type, conc_ind = atom.name.split("_")
-                conc_ind = int(conc_ind)
-                args = [a for a, _ in atom.args]
+            conc_type, conc_ind = atom.name.split("_")
+            conc_ind = int(conc_ind)
+            args = [a for a, _ in atom.args]
 
-                ex_bboxes = [
-                    box_convert(
-                        torch.tensor(self.agent.lang.dialogue.referents["env"][a]["bbox"]),
-                        "xyxy", "xywh"
-                    ).numpy()
-                    for a in args
-                ]
+            ex_bboxes = [
+                box_convert(
+                    torch.tensor(self.agent.lang.dialogue.referents["env"][a]["bbox"]),
+                    "xyxy", "xywh"
+                ).numpy()
+                for a in args
+            ]
 
-                # Fetch current score for the asserted fact
-                if conc_type == "cls":
-                    f_vec = self.agent.vision.f_vecs[args[0]][0]
-                elif conc_type == "att":
-                    f_vec = self.agent.vision.f_vecs[args[0]][1]
-                else:
-                    assert conc_type == "rel"
-                    raise NotImplementedError   # Step back for relation prediction...
+            # Fetch current score for the asserted fact
+            if conc_type == "cls":
+                f_vec = self.agent.vision.f_vecs[args[0]][0]
+            elif conc_type == "att":
+                f_vec = self.agent.vision.f_vecs[args[0]][1]
+            else:
+                assert conc_type == "rel"
+                raise NotImplementedError   # Step back for relation prediction...
 
-                # Add new concept exemplars to memory, as feature vectors at the
-                # penultimate layer right before category prediction heads
-                pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
-                pointers_exm = { conc_ind: exm_pointer }
+            # Add new concept exemplars to memory, as feature vectors at the
+            # penultimate layer right before category prediction heads
+            pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
+            pointers_exm = { conc_ind: exm_pointer }
 
-                self.agent.lt_mem.exemplars.add_exs(
-                    sources=[(np.asarray(self.agent.vision.last_input), ex_bboxes)],
-                    f_vecs={ conc_type: f_vec[None,:] },
-                    pointers_src={ conc_type: pointers_src },
-                    pointers_exm={ conc_type: pointers_exm }
-                )
+            self.agent.lt_mem.exemplars.add_exs(
+                sources=[(np.asarray(self.agent.vision.last_input), ex_bboxes)],
+                f_vecs={ conc_type: f_vec[None,:] },
+                pointers_src={ conc_type: pointers_src },
+                pointers_exm={ conc_type: pointers_exm }
+            )
 
-                # This now shouldn't strike the agent as surprise, at least in this
-                # loop (Ideally this doesn't need to be enforced this way, if the
-                # few-shot learning capability is perfect)
-                self.agent.doubt_no_more.add(rule)
+            # This now shouldn't strike the agent as surprise, at least in this
+            # loop (Ideally this doesn't need to be enforced this way, if the
+            # few-shot learning capability is perfect)
+            self.agent.doubt_no_more.add(rule)
 
-            if ("acknowledge", None) not in self.agent.practical.agenda:
-                self.agent.practical.agenda.append(("acknowledge", None))
-
-        elif self.agent.cfg.agent.strat_mismatch == "request_exmp":
-            raise NotImplementedError
-
-        else:
-            assert self.agent.cfg.agent.strat_mismatch == "request_expl"
-            raise NotImplementedError
+        if ("acknowledge", None) not in self.agent.practical.agenda:
+            self.agent.practical.agenda.append(("acknowledge", None))
 
     def attempt_answer_Q(self, ui):
         """
@@ -139,8 +129,23 @@ class AgentCompositeActions:
         _, question = translated[ui]
         assert question is not None
 
-        q_vars, _ = question
+        q_vars, q_rules = question
         bjt_vl, _ = self.agent.symbolic.concl_vis_lang
+
+        # Utterance index for the answer to be provided
+        ui = len(self.agent.lang.dialogue.record)
+
+        # Mapping from predicate variables to their associated entities
+        pred_var_to_ent_ref = {
+            ql.args[0][0]: ql.args[1][0]
+            for qr in q_rules for ql in qr.head
+            if qr.is_fact() and ql.name == "*_?"
+        }
+
+        qv_to_dis_ref = {
+            qv: f"x{ri}u{ui}" for ri, (qv, is_pred) in enumerate(q_vars)
+        }
+        conc_type_to_pos = { "cls": "n" }
 
         # Ensure it has every ingredient available needed for making most informed judgements
         # on computing the best answer to the question. Specifically, scene graph outputs from
@@ -184,23 +189,31 @@ class AgentCompositeActions:
             answer_selected = (None,) * len(q_vars)
             ev_prob = None
 
-        # Translate the selected answer into natural language
+        # From the selected answer, prepare ASP-friendly logical form of the response to
+        # generate, then translate into natural language,
         # (Parse the original question utterance, manipulate, then generate back)
+        answer_logical_forms = []
+
         if len(answer_selected) == 0:
-            # Yes/no question; cast original question to proposition
+            # Yes/no question
+
+            # Cast original question to proposition
             answer_translated = self.agent.lang.semantic.nl_change_sf(orig_utt, "prop")
 
             if ev_prob < 0.5:
                 # Flip polarity for negative answer with event probability lower than 0.5
                 answer_translated = self.agent.lang.semantic.nl_negate(answer_translated)
         else:
-            # Wh- question; replace wh-quantified referent(s) with appropriate answer values
-            answer_translated = orig_utt
+            # Wh- question
 
+            # NL tokens to replace and values with which to replace them
             replace_targets = []
             replace_values = []
 
             for (qv, is_pred), ans in zip(q_vars, answer_selected):
+                # Referent index in the new answer utterance
+                ri = qv_to_dis_ref[qv]
+
                 # Char range in original utterance, referring to expression to be replaced
                 tgt = dialogue_state["referents"]["dis"][qv]["provenance"]
                 replace_targets.append(tgt)
@@ -213,23 +226,43 @@ class AgentCompositeActions:
                     if ans is None or low_confidence:
                         # No answer predicate to "What is X" question; let's simply generate
                         # "I am not sure" as answer for these cases
-                        self.agent.lang.dialogue.to_generate.append("I am not sure.")
+                        self.agent.lang.dialogue.to_generate.append(
+                            # Will just pass None as "logical form" for this...
+                            (None, "I am not sure.")
+                        )
                         return
                     else:
                         ans = ans.split("_")
                         ans = (int(ans[1]), ans[0])
 
                         is_named = False
-                        val = self.agent.lt_mem.lexicon.d2s[ans][0][0]
+                        nl_val = self.agent.lt_mem.lexicon.d2s[ans][0][0]
+
+                        # Update cognitive state w.r.t. value assignment and word sense
+                        self.agent.symbolic.value_assignment[ri] = \
+                            pred_var_to_ent_ref[qv]
+                        tok_ind = (f"u{ui}", f"r{len(answer_logical_forms)}", "h0")
+                        self.agent.symbolic.word_senses[tok_ind] = \
+                            ((conc_type_to_pos[ans[1]], nl_val), f"{ans[1]}_{ans[0]}")
+
+                        answer_logical_forms.append(
+                            ([(nl_val, conc_type_to_pos[ans[1]], (ri,), False)], None, None)
+                        )
                 else:
                     # Entity by their constant name handle
                     is_named = True
                     if low_confidence:
-                        val = None
+                        nl_val = None
                     else:
-                        val = ans
+                        nl_val = ans
 
-                replace_values.append((val, is_named))
+                    # TODO?: Logical form for this case
+                    raise NotImplementedError
+
+                replace_values.append((nl_val, is_named))
+
+            # Replace wh-quantified referent(s) with appropriate answer values
+            answer_translated = orig_utt
 
             # Plug in the selected answer in place of the wh-quantified referent
             answer_translated = self.agent.lang.semantic.nl_replace_wh(
@@ -240,7 +273,9 @@ class AgentCompositeActions:
             answer_translated = self.agent.lang.semantic.nl_change_sf(answer_translated, "prop")
 
         # Push the translated answer to buffer of utterances to generate
-        self.agent.lang.dialogue.to_generate.append(answer_translated)
+        self.agent.lang.dialogue.to_generate.append(
+            ((answer_logical_forms, None), answer_translated)
+        )
 
     def _search_specs_from_kb(self, question, ref_bjt):
         """

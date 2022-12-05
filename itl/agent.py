@@ -715,7 +715,7 @@ class ITLAgent:
 
                             act_out = act_method(*act_args)
                             if act_out is not None:
-                                return_val.append(act_out)
+                                return_val += act_out
 
                     resolved_items.append(i)
 

@@ -10,7 +10,6 @@ paths:
 
 agent:
     strat_generic: "semOnly"    # Options: "semOnly", "semWithImpl"
-    strat_mismatch: "zeroInit"  # Options: "zeroInit" (TODO?: other strategies)
 
 exp1:
     strat_feedback: "minHelp"

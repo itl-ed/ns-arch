@@ -180,7 +180,10 @@ class SymbolicReasonerModule:
 
         # Understood dialogue record contents
         occurring_preds = set()
-        for ui, (_, (rules, question), _) in enumerate(dialogue_state["record"]):
+        for ui, (speaker, (rules, question), _) in enumerate(dialogue_state["record"]):
+            # Nothing particular to do with agent's own utterances
+            if speaker == "A": continue
+
             if rules is not None:
                 for ri, rule in enumerate(rules):
                     head, body, _ = rule
