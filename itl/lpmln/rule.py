@@ -115,7 +115,11 @@ class Rule:
 
     def is_grounded(self):
         """ Returns True if the rule is variable-free """
-        return all([l.is_grounded() for l in self.literals()])
+        return all(not is_var for _, is_var in self.terms())
+    
+    def is_lifted(self):
+        """ Returns True if the rule has variable terms only """
+        return all(is_var for _, is_var in self.terms())
 
     def is_isomorphic_to(self, other):
         """

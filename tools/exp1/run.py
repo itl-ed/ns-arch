@@ -9,6 +9,7 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
 from collections import defaultdict
+import logging
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -21,6 +22,8 @@ from omegaconf import OmegaConf
 
 from itl import ITLAgent
 from tools.sim_user import SimulatedTeacher
+
+logger = logging.getLogger(__name__)
 
 
 TAB = "\t"
@@ -48,9 +51,6 @@ def main(cfg):
     else:
         raise NotImplementedError
 
-    # Number of episodes = Episode per concept * Number of concepts
-    num_eps = cfg.exp1.num_episodes * len(target_concepts["cls"])
-
     # Set up agent & user
     agent = ITLAgent(cfg)
     user = SimulatedTeacher(cfg, target_concepts)
@@ -64,9 +64,15 @@ def main(cfg):
         f"{cfg.agent.strat_generic}_" \
         f"{cfg.seed}"
 
-    for i in tqdm.tqdm(range(num_eps), total=num_eps):
-        print("")
-        print(f"Sys> Episode {i+1}")
+    # Train until certain number of mistakes have been made (thus same number of 
+    # examples were used for training), configured as cfg.exp1.num_examples
+    i = 0; num_exs_used = 0
+    while num_exs_used <= cfg.exp1.num_examples:
+        i += 1
+        sys_msg = f"Episode {i} (# exs: {num_exs_used})"
+        logger.info("Sys> " + ("*" * (len(sys_msg)+8)))
+        logger.info(f"Sys> **  {sys_msg}  **")
+        logger.info("Sys> " + ("*" * (len(sys_msg)+8)))
         # Each single ITL episode is initiated by the teacher, aiming to test and confer
         # knowledge on one of the target concepts specified
         user_init = user.initiate_episode()
@@ -84,35 +90,63 @@ def main(cfg):
         # End of episode, push record to history
         user.episode_records.append(user.current_record)
 
+        # Update total # of examples used for training
+        new_num_exs_used = sum(ep["number_of_examples"] for ep in user.episode_records)
+
+        # Run performance tests on test batch every once in a while
+        if new_num_exs_used > num_exs_used:
+            # Only if num_exs_used increased; if same as prev, no learning has happened,
+            # thus no point in re-taking midterm test
+            if new_num_exs_used % cfg.exp1.test_interval == 0:
+                # Every cfg.exp1.test_interval examples used
+                concepts_ordered = midterm_test(agent, user, new_num_exs_used)
+        
+        num_exs_used = new_num_exs_used
+
     res_dir = os.path.join(cfg.paths.outputs_dir, "exp1_res")
     os.makedirs(res_dir, exist_ok=True)
 
-    with open(os.path.join(res_dir, f"curve_{tail}.csv"), "w") as out_csv:
-        # Summarize ITL interaction records stored in the simulated user object
-        print("")
-        print("Sys> Experiment finished. Result:")
+    # Summarize ITL interaction records stored in the simulated user object
+    logger.info("**************")
+    logger.info("Sys> Experiment finished. Result:")
 
+    cumul_regret = 0; regret_curve = []; confMats_seq = []
+    for i, ep in enumerate(user.episode_records):
+        if ep["answer_correct"]:
+            logger.info(f"Sys> {TAB}Episode {i+1}: Correct")
+        else:
+            cumul_regret += 1
+            answer = ep["answered_concept"]
+            ground_truth = ep["target_concept"]
+            logger.info(f"Sys> {TAB}Episode {i+1}: Wrong")
+            logger.info(f"Sys> {TAB*2}Answered: {answer} vs. Correct: {ground_truth}")
+        
+        regret_curve.append(cumul_regret)
+
+        if "midterm_result" in ep:
+            confMats_seq.append(ep["midterm_result"])
+
+    with open(os.path.join(res_dir, f"cumulRegs_{tail}.csv"), "w") as out_csv:
         out_csv.write("Episode,Regret\n")
-
-        cumul_regret = 0
-        for i, ep in enumerate(user.episode_records):
-            if ep["answer_correct"]:
-                print(f"Sys> {TAB}Episode {i+1}: Correct")
-            else:
-                cumul_regret += 1
-                answer = ep["answered_concept"]
-                ground_truth = ep["target_concept"]
-                print(f"Sys> {TAB}Episode {i+1}: Wrong")
-                print(f"Sys> {TAB*2}Answered: {answer} vs. Correct: {ground_truth}")
-
+        for i, cumul_regret in enumerate(regret_curve):
             out_csv.write(f"{i},{cumul_regret}\n")
 
-    # Final 'exam' after the series of ITL interactions
-    exam_result = defaultdict(lambda: defaultdict(int))
-    for conc, imgs in user.test_exemplars["cls"].items():
-        concept_string = conc.split(".")[0]
-        concept_string = concept_string.replace("_", " ")
+    for num_exs, data in confMats_seq:
+        with open(os.path.join(res_dir, f"confMat{num_exs}_{tail}.csv"), "w") as out_csv:
+            out_csv.write(",".join(concepts_ordered)+"\n")          # Binary mode
+            # out_csv.write(",".join(concepts_ordered+["NA"])+"\n")   # Multiple choice mode
+            for row in data / cfg.exp1.test_set_size:
+                out_csv.write(",".join([str(d) for d in row])+"\n")
 
+
+def midterm_test(agent, user, num_exs):
+    # 'Mid-term exams' during the series of ITL interactions
+    exam_result = defaultdict(lambda: defaultdict(int))
+    test_problems = {
+        conc.split(".")[0].replace("_", " "): imgs
+        for conc, imgs in user.test_exemplars["cls"].items()
+    }
+    for concept_string, imgs in test_problems.items():
         for img, instances in tqdm.tqdm(imgs, total=len(imgs)):
             img = user.data_annotation[img]
             img_f = img["file_name"]
@@ -187,25 +221,24 @@ def main(cfg):
             #     exam_result[concept_string]["NA"] += 1
 
     # Store exam result as confusion matrix
-    C = len(exam_result)
+    C = len(test_problems)
+    concepts_ordered = sorted(list(test_problems))      # Sort for consistent ordering
+
     data = np.zeros([C,C])      # Binary mode
     # data = np.zeros([C,C+1])    # Multiple choice mode
-    concepts_ordered = list(exam_result)
+    for i in range(C):
+        for j in range(C):
+            conc_i = concepts_ordered[i]
+            conc_j = concepts_ordered[j]
 
-    with open(os.path.join(res_dir, f"confMat_{tail}.csv"), "w") as out_csv:
-        out_csv.write(str(cfg.exp1.test_set_size)+"\n")
-        out_csv.write(",".join(concepts_ordered)+"\n")          # Binary mode
-        # out_csv.write(",".join(concepts_ordered+["NA"])+"\n")   # Multiple choice mode
-        for i in range(C):
-            for j in range(C):
-                conc_i = concepts_ordered[i]
-                conc_j = concepts_ordered[j]
+            data[i,j] = exam_result[conc_i][conc_j]
+            # When multiple choice mode
+            # data[i,-1] = exam_result[conc_i]["NA"]
 
-                data[i,j] = exam_result[conc_i][conc_j] / cfg.exp1.test_set_size
-                # When multiple choice mode
-                # data[i,-1] = exam_result[conc_i]["NA"] / opts.exp1_test_set_size
+    user.episode_records[-1]["midterm_result"] = (num_exs, data)
 
-            out_csv.write(",".join([str(d) for d in data[i]])+"\n")
+    # Return sequence of concepts for bookkeeping concept order
+    return concepts_ordered
 
 
 if __name__ == "__main__":

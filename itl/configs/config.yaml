@@ -12,9 +12,10 @@ agent:
     strat_generic: "semOnly"    # Options: "semOnly", "semWithImpl"
 
 exp1:
-    strat_feedback: "minHelp"
     difficulty: "nonFine"       # Options: "nonFine", "fineEasy", "fineHard"
-    num_episodes: 50
+    strat_feedback: "minHelp"   # Options: "minHelp", "medHelp", "maxHelp"
+    num_examples: 75
+    test_interval: 15
     test_set_size: 30
 
 seed: 42

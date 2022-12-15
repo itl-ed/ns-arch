@@ -26,8 +26,9 @@ from .lpmln.utils import wrap_args
 logger = logging.getLogger(__name__)
 
 
-# FT_THRES = 0.5              # Few-shot learning trigger score threshold
-SR_THRES = -math.log(0.5)    # Mismatch surprisal threshold
+SR_THRES = 0.50              # Mismatch surprisal threshold
+SC_THRES = 0.5               # Binary decision score threshold
+# SC_DELTA = 0.15              # Confusion prob score difference threshold
 U_IN_PR = 1.00               # How much the agent values information provided by the user
 EPS = 1e-10                  # Value used for numerical stabilization
 TAB = "\t"                   # For use in format strings
@@ -54,6 +55,21 @@ class ITLAgent:
         if "model_path" in cfg.agent:
             self.load_model(cfg.agent.model_path)
 
+        # Bookkeeping facts that no longer need to be tested for agent-user
+        # knowledge mismatch. In a sense, this kinda overlaps with the notion
+        # of 'common ground'? May consider fulfilling this later...
+        self.doubt_no_more = set()
+
+        # Bookkeeping pairs of visual concepts that confused the agent, which
+        # are resolved by asking 'concept-diff' questions to the user. Jusk ask
+        # once to get answers as symbolic generic rules when the agent is aware
+        # of the confusion for the first time, for each concept pair.
+        self.confused_no_more = set()
+
+        # (Temporary) Restrict our attention to newly acquired visual concepts
+        # when it comes to dealing with concept confusions
+        self.cls_offset = self.vision.inventories.cls
+
         # Show visual UI and plots
         self.vis_ui_on = True
 
@@ -63,7 +79,7 @@ class ITLAgent:
 
     def __call__(self):
         """Main function: Kickstart infinite ITL agent loop with user interface"""
-        print(f"Sys> At any point, enter 'exit' to quit")
+        logger.info("Sys> At any point, enter 'exit' to quit")
 
         while True:
             self.loop()
@@ -286,8 +302,8 @@ class ITLAgent:
                 # Handling vision.fs_model_path data
                 if module_name == "vision":
                     if module_component == "fs_model_path":
-                        if prev_component_data is not None and \
-                            prev_component_data != component_data:
+                        if (prev_component_data is not None and
+                            prev_component_data != component_data):
                             logger.warn(
                                 "Path to few-shot components in vision module is already provided "
                                 "in config and is inconsistent with the pointer saved in the agent "
@@ -306,27 +322,24 @@ class ITLAgent:
         # Register autocompleter for REPL
         # readline.set_completer(self.dcompleter.complete)
 
-        print("")
-
         while True:
 
-            print(f"Sys> Choose an image to process")
+            logger.debug("Sys> Choose an image to process")
             if input_provided:
-                print(f"U> {usr_in}")
+                logger.debug(f"U> {usr_in}")
             else:
-                print("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
+                logger.debug("Sys> Enter 'r' for random selection, 'n' for skipping new image input")
                 usr_in = input("U> ")
-                print("")
 
             try:
                 if usr_in == "n":
-                    print(f"Sys> Skipped image selection")
+                    logger.debug("Sys> Skipped image selection")
                     break
                 elif usr_in == "r":
                     raise NotImplementedError       # Let's disable this for a while...
                     self.vision.new_input = self.dcompleter.sample()
                 elif usr_in == "exit":
-                    print(f"Sys> Terminating...")
+                    logger.debug("Sys> Terminating...")
                     quit()
                 else:
                     # if usr_in not in self.dcompleter:
@@ -338,11 +351,11 @@ class ITLAgent:
                 if input_provided:
                     raise e
                 else:
-                    print(f"Sys> {e}, try again")
+                    logger.info(f"Sys> {e}, try again")
 
             else:
                 self.vision.last_input = self.vision.new_input
-                print(f"Sys> Selected image file: {self.vision.new_input}")
+                logger.info(f"Sys> Selected image file: {self.vision.new_input}")
                 break
 
         # Restore default completer
@@ -353,22 +366,21 @@ class ITLAgent:
         self.lang.new_input = None
         input_provided = usr_in is not None
 
-        print("Sys> Awaiting user input...")
-        print("Sys> Enter 'n' for skipping language input")
+        logger.debug("Sys> Awaiting user input...")
+        logger.debug("Sys> Enter 'n' for skipping language input")
 
         while True:
             if input_provided:
-                print(f"U> {usr_in}")
+                logger.info(f"U> {usr_in}")
             else:
                 usr_in = input("U> ")
-                print("")
 
             try:
                 if usr_in == "n":
-                    print(f"Sys> Skipped language input")
+                    logger.debug("Sys> Skipped language input")
                     break
                 elif usr_in == "exit":
-                    print(f"Sys> Terminating...")
+                    logger.debug("Sys> Terminating...")
                     quit()
                 else:
                     self.lang.new_input = self.lang.semantic.nl_parse(usr_in)
@@ -378,19 +390,19 @@ class ITLAgent:
                 if input_provided:
                     raise e
                 else:
-                    print(f"Sys> Ungrammatical input or IndexError: {e.args}")
+                    logger.info(f"Sys> Ungrammatical input or IndexError: {e.args}")
             except ValueError as e:
                 if input_provided:
                     raise e
                 else:
-                    print(f"Sys> {e.args[0]}")
+                    logger.info(f"Sys> {e.args[0]}")
 
     def _update_belief(self, pointing=None, cheat_sheet=None):
         """ Form beliefs based on visual and/or language input """
 
         if not (self.vision.new_input or self.lang.new_input):
             # No information whatsoever to make any belief updates
-            print("A> (Idling the moment away...)")
+            logger.debug("A> (Idling the moment away...)")
             return
 
         # Lasting storage of pointing info
@@ -402,6 +414,10 @@ class ITLAgent:
 
         # Index of latest utterance
         ui_last = len(self.lang.dialogue.record)
+
+        # Set of new visual concepts (equivalently, neologisms) newly registered
+        # during the loop
+        novel_concepts = set()
 
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
@@ -425,9 +441,7 @@ class ITLAgent:
                 self.lang.situate(self.vision.last_input, self.vision.scene)
                 self.symbolic.refresh()
 
-                # No need to treat these facts as 'mismatches'
-                # (In a sense, this kinda overlaps with the notion of 'common ground'?
-                # May consider fulfilling this later)
+                # Update this on episode-basis
                 self.doubt_no_more = set()
 
             # Understand the user input in the context of the dialogue
@@ -540,39 +554,76 @@ class ITLAgent:
             # Process translated dialogue record to do the following:
             #   - Integrate newly provided generic rules into KB
             #   - Identify recognition mismatch btw. user provided vs. agent
+            #   - Identify visual concept confusion
             translated = self.symbolic.translate_dialogue_content(dialogue_state)
-            for ui, (rules, _) in enumerate(translated):
+            for ui, (speaker, (rules, _)) in enumerate(translated):
+                if speaker != "U": continue
+                if rules is None: continue
+
                 kb_rules_to_add = []
-                if rules is not None:
-                    for r in rules:
-                        # Symbolic knowledge base expansion; for generic rules without
-                        # constant terms
-                        if all(is_var for _, is_var in r.terms()):
-                            # Integrate the rule into KB by adding (for now we won't
-                            # worry about intra-KB consistency, etc.)
-                            kb_rules_to_add.append(r)
+                for r in rules:
+                    # Symbolic knowledge base expansion; for generic rules without
+                    # constant terms
+                    if r.is_lifted():
+                        # Push to queue of symbolic rules to add into KB
+                        kb_rules_to_add.append(r)
 
-                        # Test against vision-only sensemaking result to identify any
-                        # symbolic mismatch
-                        if all(not is_var for _, is_var in r.terms()) \
-                            and self.symbolic.concl_vis is not None:
-                            if r in self.doubt_no_more:
-                                # May skip testing this one
-                                continue
-
+                    # Grounded event statement; test against vision-only sensemaking
+                    # result to identify any mismatch btw. agent's & user's perception
+                    # of world state
+                    if r.is_grounded() and self.symbolic.concl_vis is not None:
+                        if r not in self.doubt_no_more:
                             # Make a yes/no query to obtain the likelihood of content
                             bjt_v, _ = self.symbolic.concl_vis
                             q_response = self.symbolic.query(bjt_v, None, r)
                             ev_prob = q_response[()]
 
                             surprisal = -math.log(ev_prob + EPS)
-                            if surprisal > SR_THRES:
+                            if surprisal > -math.log(SR_THRES):
                                 m = (r, surprisal)
                                 self.symbolic.mismatches.add(m)
-                    
-                    if len(kb_rules_to_add) > 0:
-                        provenance = dialogue_state["record"][ui][2]
-                        kb_updated |= self.lt_mem.kb.add(kb_rules_to_add, U_IN_PR, provenance)
+                        
+                    # Grounded fact; test against vision module output to identify 
+                    # any 'concept overlap' -- i.e. whenever the agent confuses two
+                    # concepts difficult to distinguish visually and mistakes one
+                    # for another. Applicable only to experiment configs with maxHelp
+                    # teachers.
+                    if (r.is_grounded() and r.is_fact() and
+                        self.cfg.exp1.strat_feedback == "maxHelp"):
+                        # (Temporary?) Only consider 1-place predicates, so retrieve
+                        # the single and first entity from the arg list
+                        conc_type, conc_ind = r.head[0].name.split("_")
+                        conc_ind = int(conc_ind)
+                        ent = r.head[0].args[0][0]
+
+                        # (Temporary) Only consider non-part concepts as potential
+                        # cases of confusion. This may be enforced in a more elegant
+                        # way in the future..
+                        cls_probs = self.vision.scene[ent]["pred_classes"][self.cls_offset:]
+
+                        if ((conc_ind, conc_type) not in novel_concepts and
+                            len(cls_probs) >= 2):
+                            # Highest-score concept prediction for the entity of interest,
+                            # and prediction score for true label
+                            best_ind = np.argmax(cls_probs)
+                            true_conc_score = cls_probs[conc_ind-self.cls_offset]
+
+                            confusion_pair = frozenset(
+                                [best_ind+self.cls_offset, conc_ind]
+                            )       # Potential confusion case, as unordered label pair
+
+                            if (best_ind+self.cls_offset != conc_ind and
+                                true_conc_score >= SC_THRES and
+                                ("cls", confusion_pair) not in self.confused_no_more):
+                                # Agent's best guess disagrees with the user-provided
+                                # information, and score gap is small
+                                self.vision.confusions.add(("cls", confusion_pair))
+
+                # Integrate the rule into KB by adding (for now we won't worry about
+                # intra-KB consistency, belief revision, etc.)
+                if len(kb_rules_to_add) > 0:
+                    provenance = dialogue_state["record"][ui][2]
+                    kb_updated |= self.lt_mem.kb.add(kb_rules_to_add, U_IN_PR, provenance)
 
             # Handle neologisms
             neologisms = {
@@ -598,10 +649,11 @@ class ITLAgent:
                         conc_type = "rel"
 
                     # Expand corresponding visual concept inventory
-                    concept_ind = self.vision.add_concept(conc_type)
-                    novel_concept = (concept_ind, conc_type)
+                    conc_ind = self.vision.add_concept(conc_type)
+                    novel_concept = (conc_ind, conc_type)
+                    novel_concepts.add(novel_concept)
 
-                    # Acquire novel concept by updating lexicon (and vision.predicates)
+                    # Acquire novel concept by updating lexicon
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
 
                     ui = int(tok[0].strip("u"))
@@ -632,7 +684,7 @@ class ITLAgent:
                             raise NotImplementedError   # Step back for relation prediction...
                         
                         pointers_src = { 0: (0, tuple(ai for ai in range(len(args)))) }
-                        pointers_exm = { concept_ind: ({0}, set()) }
+                        pointers_exm = { conc_ind: ({0}, set()) }
 
                         self.lt_mem.exemplars.add_exs(
                             sources=[(np.asarray(self.vision.last_input), ex_bboxes)],
@@ -648,7 +700,7 @@ class ITLAgent:
                         # loop (Ideally this doesn't need to be enforced this way, if the
                         # few-shot learning capability is perfect)
                         self.doubt_no_more.add(Rule(
-                            head=Literal(f"{conc_type}_{concept_ind}", wrap_args(*args))
+                            head=Literal(f"{conc_type}_{conc_ind}", wrap_args(*args))
                         ))
                 else:
                     # Otherwise not immediately resolvable
@@ -680,18 +732,20 @@ class ITLAgent:
         # now; we will see later if we'll ever need to generalize and implement the said
         # procedure.)
 
+        for ui in self.lang.dialogue.unanswered_Q:
+            self.practical.agenda.append(("address_unanswered_Q", ui))
         for n in self.lang.unresolved_neologisms:
             self.practical.agenda.append(("address_neologism", n))
         for m in self.symbolic.mismatches:
             self.practical.agenda.append(("address_mismatch", m))
-        for ui in self.lang.dialogue.unanswered_Q:
-            self.practical.agenda.append(("address_unanswered_Q", ui))
+        for c in self.vision.confusions:
+            self.practical.agenda.append(("address_confusion", c))
 
         return_val = []
 
-        if self.lang.new_input is not None and len(self.practical.agenda) == 0:
-            # Everything seems okay, acknowledge user input
-            self.practical.agenda.append(("acknowledge", None))
+        # if self.lang.new_input is not None and len(self.practical.agenda) == 0:
+        #     # Everything seems okay, acknowledge user input
+        #     self.practical.agenda.append(("acknowledge", None))
 
         while True:
             resolved_items = []
@@ -704,28 +758,37 @@ class ITLAgent:
 
                 if plan is not None:
                     # Perform plan actions
-                    if plan is not None:
-                        for action in plan:
-                            act_method = action["action_method"].extract(self)
-                            act_args = action["action_args_getter"](todo_args)
-                            if type(act_args) == tuple:
-                                act_args = tuple(a.extract(self) for a in act_args)
-                            else:
-                                act_args = (act_args.extract(self),)
+                    for action in plan:
+                        act_method = action["action_method"].extract(self)
+                        act_args = action["action_args_getter"](todo_args)
+                        if type(act_args) == tuple:
+                            act_args = tuple(a.extract(self) for a in act_args)
+                        else:
+                            act_args = (act_args.extract(self),)
 
-                            act_out = act_method(*act_args)
-                            if act_out is not None:
-                                return_val += act_out
+                        act_out = act_method(*act_args)
+                        if act_out is not None:
+                            return_val += act_out
 
                     resolved_items.append(i)
 
             if len(resolved_items) == 0:
-                # No resolvable agenda item any more; break
-                break
+                # No resolvable agenda item any more
+                if (len(return_val) == 0 and self.lang.new_input is not None and
+                    self.lang.new_input["raw"] != "Correct."):
+                    # Nothing to add, acknowledge any user input
+                    self.practical.agenda.append(("acknowledge", None))
+                else:
+                    # Break with return vals
+                    break
             else:
                 # Check off resolved agenda item
                 resolved_items.reverse()
                 for i in resolved_items:
                     del self.practical.agenda[i]
+
+        for act_type, act_data in return_val:
+            if act_type == "generate":
+                logger.info(f"A> {act_data}")
 
         return return_val

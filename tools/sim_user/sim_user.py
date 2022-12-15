@@ -103,7 +103,7 @@ class SimulatedTeacher:
             "target_concept": concept_string,
             "answered_concept": None,
             "answer_correct": None,
-            "number_of_exemplars": 0        # Exemplars used for learning
+            "number_of_examples": 0        # Exemplars used for learning
         }
 
         # Ideally, for situated (robotic) agent, the teacher would simply place an
@@ -176,7 +176,7 @@ class SimulatedTeacher:
             # learning cannot take place if we don't provide any)
             self.current_record["answered_concept"] = "N/A"
             self.current_record["answer_correct"] = False
-            self.current_record["number_of_exemplars"] += 1
+            self.current_record["number_of_examples"] += 1
 
             responses.append({
                 "v_usr_in": "n",
@@ -196,7 +196,7 @@ class SimulatedTeacher:
             if concept_string == answer_content:
                 # Correct answer
                 self.current_record["answer_correct"] = True
-                self.current_record["number_of_exemplars"] += 0
+                self.current_record["number_of_examples"] += 0
 
                 responses.append({
                     "v_usr_in": "n",
@@ -206,7 +206,7 @@ class SimulatedTeacher:
             else:
                 # Incorrect answer; reaction branches here depending on teacher's strategy
                 self.current_record["answer_correct"] = False
-                self.current_record["number_of_exemplars"] += 1
+                self.current_record["number_of_examples"] += 1
 
                 # Minimal feedback; only let the agent know the answer is incorrect
                 result_response = {
@@ -224,57 +224,67 @@ class SimulatedTeacher:
                     result_response["pointing"]["this"].append(self.current_focus[1])
 
                 responses.append(result_response)
-                
-                # Generic difference between intended concept vs. incorrect answer
-                # concept additionally provided if teacher strategy is 'greater'
-                # than [maximal feedback]
-                if self.strat_feedback == "maxHelp" and not is_novel_concept:
-                    # Give generics only if not given previously, and if current target
-                    # concept is not introduced for the first time
-                    contrast_concepts = frozenset([concept_string, answer_content])
-                    pluralize = inflect.engine().plural
 
-                    if contrast_concepts not in self.taught_diffs:
-                        target_props = self.domain_knowledge[concept_string]["part_property"]
-                        target_props = {
-                            (part, prop) for part, props in target_props.items() for prop in props
-                        }
-                        answer_props = self.domain_knowledge[answer_content]["part_property"]
-                        answer_props = {
-                            (part, prop) for part, props in answer_props.items() for prop in props
-                        }
+        elif any(utt.startswith("How are") and utt.endswith("different?")
+            for utt in agent_utterances):
+            # Agent requested generic differences between two similar concepts
+            assert self.strat_feedback == "maxHelp"
 
-                        # For each of two directions of relative differences, synthesize
-                        # appropriate constrastive generic explanations
-                        target_props_diff = defaultdict(set)
-                        target_subject = pluralize(concept_string.capitalize())
-                        for part, prop in target_props - answer_props:
-                            target_props_diff[part].add(prop)
-                        for part, props in target_props_diff.items():
-                            part_name = pluralize(part.split(".")[0])
-                            part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
-                            generic = f"{target_subject} have {part_descriptor} {part_name}."
-                            responses.append({
-                                "v_usr_in": "n",
-                                "l_usr_in": generic,
-                                "pointing": None
-                            })
+            # if contrast_concepts in self.taught_diffs:
+            #     # Concept diffs requested again; do something? This would 'annoy'
+            #     # the user if keeps happening
+            #     ...
 
-                        answer_props_diff = defaultdict(set)
-                        answer_subject = pluralize(answer_content.capitalize())
-                        for part, prop in answer_props - target_props:
-                            answer_props_diff[part].add(prop)
-                        for part, props in answer_props_diff.items():
-                            part_name = pluralize(part.split(".")[0])
-                            part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
-                            generic = f"{answer_subject} have {part_descriptor} {part_name}."
-                            responses.append({
-                                "v_usr_in": "n",
-                                "l_usr_in": generic,
-                                "pointing": None
-                            })
+            singularize = inflect.engine().singular_noun
+            pluralize = inflect.engine().plural
 
-                        self.taught_diffs.add(contrast_concepts)
+            ques_utt = [
+                utt for utt in agent_utterances
+                if utt.startswith("How are") and utt.endswith("different?")
+            ][0]
+            ques_content = re.findall(r"How are (.*) and (.*) different\?$", ques_utt)[0]
+            conc1, conc2 = singularize(ques_content[0]), singularize(ques_content[1])
+
+            conc1_props = self.domain_knowledge[conc1]["part_property"]
+            conc1_props = {
+                (part, prop) for part, props in conc1_props.items() for prop in props
+            }
+            conc2_props = self.domain_knowledge[conc2]["part_property"]
+            conc2_props = {
+                (part, prop) for part, props in conc2_props.items() for prop in props
+            }
+
+            # For each of two directions of relative differences, synthesize
+            # appropriate constrastive generic explanations
+            conc1_props_diff = defaultdict(set)
+            conc1_subj = ques_content[0].capitalize()
+            for part, prop in conc1_props - conc2_props:
+                conc1_props_diff[part].add(prop)
+            for part, props in conc1_props_diff.items():
+                part_name = pluralize(part.split(".")[0])
+                part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                generic = f"{conc1_subj} have {part_descriptor} {part_name}."
+                responses.append({
+                    "v_usr_in": "n",
+                    "l_usr_in": generic,
+                    "pointing": None
+                })
+
+            conc2_props_diff = defaultdict(set)
+            conc2_subj = ques_content[1].capitalize()
+            for part, prop in conc2_props - conc1_props:
+                conc2_props_diff[part].add(prop)
+            for part, props in conc2_props_diff.items():
+                part_name = pluralize(part.split(".")[0])
+                part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                generic = f"{conc2_subj} have {part_descriptor} {part_name}."
+                responses.append({
+                    "v_usr_in": "n",
+                    "l_usr_in": generic,
+                    "pointing": None
+                })
+
+            self.taught_diffs.add(frozenset([conc1, conc2]))
 
         else:
             raise NotImplementedError

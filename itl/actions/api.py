@@ -5,16 +5,20 @@ to be registered to an ITLAgent instance provided as __init__ arg first (thus
 forming circular reference), and later evoked by plans fetched from the practical
 reasoning module.
 """
+import re
 import random
 from functools import reduce
 from collections import defaultdict
 
+import inflect
 import numpy as np
 import torch
 from torchvision.ops import box_convert
 
 from ..lpmln import Literal, Rule
 
+
+SC_THRES = 0.5          # Binary decision score threshold
 
 class AgentCompositeActions:
     
@@ -84,24 +88,80 @@ class AgentCompositeActions:
             # few-shot learning capability is perfect)
             self.agent.doubt_no_more.add(rule)
 
-        if ("acknowledge", None) not in self.agent.practical.agenda:
-            self.agent.practical.agenda.append(("acknowledge", None))
+    def handle_confusion(self, confusion):
+        """
+        Handle 'concept overlap' between two similar visual concepts. Two (fine-grained)
+        concepts can be disambiguated by some symbolically represented generic rules,
+        request such differences by generating an appropriate question. 
+        """
+        # This confusion is about to be handled
+        self.agent.vision.confusions.remove(confusion)
+
+        # Utterance index for the question to be asked
+        ui_new = len(self.agent.lang.dialogue.record)
+
+        conc_type, conc_inds = confusion
+        conc_inds = list(conc_inds)
+
+        # For now we are only interested in disambiguating class (noun) concepts
+        assert conc_type == "cls"
+
+        # Prepare logical form of the concept-diff question to ask
+        q_vars = ((f"X2u{ui_new}", False),)
+        q_rules = [
+            (
+                [("diff", "*", (f"x0u{ui_new}", f"x1u{ui_new}", f"X2u{ui_new}"), False)],
+                None, None
+            )
+        ]
+        ques_logical_form = (q_vars, q_rules)
+
+        # Prepare surface form of the concept-diff question to ask
+        pluralize = inflect.engine().plural
+        conc_names = [
+            self.agent.lt_mem.lexicon.d2s[(ci, conc_type)][0][0]
+            for ci in conc_inds
+        ]       # Fetch string name for concepts from the lexicon
+        conc_names = [
+            re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", cn)
+            for cn in conc_names
+        ]       # Unpack camelCased names
+        conc_names = [
+            pluralize(" ".join(tok.lower() for tok in cn))
+            for cn in conc_names
+        ]       # Lowercase tokens and pluralize
+
+        # Update cognitive state w.r.t. value assignment and word sense
+        self.agent.symbolic.value_assignment.update({
+            f"x0u{ui_new}": f"{conc_type}_{conc_inds[0]}",
+            f"x1u{ui_new}": f"{conc_type}_{conc_inds[1]}"
+        })
+
+        ques_translated = f"How are {conc_names[0]} and {conc_names[1]} different?"
+
+        self.agent.lang.dialogue.to_generate.append(
+            ((None, ques_logical_form), ques_translated)
+        )
+
+        # No need to request concept differences again for this particular case
+        # for the rest of the interaction episode sequence
+        self.agent.confused_no_more.add(confusion)
 
     def attempt_answer_Q(self, ui):
         """
         Attempt to answer an unanswered question from user.
         
-        If it turns out the question cannot be answered at all with the agent's current
-        knowledge (e.g. question contains unresolved neologism), do nothing and wait for
-        it to become answerable.
+        If it turns out the question cannot be answered at all with the agent's
+        current knowledge (e.g. question contains unresolved neologism), do nothing
+        and wait for it to become answerable.
 
-        If the agent can come up with an answer to the question, right or wrong, schedule
-        to actually answer it by adding a new agenda item.
+        If the agent can come up with an answer to the question, right or wrong,
+        schedule to actually answer it by adding a new agenda item.
         """
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
         translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
-        _, question = translated[ui]
+        _, (_, question) = translated[ui]
 
         if question is None:
             # Question cannot be answered for some reason
@@ -113,10 +173,10 @@ class AgentCompositeActions:
 
     def prepare_answer_Q(self, ui):
         """
-        Prepare an answer to a question that has been deemed answerable, by first computing
-        raw ingredients from which answer candidates can be composed, picking out an answer
-        among the candidates, then translating the answer into natural language form to be
-        uttered
+        Prepare an answer to a question that has been deemed answerable, by first
+        computing raw ingredients from which answer candidates can be composed,
+        picking out an answer among the candidates, then translating the answer
+        into natural language form to be uttered
         """
         # The question is about to be answered
         self.agent.lang.dialogue.unanswered_Q.remove(ui)
@@ -126,14 +186,14 @@ class AgentCompositeActions:
 
         translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
-        _, question = translated[ui]
+        _, (_, question) = translated[ui]
         assert question is not None
 
         q_vars, q_rules = question
         bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
         # Utterance index for the answer to be provided
-        ui = len(self.agent.lang.dialogue.record)
+        ui_new = len(self.agent.lang.dialogue.record)
 
         # Mapping from predicate variables to their associated entities
         pred_var_to_ent_ref = {
@@ -143,7 +203,7 @@ class AgentCompositeActions:
         }
 
         qv_to_dis_ref = {
-            qv: f"x{ri}u{ui}" for ri, (qv, is_pred) in enumerate(q_vars)
+            qv: f"x{ri}u{ui_new}" for ri, (qv, is_pred) in enumerate(q_vars)
         }
         conc_type_to_pos = { "cls": "n" }
 
@@ -174,9 +234,10 @@ class AgentCompositeActions:
         if q_vars is not None:
             # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
             # elegant way in the future...
-            for ans in list(answers_raw.keys()):
-                if not(ans[0] == "cls_11" or ans[0] == "cls_12" or ans[0] == "cls_13"):
-                    del answers_raw[ans]
+            answers_raw = {
+                ans: score for ans, score in answers_raw.items()
+                if ans[0].split("_")[0] == "cls" and int(ans[0].split("_")[1]) >= 11
+            }
 
         # Pick out an answer to deliver; maximum confidence
         if len(answers_raw) > 0:
@@ -192,7 +253,7 @@ class AgentCompositeActions:
         # From the selected answer, prepare ASP-friendly logical form of the response to
         # generate, then translate into natural language,
         # (Parse the original question utterance, manipulate, then generate back)
-        answer_logical_forms = []
+        answer_logical_form = []
 
         if len(answer_selected) == 0:
             # Yes/no question
@@ -200,8 +261,8 @@ class AgentCompositeActions:
             # Cast original question to proposition
             answer_translated = self.agent.lang.semantic.nl_change_sf(orig_utt, "prop")
 
-            if ev_prob < 0.5:
-                # Flip polarity for negative answer with event probability lower than 0.5
+            if ev_prob < SC_THRES:
+                # Flip polarity for negative answer with event probability lower than SC_THRES
                 answer_translated = self.agent.lang.semantic.nl_negate(answer_translated)
         else:
             # Wh- question
@@ -218,7 +279,7 @@ class AgentCompositeActions:
                 tgt = dialogue_state["referents"]["dis"][qv]["provenance"]
                 replace_targets.append(tgt)
 
-                low_confidence = ev_prob is not None and ev_prob < 0.5
+                low_confidence = ev_prob is not None and ev_prob < SC_THRES
 
                 # Value to replace the designated wh-quantified referent with
                 if is_pred:
@@ -241,11 +302,11 @@ class AgentCompositeActions:
                         # Update cognitive state w.r.t. value assignment and word sense
                         self.agent.symbolic.value_assignment[ri] = \
                             pred_var_to_ent_ref[qv]
-                        tok_ind = (f"u{ui}", f"r{len(answer_logical_forms)}", "h0")
+                        tok_ind = (f"u{ui_new}", f"r{len(answer_logical_form)}", "h0")
                         self.agent.symbolic.word_senses[tok_ind] = \
                             ((conc_type_to_pos[ans[1]], nl_val), f"{ans[1]}_{ans[0]}")
 
-                        answer_logical_forms.append(
+                        answer_logical_form.append(
                             ([(nl_val, conc_type_to_pos[ans[1]], (ri,), False)], None, None)
                         )
                 else:
@@ -274,7 +335,7 @@ class AgentCompositeActions:
 
         # Push the translated answer to buffer of utterances to generate
         self.agent.lang.dialogue.to_generate.append(
-            ((answer_logical_forms, None), answer_translated)
+            ((answer_logical_form, None), answer_translated)
         )
 
     def _search_specs_from_kb(self, question, ref_bjt):
@@ -309,7 +370,7 @@ class AgentCompositeActions:
                     # elegant way in the future...
                     kb_query_preds = frozenset([
                         pred for pred in kb_query_preds
-                        if pred == "cls_11" or pred == "cls_12" or pred == "cls_13"
+                        if pred.split("_")[0] == "cls" and int(pred.split("_")[1]) >= 11
                     ])
 
                     kb_query_args = tuple(q_lit.args[1:])

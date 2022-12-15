@@ -4,6 +4,7 @@ required by the ITL agent: situate the embodied agent in a physical environment,
 understand & generate language input in the context of the dialogue
 """
 import copy
+from collections import defaultdict
 
 from .semantics import SemanticParser
 from .dialogue import DialogueManager
@@ -69,6 +70,17 @@ class LanguageModule:
         # Processing natural language into appropriate logical form
         asp_content, ref_map = self.semantic.asp_translate(parse)
 
+        # Reindexing referents according to their 'map_id' and 'source_ind'
+        reind_per_src = {
+            ei: defaultdict(lambda: len(reind_per_src[ei]))
+            for ei in asp_content
+        }
+        e2i = { ei: i for i, ei in enumerate(asp_content) }
+        m2i = {
+            rf: reind_per_src[v["source_ind"]][v["map_id"]]
+            for rf, v in ref_map.items() if v is not None
+        }
+
         # Add to the list of discourse referents
         for rf, v in ref_map.items():
             if v is not None:
@@ -77,9 +89,9 @@ class LanguageModule:
                 if type(rf) == tuple:
                     # Function term
                     f_args = tuple(
-                        f"{term_char.upper()}{ref_map[a]['map_id']}u{ui}"
+                        f"{term_char.upper()}{m2i[a]}u{ui+e2i[v['source_ind']]}"
                             if ref_map[a]["is_univ_quantified"] or ref_map[a]["is_wh_quantified"]
-                            else f"{term_char}{ref_map[a]['map_id']}u{ui}"
+                            else f"{term_char}{m2i[a]}u{ui+e2i[v['source_ind']]}"
                         for a in rf[1]
                     )
                     rf = (rf[0], f_args)
@@ -93,9 +105,9 @@ class LanguageModule:
                 else:
                     assert type(rf) == str
                     if v["is_univ_quantified"] or v["is_wh_quantified"]:
-                        rf = f"{term_char.upper()}{v['map_id']}u{ui}"
+                        rf = f"{term_char.upper()}{m2i[rf]}u{ui+e2i[v['source_ind']]}"
                     else:
-                        rf = f"{term_char}{v['map_id']}u{ui}"
+                        rf = f"{term_char}{m2i[rf]}u{ui+e2i[v['source_ind']]}"
 
                     self.dialogue.referents["dis"][rf] = {
                         "provenance": v["provenance"],
@@ -149,8 +161,9 @@ class LanguageModule:
                             self.dialogue.referents["env"][pointed]["bbox"]
                         pointing[rel["predicate"]] = bboxes
 
-                    referent = ref_map[rel["args"][0]]["map_id"]
-                    self.dialogue.assignment_hard[f"x{referent}u{ui}"] = pointed
+                    ri = m2i[rel["args"][0]]
+                    ui_offset = e2i[ref_map[rel["args"][0]]["source_ind"]]
+                    self.dialogue.assignment_hard[f"x{ri}u{ui+ui_offset}"] = pointed
 
             if rel["predicate"] == "named":
                 # Provided symbolic name
@@ -191,8 +204,9 @@ class LanguageModule:
                             self.dialogue.referents["env"][pointed]["bbox"]
                         pointing[rel["carg"]] = bboxes
 
-                referent = ref_map[rel["args"][0]]["map_id"]
-                self.dialogue.assignment_hard[f"x{referent}u{ui}"] = \
+                ri = m2i[rel["args"][0]]
+                ui_offset = e2i[ref_map[rel["args"][0]]["source_ind"]]
+                self.dialogue.assignment_hard[f"x{ri}u{ui+ui_offset}"] = \
                     self.dialogue.referent_names[rel["carg"]]
 
         # ASP-compatible translation
@@ -272,8 +286,8 @@ class LanguageModule:
 
                     info.append((rule_head, rule_body, None))
                 
-                info = _map_and_format(info, ref_map, f"u{ui}")
-                info_aux = _map_and_format(info_aux, ref_map, f"u{ui}")
+                info = _map_and_format(info, ref_map, ui, m2i, e2i)
+                info_aux = _map_and_format(info_aux, ref_map, ui, m2i, e2i)
 
                 new_record = ("U", (info+info_aux, None), parse["conjunct_raw"][ev_id])
                 self.dialogue.record.append(new_record)    # Add new record
@@ -345,10 +359,10 @@ class LanguageModule:
                     question = (q_vars, q_rules)
 
                 if len(info) > 0:
-                    info = _map_and_format(info, ref_map, f"u{ui}")
+                    info = _map_and_format(info, ref_map, ui, m2i, e2i)
                 else:
                     info = None
-                question = _map_and_format(question, ref_map, f"u{ui}")
+                question = _map_and_format(question, ref_map, ui, m2i, e2i)
 
                 new_record = ("U", (info, question), parse["conjunct_raw"][ev_id])
                 self.dialogue.record.append(new_record)    # Add new record
@@ -381,17 +395,16 @@ class LanguageModule:
                 self.dialogue.record.append(new_record)
 
                 # Print NL utterance
-                print(f"A> {surface_form}")
                 return_val.append(("generate", surface_form))
 
             self.dialogue.to_generate = []
-            
+
             return return_val
         else:
             return
 
 
-def _map_and_format(data, ref_map, tail):
+def _map_and_format(data, ref_map, ui, m2i, e2i):
     # Map MRS referents to ASP terms and format
 
     def _fmt(rf):
@@ -404,7 +417,7 @@ def _map_and_format(data, ref_map, tail):
             term_char = "p" if ref_map[rf]["is_pred"] else "x"
             term_char = term_char.upper() if is_var else term_char
 
-            return f"{term_char}{ref_map[rf]['map_id']}{tail}"
+            return f"{term_char}{m2i[rf]}u{ui+e2i[ref_map[rf]['source_ind']]}"
 
     def _process_rules(entries):
         formatted = []

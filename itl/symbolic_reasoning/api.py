@@ -160,7 +160,7 @@ class SymbolicReasonerModule:
         # Add priming effect by recognized visual concepts
         if self.concl_vis is not None:
             bjt_v, _ = self.concl_vis
-            ## TODO: uncomment after updating compute_marginals
+            ## TODO: Update to comply with the recent changes
             # marginals_v = bjt_v.compute_marginals()
 
             # if marginals_v is not None:
@@ -420,7 +420,7 @@ class SymbolicReasonerModule:
         result = []
         a_map = lambda args: [self.value_assignment.get(a, a) for a in args]
 
-        for ui, (_, (rules, question), _) in enumerate(dialogue_state["record"]):
+        for ui, (speaker, (rules, question), _) in enumerate(dialogue_state["record"]):
             # If the utterance contains an unresolved neologism, give up translation
             # for the time being
             contains_unresolved_neologism = any([
@@ -428,7 +428,7 @@ class SymbolicReasonerModule:
                 if tok[0]==f"u{ui}"
             ])
             if contains_unresolved_neologism:
-                result.append((None, None))
+                result.append((speaker, (None, None)))
                 continue
 
             # Translate rules
@@ -503,7 +503,7 @@ class SymbolicReasonerModule:
             else:
                 translated_question = None
 
-            result.append((translated_rules, translated_question))
+            result.append((speaker, (translated_rules, translated_question)))
 
         return result
 
@@ -522,7 +522,9 @@ class SymbolicReasonerModule:
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking
-        for rules, _ in self.translate_dialogue_content(dialogue_state):
+        for speaker, (rules, _) in self.translate_dialogue_content(dialogue_state):
+            if speaker != "U": continue
+
             if rules is not None:
                 for r in rules:
                     # Skip any non-grounded content

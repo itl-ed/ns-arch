@@ -75,10 +75,6 @@ class Literal:
     def __hash__(self):
         return hash(str(self))
 
-    def is_grounded(self):
-        """ Returns True if the literal is variable-free """
-        return not any([is_var for _, is_var in self.args])
-
     def flip(self):
         """ Return new Literal instance with flipped naf but otherwise identical """
         return Literal(self.name, self.args, not self.naf)

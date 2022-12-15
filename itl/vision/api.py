@@ -12,7 +12,6 @@ from itertools import product
 
 import tqdm
 import torch
-import torch.nn.functional as F
 import numpy as np
 import pytorch_lightning as pl
 from dotenv import find_dotenv, load_dotenv
@@ -67,6 +66,8 @@ class VisionModule:
         
         if torch.cuda.is_available():
             self.model = self.model.to("cuda")
+
+        self.confusions = set()
 
     def load_weights(self):
         """ Load model parameter weights from specified source (self.fs_model) """
@@ -268,7 +269,7 @@ class VisionModule:
                                 continue
 
                         # Run search method to obtain region proposals
-                        proposals, _ = self.model.search(self.last_input, [search_conds])
+                        proposals, _ = self.model.search(self.last_input, [search_conds], 30)
                         proposals = box_convert(proposals[:,0,:], "xyxy", "xywh")
 
                         # Predict on the proposals

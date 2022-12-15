@@ -17,12 +17,11 @@ class SemanticParser:
         self.ace_bin = os.path.join(ace_bin, "ace")
 
         # For redirecting ACE's stderr (so that messages don't print on console)
-        self.null_sink = open(os.devnull,"w")
+        self.null_sink = open(os.devnull, "w")
     
-    def __dell__(self):
+    def __del__(self):
         """ For closing the null sink before destruction """
         self.null_sink.close()
-        super().__del__()
 
     def nl_parse(self, usr_in):
         parse = {
@@ -263,7 +262,7 @@ class SemanticParser:
             replaced = generated.result(0)["surface"]
 
         return replaced
-    
+
     def nl_replace_wh(self, sentence, replace_targets, replace_values):
         # MRS parse
         parsed = ace.parse(
@@ -482,6 +481,21 @@ class SemanticParser:
         # structured set of ASP literals
         translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
 
+        # Tag referents with the index event ids of their source sentence ('conjunct'
+        # of implicit_conj)
+        for index_id, (topic_msgs, focus_msgs) in translation.items():
+            for msg in topic_msgs + focus_msgs:
+                if isinstance(msg, tuple):
+                    # Positive message, as single tuple entry
+                    args = msg[2]
+                    for a in args: ref_map[a]["source_ind"] = index_id
+                else:
+                    # Negative message, consisting of negated msgs
+                    assert isinstance(msg, list)
+                    for nmsg in msg:
+                        args = nmsg[2]
+                        for a in args: ref_map[a]["source_ind"] = index_id
+
         # We assume bare NPs (underspecified quant.) have universal reading when they are arg1
         # of index (and existential reading otherwise)
         is_bare = lambda rf: any([
@@ -498,19 +512,6 @@ class SemanticParser:
                 # If all function term args are universally quantified
                 if all(ref_map[fa]["is_univ_quantified"] for fa in ref[1]):
                     ref_map[ref]["is_univ_quantified"] = True
-
-        # Reorganizing ref_map: not entirely necessary, just my OCD
-        ref_map_map = defaultdict(lambda: len(ref_map_map))
-        for ref in ref_map:
-            if ref_map[ref] is not None:
-                ref_map[ref] = {
-                    "map_id": ref_map_map[ref_map[ref]["map_id"]],
-                    "provenance": ref_map[ref]["provenance"],
-                    "is_referential": ref_map[ref]["is_referential"],
-                    "is_univ_quantified": ref_map[ref]["is_univ_quantified"],
-                    "is_wh_quantified": ref_map[ref]["is_wh_quantified"],
-                    "is_pred": ref_map[ref]["is_pred"]
-                }
 
         return translation, dict(ref_map)
 

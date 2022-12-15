@@ -32,13 +32,6 @@ def main(cfg):
 
     random.seed(cfg.seed)
 
-    # Setting custom colormap where lower scores give lower alpha (more transparent)
-    ncolors = 256
-    color_array = plt.get_cmap('gist_rainbow')(range(ncolors))
-    color_array[:,-1] = np.linspace(0.0, 1.0, ncolors)
-    map_object = LinearSegmentedColormap.from_list(name='rainbow_alpha',colors=color_array)
-    plt.register_cmap(cmap=map_object)
-
     # Set up agent
     agent = ITLAgent(cfg)
     exemplars = agent.lt_mem.exemplars

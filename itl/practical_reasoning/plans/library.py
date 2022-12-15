@@ -32,21 +32,6 @@ library = {
     # accordance with the agent's learning interaction stategy
     "address_neologism": None,
 
-    # Resolve mismatch between agent's vs. user's perception by asking question,
-    # in accordance with the agent's learning interaction stategy
-    "address_mismatch": [
-        # Prepare answering utterance to generate
-        {
-            "action_method": Val(referrable=["comp_actions", "handle_mismatch"]),
-            "action_args_getter": lambda x: (Val(data=x),)
-        },
-        # Generate whatever response queued
-        {
-            "action_method": Val(referrable=["lang", "generate"]),
-            "action_args_getter": lambda x: ()
-        }
-    ],
-
     # Handle unanswered question by first checking if it can be answered with agent's
     # current knowledge, and if so, adding to agenda to actually answer it
     "address_unanswered_Q": [
@@ -66,6 +51,36 @@ library = {
             "action_args_getter": lambda x: (Val(data=x),)
         },
         # Generate the prepared answer
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
+
+    # Resolve mismatch between agent's vs. user's perception by asking question,
+    # in accordance with the agent's learning interaction stategy
+    "address_mismatch": [
+        # Prepare answering utterance to generate
+        {
+            "action_method": Val(referrable=["comp_actions", "handle_mismatch"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
+        # Generate whatever response queued
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
+
+    # Resolve agent's confusion between two visual concepts revealed during & via
+    # learning dialogue with user
+    "address_confusion": [
+        # Prepare answering utterance to generate
+        {
+            "action_method": Val(referrable=["comp_actions", "handle_confusion"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
+        # Generate whatever response queued
         {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()
