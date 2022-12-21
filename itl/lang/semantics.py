@@ -24,143 +24,149 @@ class SemanticParser:
         self.null_sink.close()
 
     def nl_parse(self, usr_in):
-        parse = {
-            "relations": {
-                "by_args": defaultdict(lambda: []),
-                "by_id": {},
-                "by_handle": {}
-            },
-            "utt_type": {},
-            "raw": usr_in,
-            "conjunct_raw": {}
-        }
+        assert isinstance(usr_in, list)
 
-        # For now use the top result
-        parsed = ace.parse(
-            self.grammar, usr_in, executable=self.ace_bin, stderr=self.null_sink
-        )
-        parsed = parsed.result(0).mrs()
-
-        # Extract essential parse, assuming flat structure (no significant semantic scoping)
-        for ep in parsed.rels:
-
-            args = {a: ep.args[a] for a in ep.args if a.startswith("ARG") and len(a)>3}
-            args = tuple([ep.args[f"ARG{i}"] for i in range(len(args))])
-
-            rel = {
-                "args": args,
-                "lexical": ep.predicate.startswith("_"),
-                "id": ep.id,
-                "handle": ep.label,
-                "crange": (ep.cfrom, ep.cto)
+        parses = []         # Return value
+        for utt_string in usr_in:
+            parse = {
+                "relations": {
+                    "by_args": defaultdict(lambda: []),
+                    "by_id": {},
+                    "by_handle": {}
+                },
+                "utt_type": {},
+                "raw": utt_string,
+                "conjunct_raw": {}
             }
 
-            if "ARG" in ep.args: rel["arg_udef"] = ep.args["ARG"]
+            # For now use the top result
+            parsed = ace.parse(
+                self.grammar, utt_string, executable=self.ace_bin, stderr=self.null_sink
+            )
+            parsed = parsed.result(0).mrs()
 
-            if ep.predicate.startswith("_"):
-                # 'Surface' (in ERG parlance) predicates with lexical symbols
-                lemma, pos, sense = predicate.split(ep.predicate)
+            # Extract essential parse, assuming flat structure (no significant semantic scoping)
+            for ep in parsed.rels:
 
-                if sense == "unknown":
-                    # Predicate not covered by parser lexicon
-                    lemma, pos = lemma.split("/")
+                args = {a: ep.args[a] for a in ep.args if a.startswith("ARG") and len(a)>3}
+                args = tuple([ep.args[f"ARG{i}"] for i in range(len(args))])
 
-                    # Multi-clause input occasionally includes '.' after unknown nouns
-                    lemma = lemma.strip(".")
+                rel = {
+                    "args": args,
+                    "lexical": ep.predicate.startswith("_"),
+                    "id": ep.id,
+                    "handle": ep.label,
+                    "crange": (ep.cfrom, ep.cto)
+                }
 
-                    # Translate the tag obtained from the POS tagger to corresponding
-                    # MRS POS code
-                    if pos.startswith("n"):
-                        pos = "n"
+                if "ARG" in ep.args: rel["arg_udef"] = ep.args["ARG"]
 
-                        # Ensure singularized lemma
-                        singularized = inflect.engine().singular_noun(lemma)
-                        if singularized:
-                            # singular_noun() returns False if already singular. Weird
-                            # behavior, but welp
-                            lemma = singularized
-                    elif pos.startswith("j"):
-                        pos = "a"
-                    elif pos.startswith("v"):
-                        pos = "v"
-                    else:
-                        raise ValueError(f"I don't know how to grammatically process the token '{lemma}'")
+                if ep.predicate.startswith("_"):
+                    # 'Surface' (in ERG parlance) predicates with lexical symbols
+                    lemma, pos, sense = predicate.split(ep.predicate)
 
-                # (R)MRS pos codes to WordNet synset pos tags
-                if pos == "p": pos = "r"
+                    if sense == "unknown":
+                        # Predicate not covered by parser lexicon
+                        lemma, pos = lemma.split("/")
 
-                rel.update({
-                    "predicate": lemma,
-                    "pos": pos,
-                    "sense": sense
-                })
-            
-            else:
-                # Reserved, 'abstract' (in ERG parlance) predicates
-                if ep.is_quantifier():
+                        # Multi-clause input occasionally includes '.' after unknown nouns
+                        lemma = lemma.strip(".")
+
+                        # Translate the tag obtained from the POS tagger to corresponding
+                        # MRS POS code
+                        if pos.startswith("n"):
+                            pos = "n"
+
+                            # Ensure singularized lemma
+                            singularized = inflect.engine().singular_noun(lemma)
+                            if singularized:
+                                # singular_noun() returns False if already singular. Weird
+                                # behavior, but welp
+                                lemma = singularized
+                        elif pos.startswith("j"):
+                            pos = "a"
+                        elif pos.startswith("v"):
+                            pos = "v"
+                        else:
+                            raise ValueError(f"I don't know how to grammatically process the token '{lemma}'")
+
+                    # (R)MRS pos codes to WordNet synset pos tags
+                    if pos == "p": pos = "r"
+
                     rel.update({
-                        "predicate": ep.predicate.strip("_q"),
-                        "pos": "q",
-                        "lexical": False
+                        "predicate": lemma,
+                        "pos": pos,
+                        "sense": sense
                     })
-
-                else:
-                    rel.update({
-                        "predicate": ep.predicate,
-                        "pos": None
-                    })
-
-                    if ep.predicate == "named":
-                        rel["carg"] = ep.carg
-
-                    if ep.predicate == "neg":
-                        hcons = {hc.hi: hc.lo for hc in parsed.hcons if hc.relation=="qeq"}
-                        negated = hcons[ep.args["ARG1"]]
-                        negated = [ep for ep in parsed.rels if ep.label == negated][0]
-
-                        rel["neg"] = negated.label
                 
-            parse["relations"]["by_args"][args].append(rel)
-            parse["relations"]["by_id"][ep.id] = rel
-            parse["relations"]["by_handle"][ep.label] = rel
-        
-        parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
-        
-        # SF supposedly stands for 'sentential force' -- handle the utterance types
-        # here, along with conjunctions
-        def index_conjuncts_with_SF(rel_id, parent_id):
-            index_rel = parse["relations"]["by_id"][rel_id]
-            if index_rel["predicate"] == "implicit_conj":
-                # Recursively process conjuncts
-                index_conjuncts_with_SF(index_rel["args"][1], rel_id)
-                index_conjuncts_with_SF(index_rel["args"][2], rel_id)
-            else:
-                parse["utt_type"][rel_id] = parsed.variables[rel_id]["SF"]
+                else:
+                    # Reserved, 'abstract' (in ERG parlance) predicates
+                    if ep.is_quantifier():
+                        rel.update({
+                            "predicate": ep.predicate.strip("_q"),
+                            "pos": "q",
+                            "lexical": False
+                        })
 
-                # Recover part of original input corresponding to this conjunct by
-                # iteratively expanding set of args covered by this conjunct, then
-                # obtaining min/max of the cranges
-                covered_args = {rel_id}; fixpoint_reached = False
-                while not fixpoint_reached:
-                    prev_size = len(covered_args)
-                    covered_args = set.union(*[
-                        set(args) for args in parse["relations"]["by_args"]
-                        if parent_id not in args and any(a in covered_args for a in args)
-                    ])
-                    fixpoint_reached = len(covered_args) == prev_size
-                covered_cranges = [
-                    parse["relations"]["by_id"][arg]["crange"]
-                    for arg in covered_args if arg in parse["relations"]["by_id"]
-                ]
-                cj_start = min(cfrom for cfrom, _ in covered_cranges)
-                cj_end = max(cto for _, cto in covered_cranges)
-                parse["conjunct_raw"][rel_id] = parse["raw"][cj_start:cj_end]
-        index_conjuncts_with_SF(parsed.index, None)
+                    else:
+                        rel.update({
+                            "predicate": ep.predicate,
+                            "pos": None
+                        })
 
-        # Record index (top variable)
-        parse["index"] = parsed.index
+                        if ep.predicate == "named":
+                            rel["carg"] = ep.carg
 
-        return parse
+                        if ep.predicate == "neg":
+                            hcons = {hc.hi: hc.lo for hc in parsed.hcons if hc.relation=="qeq"}
+                            negated = hcons[ep.args["ARG1"]]
+                            negated = [ep for ep in parsed.rels if ep.label == negated][0]
+
+                            rel["neg"] = negated.label
+                    
+                parse["relations"]["by_args"][args].append(rel)
+                parse["relations"]["by_id"][ep.id] = rel
+                parse["relations"]["by_handle"][ep.label] = rel
+            
+            parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
+            
+            # SF supposedly stands for 'sentential force' -- handle the utterance types
+            # here, along with conjunctions
+            def index_conjuncts_with_SF(rel_id, parent_id):
+                index_rel = parse["relations"]["by_id"][rel_id]
+                if index_rel["predicate"] == "implicit_conj":
+                    # Recursively process conjuncts
+                    index_conjuncts_with_SF(index_rel["args"][1], rel_id)
+                    index_conjuncts_with_SF(index_rel["args"][2], rel_id)
+                else:
+                    parse["utt_type"][rel_id] = parsed.variables[rel_id]["SF"]
+
+                    # Recover part of original input corresponding to this conjunct by
+                    # iteratively expanding set of args covered by this conjunct, then
+                    # obtaining min/max of the cranges
+                    covered_args = {rel_id}; fixpoint_reached = False
+                    while not fixpoint_reached:
+                        prev_size = len(covered_args)
+                        covered_args = set.union(*[
+                            set(args) for args in parse["relations"]["by_args"]
+                            if parent_id not in args and any(a in covered_args for a in args)
+                        ])
+                        fixpoint_reached = len(covered_args) == prev_size
+                    covered_cranges = [
+                        parse["relations"]["by_id"][arg]["crange"]
+                        for arg in covered_args if arg in parse["relations"]["by_id"]
+                    ]
+                    cj_start = min(cfrom for cfrom, _ in covered_cranges)
+                    cj_end = max(cto for _, cto in covered_cranges)
+                    parse["conjunct_raw"][rel_id] = parse["raw"][cj_start:cj_end]
+            index_conjuncts_with_SF(parsed.index, None)
+
+            # Record index (top variable)
+            parse["index"] = parsed.index
+
+            parses.append(parse)
+
+        return parses
 
     def nl_negate(self, sentence):
         """
@@ -439,81 +445,87 @@ class SemanticParser:
         return replaced
 
     @staticmethod
-    def asp_translate(parse):
-        # First find chains of compound NPs and then appropriately merge them
-        chains = {}
-        for args in parse["relations"]["by_args"]:
-            for rel in parse["relations"]["by_args"][args]:
-                if rel["lexical"] == False and rel["predicate"] == "compound":
-                    chains[args[2], args[0]] = args[1]
-        
-        while len(chains) > 0:
-            for x in chains:
-                if x[0] not in chains.values():
-                    # Backtrack by one step to merge
-                    p1 = parse["relations"]["by_id"][x[0]]
-                    p2 = parse["relations"]["by_id"][chains[x]]
-                    merged = p1["predicate"] + p2["predicate"].capitalize()
-                    parse["relations"]["by_id"][chains[x]]["predicate"] = merged
+    def asp_translate(parses):
+        translations = []
+        ref_maps = []
+        for parse in parses:
+            # First find chains of compound NPs and then appropriately merge them
+            chains = {}
+            for args in parse["relations"]["by_args"]:
+                for rel in parse["relations"]["by_args"][args]:
+                    if rel["lexical"] == False and rel["predicate"] == "compound":
+                        chains[args[2], args[0]] = args[1]
+            
+            while len(chains) > 0:
+                for x in chains:
+                    if x[0] not in chains.values():
+                        # Backtrack by one step to merge
+                        p1 = parse["relations"]["by_id"][x[0]]
+                        p2 = parse["relations"]["by_id"][chains[x]]
+                        merged = p1["predicate"] + p2["predicate"].capitalize()
+                        parse["relations"]["by_id"][chains[x]]["predicate"] = merged
 
-                    args_to_del = []
-                    for args, rels in parse["relations"]["by_args"].items():
-                        if x[0] in args:
-                            args_to_del.append(args)
-                            for r in rels:
-                                del parse["relations"]["by_id"][r["id"]]
-                                del parse["relations"]["by_handle"][r["handle"]]
-                    for args in args_to_del:
-                        del parse["relations"]["by_args"][args]
+                        args_to_del = []
+                        for args, rels in parse["relations"]["by_args"].items():
+                            if x[0] in args:
+                                args_to_del.append(args)
+                                for r in rels:
+                                    del parse["relations"]["by_id"][r["id"]]
+                                    del parse["relations"]["by_handle"][r["handle"]]
+                        for args in args_to_del:
+                            del parse["relations"]["by_args"][args]
 
-                    del chains[x]; break
+                        del chains[x]; break
 
-        # Equivalence classes mapping referents to rule variables, while tracking whether
-        # they come from referential expressions or not
-        ref_map = {}
-        ref_map[parse["index"]] = None
+            # Equivalence classes mapping referents to rule variables, while tracking whether
+            # they come from referential expressions or not
+            ref_map = {}
+            ref_map[parse["index"]] = None
 
-        # Negated relations by handle
-        negs = [rel["neg"] for rel in parse["relations"]["by_id"].values()
-            if rel["predicate"] == "neg"]
+            # Negated relations by handle
+            negs = [rel["neg"] for rel in parse["relations"]["by_id"].values()
+                if rel["predicate"] == "neg"]
 
-        # Traverse the semantic dependency tree represented by parse to collect appropriately
-        # structured set of ASP literals
-        translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
+            # Traverse the semantic dependency tree represented by parse to collect appropriately
+            # structured set of ASP literals
+            translation = _traverse_dt(parse, parse["index"], ref_map, set(), negs)
 
-        # Tag referents with the index event ids of their source sentence ('conjunct'
-        # of implicit_conj)
-        for index_id, (topic_msgs, focus_msgs) in translation.items():
-            for msg in topic_msgs + focus_msgs:
-                if isinstance(msg, tuple):
-                    # Positive message, as single tuple entry
-                    args = msg[2]
-                    for a in args: ref_map[a]["source_ind"] = index_id
-                else:
-                    # Negative message, consisting of negated msgs
-                    assert isinstance(msg, list)
-                    for nmsg in msg:
-                        args = nmsg[2]
+            # Tag referents with the index event ids of their source sentence ('conjunct'
+            # of implicit_conj)
+            for index_id, (topic_msgs, focus_msgs) in translation.items():
+                for msg in topic_msgs + focus_msgs:
+                    if isinstance(msg, tuple):
+                        # Positive message, as single tuple entry
+                        args = msg[2]
                         for a in args: ref_map[a]["source_ind"] = index_id
+                    else:
+                        # Negative message, consisting of negated msgs
+                        assert isinstance(msg, list)
+                        for nmsg in msg:
+                            args = nmsg[2]
+                            for a in args: ref_map[a]["source_ind"] = index_id
 
-        # We assume bare NPs (underspecified quant.) have universal reading when they are arg1
-        # of index (and existential reading otherwise)
-        is_bare = lambda rf: any([
-            r["pos"] == "q" and r["predicate"] == "udef"
-            for r in parse["relations"]["by_args"][(rf,)]
-        ])
-        for ev_id in translation:
-            ev_arg1 = parse["relations"]["by_id"][ev_id]["args"][1]
-            if is_bare(ev_arg1):
-                ref_map[ev_arg1]["is_univ_quantified"] = True
-        for ref in ref_map:
-            # Handle function terms as well
-            if isinstance(ref, tuple):
-                # If all function term args are universally quantified
-                if all(ref_map[fa]["is_univ_quantified"] for fa in ref[1]):
-                    ref_map[ref]["is_univ_quantified"] = True
+            # We assume bare NPs (underspecified quant.) have universal reading when they are arg1
+            # of index (and existential reading otherwise)
+            is_bare = lambda rf: any([
+                r["pos"] == "q" and r["predicate"] == "udef"
+                for r in parse["relations"]["by_args"][(rf,)]
+            ])
+            for ev_id in translation:
+                ev_arg1 = parse["relations"]["by_id"][ev_id]["args"][1]
+                if is_bare(ev_arg1):
+                    ref_map[ev_arg1]["is_univ_quantified"] = True
+            for ref in ref_map:
+                # Handle function terms as well
+                if isinstance(ref, tuple):
+                    # If all function term args are universally quantified
+                    if all(ref_map[fa]["is_univ_quantified"] for fa in ref[1]):
+                        ref_map[ref]["is_univ_quantified"] = True
+            
+            translations.append(translation)
+            ref_maps.append(dict(ref_map))
 
-        return translation, dict(ref_map)
+        return translations, ref_maps
 
 
 def _traverse_dt(parse, rel_id, ref_map, covered, negs):

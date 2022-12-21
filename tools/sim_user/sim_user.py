@@ -60,6 +60,10 @@ class SimulatedTeacher:
         # Set seed
         random.seed(cfg.seed)
 
+        # Shuffle order of target concepts
+        for conc_type, concepts in target_concepts.items():
+            random.shuffle(concepts)
+
         # Split exemplars for training and testing per concept
         self.training_exemplars = {}; self.test_exemplars = {}
         for conc_type, concepts in target_concepts.items():
@@ -121,41 +125,10 @@ class SimulatedTeacher:
 
         self.current_focus = (img_f, instance_bbox)
 
-        # # Temporary code for preparing 'cheat sheet', for checking whether logical
-        # # reasoners perform better if the agent's poor vision module's performance 
-        # # is replaced by oracle ground truths about object parts and their properties
-        # instance_parts = [
-        #     r for r in sampled_img["annotations"][sampled_instance]["relations"]
-        #     if "have.v.01" in [self.metadata["relations_names"][ri] for ri in r["relation"]]
-        # ]
-        # instance_parts = [
-        #     sampled_img["annotations"][str(r["object_id"])] for r in instance_parts
-        # ]
-        # instance_parts = [
-        #     (obj, [self.metadata["classes_names"][ci] for ci in obj["classes"]])
-        #     for obj in instance_parts
-        # ]
-        # cheat_sheet = [
-        #     (
-        #         box_convert(
-        #             torch.tensor(obj["bbox"])[None], "xywh", "xyxy"
-        #         )[0],
-        #         classes[0].split(".")[0],
-        #         [
-        #             self.metadata["attributes_names"][ai].split(".")[0] + \
-        #                 "/" + classes[0].split(".")[0]
-        #             for ai in obj["attributes"]
-        #         ]
-        #     )
-        #     for obj, classes in instance_parts
-        #     if "bowl.n.01" in classes or "stem.n.03" in classes
-        # ]
-
         return {
             "v_usr_in": os.path.join(".", self.image_dir_prefix, img_f),
             "l_usr_in": "What is this?",
-            "pointing": { "this": [instance_bbox] },
-            # "cheat_sheet": cheat_sheet
+            "pointing": { "this": [instance_bbox] }
         }
 
     def react(self, agent_reaction):
@@ -211,7 +184,7 @@ class SimulatedTeacher:
                 # Minimal feedback; only let the agent know the answer is incorrect
                 result_response = {
                     "v_usr_in": "n",
-                    "l_usr_in": f"This is not a {answer_content}.",
+                    "l_usr_in": [f"This is not a {answer_content}."],
                     "pointing": { "this": [self.current_focus[1]] }
                 }
 
@@ -220,7 +193,7 @@ class SimulatedTeacher:
                 taught_concepts = set(epi["target_concept"] for epi in self.episode_records)
                 is_novel_concept = concept_string not in taught_concepts
                 if self.strat_feedback != "minHelp" or is_novel_concept:
-                    result_response["l_usr_in"] += f" This is a {concept_string}."
+                    result_response["l_usr_in"].append(f"This is a {concept_string}.")
                     result_response["pointing"]["this"].append(self.current_focus[1])
 
                 responses.append(result_response)
@@ -254,6 +227,12 @@ class SimulatedTeacher:
                 (part, prop) for part, props in conc2_props.items() for prop in props
             }
 
+            answer_response = {
+                "v_usr_in": "n",
+                "l_usr_in": [],
+                "pointing": None
+            }
+
             # For each of two directions of relative differences, synthesize
             # appropriate constrastive generic explanations
             conc1_props_diff = defaultdict(set)
@@ -264,11 +243,7 @@ class SimulatedTeacher:
                 part_name = pluralize(part.split(".")[0])
                 part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
                 generic = f"{conc1_subj} have {part_descriptor} {part_name}."
-                responses.append({
-                    "v_usr_in": "n",
-                    "l_usr_in": generic,
-                    "pointing": None
-                })
+                answer_response["l_usr_in"].append(generic)
 
             conc2_props_diff = defaultdict(set)
             conc2_subj = ques_content[1].capitalize()
@@ -278,11 +253,9 @@ class SimulatedTeacher:
                 part_name = pluralize(part.split(".")[0])
                 part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
                 generic = f"{conc2_subj} have {part_descriptor} {part_name}."
-                responses.append({
-                    "v_usr_in": "n",
-                    "l_usr_in": generic,
-                    "pointing": None
-                })
+                answer_response["l_usr_in"].append(generic)
+
+            responses.append(answer_response)
 
             self.taught_diffs.add(frozenset([conc1, conc2]))
 

@@ -9,13 +9,13 @@ paths:
     outputs_dir: "${hydra:runtime.output_dir}"
 
 agent:
-    strat_generic: "semOnly"    # Options: "semOnly", "semWithImpl"
+    strat_generic: "semOnly"    # Options: "semOnly", "semNeg", "semNegScal"
 
 exp1:
     difficulty: "nonFine"       # Options: "nonFine", "fineEasy", "fineHard"
     strat_feedback: "minHelp"   # Options: "minHelp", "medHelp", "maxHelp"
-    num_examples: 75
-    test_interval: 15
+    num_examples: 40
+    test_interval: 5
     test_set_size: 30
 
 seed: 42

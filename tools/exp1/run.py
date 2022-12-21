@@ -67,7 +67,7 @@ def main(cfg):
     # Train until certain number of mistakes have been made (thus same number of 
     # examples were used for training), configured as cfg.exp1.num_examples
     i = 0; num_exs_used = 0
-    while num_exs_used <= cfg.exp1.num_examples:
+    while num_exs_used < cfg.exp1.num_examples:
         i += 1
         sys_msg = f"Episode {i} (# exs: {num_exs_used})"
         logger.info("Sys> " + ("*" * (len(sys_msg)+8)))
@@ -155,42 +155,11 @@ def midterm_test(agent, user, num_exs):
             instance_bbox = torch.tensor(img["annotations"][instance]["bbox"])
             instance_bbox = box_convert(instance_bbox[None], "xywh", "xyxy")[0].numpy()
 
-            # # Temporary code for preparing 'cheat sheet', for checking whether logical
-            # # reasoners perform better if the agent's poor vision module's performance 
-            # # is replaced by oracle ground truths about object parts and their properties
-            # instance_parts = [
-            #     r for r in img["annotations"][instance]["relations"]
-            #     if "have.v.01" in [user.metadata["relations_names"][ri] for ri in r["relation"]]
-            # ]
-            # instance_parts = [
-            #     img["annotations"][str(r["object_id"])] for r in instance_parts
-            # ]
-            # instance_parts = [
-            #     (obj, [user.metadata["classes_names"][ci] for ci in obj["classes"]])
-            #     for obj in instance_parts
-            # ]
-            # cheat_sheet = [
-            #     (
-            #         box_convert(
-            #             torch.tensor(obj["bbox"])[None], "xywh", "xyxy"
-            #         )[0],
-            #         classes[0].split(".")[0],
-            #         [
-            #             user.metadata["attributes_names"][ai].split(".")[0] + \
-            #                 "/" + classes[0].split(".")[0]
-            #             for ai in obj["attributes"]
-            #         ]
-            #     )
-            #     for obj, classes in instance_parts
-            #     if "bowl.n.01" in classes or "stem.n.03" in classes
-            # ]
-
             # Binary concept testing mode
             agent_answers = agent.test_binary(
                 os.path.join(user.image_dir_prefix, img_f),
                 instance_bbox,
-                user.target_concepts["cls"],
-                # cheat_sheet
+                user.target_concepts["cls"]
             )
             for conc_test in user.test_exemplars["cls"]:
                 if agent_answers[conc_test]:

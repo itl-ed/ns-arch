@@ -1,6 +1,8 @@
 """
 Implements LP^MLN literal class
 """
+from itertools import permutations
+
 import clingo
 
 
@@ -65,6 +67,7 @@ class Literal:
     def __eq__(self, other):
         """ Literal equality comparison """
         return \
+            (isinstance(self, Literal) and isinstance(other, Literal)) and \
             (self.name == other.name) and \
             (self.args == other.args) and \
             (self.naf == other.naf) and \
@@ -172,12 +175,16 @@ class Literal:
         return Literal(name=name, args=args)
 
     @staticmethod
-    def isomorphism_btw(lits1, lits2, ism):
+    def isomorphism_btw(lits1, lits2, ism=None):
         """
         Helper method for testing whether two iterables of literals are isomorphic up to
         variable & function renaming. Return an isomorphism if found to be so; otherwise,
         return None.
         """
+        if len(lits1) != len(lits2):
+            # Don't even bother
+            return None
+
         isomorphism = ism or {
             "terms": {}, "functions": {}
         }
@@ -274,3 +281,34 @@ class Literal:
 
         # Successfully found an isomorphism
         return isomorphism
+
+    @staticmethod
+    def isomorphic_conj_pair(cnj1, cnj2):
+        """
+        Recursive helper method for checking whether two nested lists of Literals
+        with arbitrary depths are isomorphic
+        """
+        leaves1 = {l for l in cnj1 if isinstance(l, Literal)}
+        leaves2 = {l for l in cnj2 if isinstance(l, Literal)}
+
+        branches1 = [nc for nc in cnj1 if not isinstance(nc, Literal)]
+        branches2 = [nc for nc in cnj2 if not isinstance(nc, Literal)]
+
+        if Literal.isomorphism_btw(leaves1, leaves2) is None:
+            # Not isomorphic if sets of leaf nodes are not isomorphic
+            return False
+        
+        if len(branches1) != len(branches2):
+            # Not isomorphic if sets of branch nodes have different lengths
+            return False
+
+        # Consider all possible bijections between branches1 vs. branches2;
+        # if any bijection is isomorphic, return True
+        for pm in permutations(range(len(branches1))):
+            bijections = [(branches1[i], branches2[j]) for i, j in enumerate(pm)]
+
+            if all(Literal.isomorphic_conj_pair(b1, b2) for b1, b2 in bijections):
+                return True
+
+        # If reached here, no isomorphic bijection found
+        return False

@@ -2,9 +2,11 @@
 Outermost wrapper containing ITL agent API
 """
 import os
+import copy
 import math
 import pickle
 import logging
+from collections import defaultdict
 # import readline
 # import rlcompleter
 
@@ -26,10 +28,10 @@ from .lpmln.utils import wrap_args
 logger = logging.getLogger(__name__)
 
 
-SR_THRES = 0.50              # Mismatch surprisal threshold
-SC_THRES = 0.5               # Binary decision score threshold
-# SC_DELTA = 0.15              # Confusion prob score difference threshold
+SR_THRES = 0.5               # Mismatch surprisal threshold
+SC_THRES = 0.3               # Binary decision score threshold
 U_IN_PR = 1.00               # How much the agent values information provided by the user
+A_IM_PR = 0.80               # How much the agent values inferred implicature
 EPS = 1e-10                  # Value used for numerical stabilization
 TAB = "\t"                   # For use in format strings
 
@@ -55,20 +57,8 @@ class ITLAgent:
         if "model_path" in cfg.agent:
             self.load_model(cfg.agent.model_path)
 
-        # Bookkeeping facts that no longer need to be tested for agent-user
-        # knowledge mismatch. In a sense, this kinda overlaps with the notion
-        # of 'common ground'? May consider fulfilling this later...
-        self.doubt_no_more = set()
-
-        # Bookkeeping pairs of visual concepts that confused the agent, which
-        # are resolved by asking 'concept-diff' questions to the user. Jusk ask
-        # once to get answers as symbolic generic rules when the agent is aware
-        # of the confusion for the first time, for each concept pair.
-        self.confused_no_more = set()
-
-        # (Temporary) Restrict our attention to newly acquired visual concepts
-        # when it comes to dealing with concept confusions
-        self.cls_offset = self.vision.inventories.cls
+        # Agent learning strategy params
+        self.strat_generic = cfg.agent.strat_generic
 
         # Show visual UI and plots
         self.vis_ui_on = True
@@ -77,6 +67,26 @@ class ITLAgent:
         # self.dcompleter = DatasetImgsCompleter(cfg.paths.data_dir)
         # readline.parse_and_bind("tab: complete")
 
+        # (Fields below would categorize as 'working memory' in conventional
+        # cognitive architectures...)
+
+        # Bookkeeping pairs of visual concepts that confused the agent, which
+        # are resolved by asking 'concept-diff' questions to the user. Jusk ask
+        # once to get answers as symbolic generic rules when the agent is aware
+        # of the confusion for the first time, for each concept pair.
+        # (In a sense, this kinda overlaps with the notion of 'common ground'?
+        # May consider fulfilling this later...)
+        self.confused_no_more = set()
+
+        # Snapshot of KB, to be taken at the beginning of every training episode,
+        # with which scalar implicatures will be computed. Won't be necessary
+        # if we were to use more structured discourse representation...
+        self.kb_snap = copy.deepcopy(self.lt_mem.kb.entries_by_pred)
+
+        # (Temporary) Restrict our attention to newly acquired visual concepts
+        # when it comes to dealing with concept confusions
+        self.cls_offset = self.vision.inventories.cls
+
     def __call__(self):
         """Main function: Kickstart infinite ITL agent loop with user interface"""
         logger.info("Sys> At any point, enter 'exit' to quit")
@@ -84,19 +94,19 @@ class ITLAgent:
         while True:
             self.loop()
 
-    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, cheat_sheet=None):
+    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None):
         """
         Single agent activity loop. Provide usr_in for programmatic execution; otherwise,
         prompt user input on command line REPL
         """
         self._vis_inp(usr_in=v_usr_in)
         self._lang_inp(usr_in=l_usr_in)
-        self._update_belief(pointing=pointing, cheat_sheet=cheat_sheet)
+        self._update_belief(pointing=pointing)
         act_out = self._act()
 
         return act_out
 
-    def test_binary(self, v_input, target_bbox, concepts, cheat_sheet=None):
+    def test_binary(self, v_input, target_bbox, concepts):
         """
         Surgically (programmatically) test the agent's performance with an exam question,
         without having to communicate through full 'natural interactions...
@@ -122,59 +132,6 @@ class ITLAgent:
             None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
         )
 
-        # Temporary injection of ground-truth object parts and their attributes
-        # if cheat_sheet is not None and len(cheat_sheet) > 0:
-        #     ent_map = [
-        #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-        #     ]
-        #     bboxes = {}
-        #     for i, (bbox, _, _) in enumerate(cheat_sheet):
-        #         bboxes[ent_map[i]] = {
-        #             "bbox": bbox,
-        #             "bbox_mode": "xyxy"
-        #         }
-        #         self.lang.dialogue.referents["env"][ent_map[i]] = {
-        #             "bbox": bbox,
-        #             "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-        #         }
-        #         self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
-
-        #     # Incrementally predict on the designated bbox
-        #     if len(bboxes) > 0:
-        #         self.vision.predict(
-        #             None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
-        #         )
-
-        #         # Ensure scores are high enough for appropriate classes, attributes
-        #         # and relations that should be positive, and low enough for ones 
-        #         # that should be negative
-        #         HIGH_SCORE = 0.8
-        #         for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-        #             ent_preds = self.vision.scene[ent_map[i]]
-        #             whole_preds = self.vision.scene["o0"]
-
-        #             # Object part class scores
-        #             gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-        #             for ci, score in enumerate(ent_preds["pred_classes"]):
-        #                 if ci == gt_c and score < HIGH_SCORE:
-        #                     ent_preds["pred_classes"][ci] = HIGH_SCORE
-        #                 if ci != gt_c and score > 1-HIGH_SCORE:
-        #                     ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
-
-        #             # Object part attribute scores
-        #             gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-        #             for ai, score in enumerate(ent_preds["pred_attributes"]):
-        #                 if ai in gt_as and score < HIGH_SCORE:
-        #                     ent_preds["pred_attributes"][ai] = HIGH_SCORE
-        #                 if ai not in gt_as and score > 1-HIGH_SCORE:
-        #                     ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
-
-        #             # Object part relation score w.r.t. o0
-        #             if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-        #                 whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-        #             if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-        #                 ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
-
         # Inform the language module of the visual context
         self.lang.situate(self.vision.last_input, self.vision.scene)
         self.symbolic.refresh()
@@ -185,9 +142,10 @@ class ITLAgent:
         bjt_v, _ = self.symbolic.concl_vis
 
         # "Question" for probing agent's performance
-        q_vars = (("P", True),)
-        q_rules = frozenset([Rule(head=Literal("*_?", wrap_args("P", "o0")))])
-        question = (q_vars, q_rules)
+        question = (
+            (("P", True),),
+            ((Literal("*_?", wrap_args("P", "o0")),), None)
+        )
 
         # Parts taken from self.comp_actions.prepare_answer_Q(), excluding processing
         # questions in dialogue records
@@ -216,7 +174,7 @@ class ITLAgent:
         denotations = [f"{conc_type}_{conc_ind}" for conc_ind, conc_type in denotations]
 
         agent_answers = {
-            c: True if (d,) in answers_raw and answers_raw[(d,)] > 0.5 else False
+            c: (d,) in answers_raw and answers_raw[(d,)] > SC_THRES
             for c, d in zip(concepts, denotations)
         }
 
@@ -265,17 +223,17 @@ class ITLAgent:
             # Storing agent models in W&B; not implemented yet
             raise NotImplementedError
 
-            wb_entity = os.environ.get("WANDB_ENTITY")
-            wb_project = os.environ.get("WANDB_PROJECT")
-            wb_run_id = self.fs_model_path[len(WB_PREFIX):]
+            # wb_entity = os.environ.get("WANDB_ENTITY")
+            # wb_project = os.environ.get("WANDB_PROJECT")
+            # wb_run_id = self.fs_model_path[len(WB_PREFIX):]
 
-            local_ckpt_path = WandbLogger.download_artifact(
-                artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
-                save_dir=os.path.join(
-                    self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
-                )
-            )
-            local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
+            # local_ckpt_path = WandbLogger.download_artifact(
+            #     artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
+            #     save_dir=os.path.join(
+            #         self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
+            #     )
+            # )
+            # local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
         else:
             assert os.path.exists(ckpt_path)
             local_ckpt_path = ckpt_path
@@ -371,7 +329,12 @@ class ITLAgent:
 
         while True:
             if input_provided:
-                logger.info(f"U> {usr_in}")
+                # User input may be a single string or list of strings; if a single
+                # string, wrap it into a singleton list. In current design, each usr_in
+                # list represents a sequence of utterances in a single dialogue turn.
+                if isinstance(usr_in, str):
+                    usr_in = [usr_in]
+                logger.info(f"U> {' '.join(usr_in)}")
             else:
                 usr_in = input("U> ")
 
@@ -397,7 +360,7 @@ class ITLAgent:
                 else:
                     logger.info(f"Sys> {e.args[0]}")
 
-    def _update_belief(self, pointing=None, cheat_sheet=None):
+    def _update_belief(self, pointing=None):
         """ Form beliefs based on visual and/or language input """
 
         if not (self.vision.new_input or self.lang.new_input):
@@ -412,12 +375,19 @@ class ITLAgent:
         # For showing visual UI on only the first time
         vis_ui_on = self.vis_ui_on
 
-        # Index of latest utterance
-        ui_last = len(self.lang.dialogue.record)
+        # Index of latest dialogue turn
+        ti_last = len(self.lang.dialogue.record)
 
         # Set of new visual concepts (equivalently, neologisms) newly registered
         # during the loop
         novel_concepts = set()
+
+        # Recursive helper methods for checking whether rule head/body is grounded
+        # (variable-free) or lifted (all variables)
+        is_grounded = lambda cnj: all(not is_var for _, is_var in cnj.args) \
+            if isinstance(cnj, Literal) else all(is_grounded(nc) for nc in cnj)
+        is_lifted = lambda cnj: all(is_var for _, is_var in cnj.args) \
+            if isinstance(cnj, Literal) else all(is_lifted(nc) for nc in cnj)
 
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
@@ -441,12 +411,12 @@ class ITLAgent:
                 self.lang.situate(self.vision.last_input, self.vision.scene)
                 self.symbolic.refresh()
 
-                # Update this on episode-basis
-                self.doubt_no_more = set()
+                # Reset below on episode-basis
+                self.kb_snap = copy.deepcopy(self.lt_mem.kb.entries_by_pred)
 
             # Understand the user input in the context of the dialogue
-            if self.lang.new_input is not None and self.lang.new_input["raw"] != "Correct.":
-                self.lang.dialogue.record = self.lang.dialogue.record[:ui_last]
+            if self.lang.new_input is not None and self.lang.new_input[0]["raw"] != "Correct.":
+                self.lang.dialogue.record = self.lang.dialogue.record[:ti_last]
                 self.lang.understand(
                     self.lang.new_input, self.vision.last_input, pointing=pointing
                 )
@@ -468,59 +438,6 @@ class ITLAgent:
                     self.vision.predict(
                         None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
                     )
-
-                # # Temporary injection of ground-truth object parts and their attributes
-                # if cheat_sheet is not None and len(cheat_sheet):
-                #     ent_map = [
-                #         f"o{len(self.vision.scene)+i}" for i in range(len(cheat_sheet))
-                #     ]
-                #     bboxes = {}
-                #     for i, (bbox, _, _) in enumerate(cheat_sheet):
-                #         bboxes[ent_map[i]] = {
-                #             "bbox": bbox,
-                #             "bbox_mode": "xyxy"
-                #         }
-                #         self.lang.dialogue.referents["env"][ent_map[i]] = {
-                #             "bbox": bbox,
-                #             "area": (bbox[2]-bbox[0]) * (bbox[3]-bbox[1])
-                #         }
-                #         self.lang.dialogue.referent_names[ent_map[i]] = ent_map[i]
-
-                #     # Incrementally predict on the designated bbox
-                #     if len(bboxes) > 0:
-                #         self.vision.predict(
-                #             None, self.lt_mem.exemplars, bboxes=bboxes, visualize=False
-                #         )
-
-                #         # Ensure scores are high enough for appropriate classes, attributes
-                #         # and relations that should be positive, and low enough for ones 
-                #         # that should be negative
-                #         HIGH_SCORE = 0.8
-                #         for i, (_, gt_c, gt_as) in enumerate(cheat_sheet):
-                #             ent_preds = self.vision.scene[ent_map[i]]
-                #             whole_preds = self.vision.scene["o0"]
-
-                #             # Object part class scores
-                #             gt_c = self.lt_mem.lexicon.s2d[(gt_c, "n")][0][0]
-                #             for ci, score in enumerate(ent_preds["pred_classes"]):
-                #                 if ci == gt_c and score < HIGH_SCORE:
-                #                     ent_preds["pred_classes"][ci] = HIGH_SCORE
-                #                 if ci != gt_c and score > 1-HIGH_SCORE:
-                #                     ent_preds["pred_classes"][ci] = 1-HIGH_SCORE
-
-                #             # Object part attribute scores
-                #             gt_as = [self.lt_mem.lexicon.s2d[(a, "a")][0][0] for a in gt_as]
-                #             for ai, score in enumerate(ent_preds["pred_attributes"]):
-                #                 if ai in gt_as and score < HIGH_SCORE:
-                #                     ent_preds["pred_attributes"][ai] = HIGH_SCORE
-                #                 if ai not in gt_as and score > 1-HIGH_SCORE:
-                #                     ent_preds["pred_attributes"][ai] = 1-HIGH_SCORE
-
-                #             # Object part relation score w.r.t. o0
-                #             if whole_preds["pred_relations"][ent_map[i]][0] < HIGH_SCORE:
-                #                 whole_preds["pred_relations"][ent_map[i]][0] = HIGH_SCORE
-                #             if ent_preds["pred_relations"]["o0"][0] > 1-HIGH_SCORE:
-                #                 ent_preds["pred_relations"]["o0"][0] = 1-HIGH_SCORE
 
             ###################################################################
             ##       Sensemaking via synthesis of perception+knowledge       ##
@@ -551,79 +468,216 @@ class ITLAgent:
             xb_updated = False
             kb_updated = False
 
+            # Generic statements to be added to KB
+            generics = []
+
+            # Info needed (along with generics) for computing scalar implicatures
+            pairRules = defaultdict(list)
+
             # Process translated dialogue record to do the following:
             #   - Integrate newly provided generic rules into KB
             #   - Identify recognition mismatch btw. user provided vs. agent
             #   - Identify visual concept confusion
             translated = self.symbolic.translate_dialogue_content(dialogue_state)
-            for ui, (speaker, (rules, _)) in enumerate(translated):
+            for speaker, turn_clauses in translated:
                 if speaker != "U": continue
-                if rules is None: continue
 
-                kb_rules_to_add = []
-                for r in rules:
-                    # Symbolic knowledge base expansion; for generic rules without
-                    # constant terms
-                    if r.is_lifted():
-                        # Push to queue of symbolic rules to add into KB
-                        kb_rules_to_add.append(r)
+                for (rule, _), raw in turn_clauses:
+                    if rule is None: continue
+
+                    head, body = rule
+                    rule_is_grounded = (head is None or is_grounded(head)) and \
+                        (body is None or is_grounded(body))
+                    rule_is_lifted = (head is None or is_lifted(head)) and \
+                        (body is None or is_lifted(body))
 
                     # Grounded event statement; test against vision-only sensemaking
                     # result to identify any mismatch btw. agent's & user's perception
                     # of world state
-                    if r.is_grounded() and self.symbolic.concl_vis is not None:
-                        if r not in self.doubt_no_more:
-                            # Make a yes/no query to obtain the likelihood of content
-                            bjt_v, _ = self.symbolic.concl_vis
-                            q_response = self.symbolic.query(bjt_v, None, r)
-                            ev_prob = q_response[()]
+                    if rule_is_grounded and self.symbolic.concl_vis is not None:
+                        # Make a yes/no query to obtain the likelihood of content
+                        bjt_v, _ = self.symbolic.concl_vis
+                        q_response = self.symbolic.query(bjt_v, None, rule)
+                        ev_prob = q_response[()]
 
-                            surprisal = -math.log(ev_prob + EPS)
-                            if surprisal > -math.log(SR_THRES):
-                                m = (r, surprisal)
-                                self.symbolic.mismatches.add(m)
-                        
+                        surprisal = -math.log(ev_prob + EPS)
+                        if surprisal > -math.log(SR_THRES):
+                            m = (rule, surprisal)
+                            if m not in self.symbolic.mismatches:
+                                self.symbolic.mismatches.append(m)
+
                     # Grounded fact; test against vision module output to identify 
                     # any 'concept overlap' -- i.e. whenever the agent confuses two
                     # concepts difficult to distinguish visually and mistakes one
                     # for another. Applicable only to experiment configs with maxHelp
                     # teachers.
-                    if (r.is_grounded() and r.is_fact() and
+                    if (rule_is_grounded and body is None and
                         self.cfg.exp1.strat_feedback == "maxHelp"):
-                        # (Temporary?) Only consider 1-place predicates, so retrieve
-                        # the single and first entity from the arg list
-                        conc_type, conc_ind = r.head[0].name.split("_")
-                        conc_ind = int(conc_ind)
-                        ent = r.head[0].args[0][0]
 
-                        # (Temporary) Only consider non-part concepts as potential
-                        # cases of confusion. This may be enforced in a more elegant
-                        # way in the future..
-                        cls_probs = self.vision.scene[ent]["pred_classes"][self.cls_offset:]
+                        for lit in head:
+                            # Disregard negated conjunctions
+                            if not isinstance(lit, Literal): continue
 
-                        if ((conc_ind, conc_type) not in novel_concepts and
-                            len(cls_probs) >= 2):
-                            # Highest-score concept prediction for the entity of interest,
-                            # and prediction score for true label
-                            best_ind = np.argmax(cls_probs)
-                            true_conc_score = cls_probs[conc_ind-self.cls_offset]
+                            # (Temporary?) Only consider 1-place predicates, so retrieve
+                            # the single and first entity from the arg list
+                            conc_type, conc_ind = lit.name.split("_")
+                            conc_ind = int(conc_ind)
+                            ent = lit.args[0][0]
 
-                            confusion_pair = frozenset(
-                                [best_ind+self.cls_offset, conc_ind]
-                            )       # Potential confusion case, as unordered label pair
+                            # (Temporary) Only consider non-part concepts as potential
+                            # cases of confusion. This may be enforced in a more elegant
+                            # way in the future..
+                            cls_probs = self.vision.scene[ent]["pred_classes"][self.cls_offset:]
 
-                            if (best_ind+self.cls_offset != conc_ind and
-                                true_conc_score >= SC_THRES and
-                                ("cls", confusion_pair) not in self.confused_no_more):
-                                # Agent's best guess disagrees with the user-provided
-                                # information, and score gap is small
-                                self.vision.confusions.add(("cls", confusion_pair))
+                            if ((conc_ind, conc_type) not in novel_concepts and
+                                len(cls_probs) >= 2):
+                                # Highest-score concept prediction for the entity of interest,
+                                # and prediction score for true label
+                                best_ind = np.argmax(cls_probs)
+                                true_conc_score = cls_probs[conc_ind-self.cls_offset]
 
-                # Integrate the rule into KB by adding (for now we won't worry about
-                # intra-KB consistency, belief revision, etc.)
-                if len(kb_rules_to_add) > 0:
-                    provenance = dialogue_state["record"][ui][2]
-                    kb_updated |= self.lt_mem.kb.add(kb_rules_to_add, U_IN_PR, provenance)
+                                confusion_pair = frozenset(
+                                    [best_ind+self.cls_offset, conc_ind]
+                                )       # Potential confusion case, as unordered label pair
+
+                                if (best_ind+self.cls_offset != conc_ind and
+                                    true_conc_score >= SC_THRES and
+                                    ("cls", confusion_pair) not in self.confused_no_more):
+                                    # Agent's best guess disagrees with the user-provided
+                                    # information, and score gap is small
+                                    self.vision.confusions.add(("cls", confusion_pair))
+
+                    # Symbolic knowledge base expansion; for generic rules without
+                    # constant terms. Integrate the rule into KB by adding (for now
+                    # we won't worry about intra-KB consistency, belief revision, etc.)
+                    if rule_is_lifted:
+                        generics.append((rule, U_IN_PR, raw))
+
+                        if self.strat_generic != "semOnly":
+                            # Current rule head conjunction & body conjunction as list
+                            occurring_preds = {lit.name for lit in head+body}
+
+                            # If agent's strategy of understanding generic statement
+                            # is to exploit dialogue context (specifically, in the
+                            # presence of record of a concept difference question)
+                            agent_Qs = [
+                                ques
+                                for spk, turn_clauses in translated
+                                for (_, ques), _ in turn_clauses
+                                if spk == "A" and ques is not None
+                            ]
+                            diff_Qs = [
+                                q_head[0] for q_vars, (q_head, q_body) in agent_Qs
+                                if any(
+                                    l.name=="*_diff" and l.args[2][0]==q_vars[0][0]
+                                    for l in q_head
+                                )
+                            ]
+
+                            if len(diff_Qs) > 0:
+                                # Fetch two concepts being compared in the latest
+                                # concept diff question
+                                c1 = diff_Qs[-1].args[0][0]
+                                c2 = diff_Qs[-1].args[1][0]
+                                # Note: more principled way to manage relevant (I)QAP pair
+                                # utterances would be to adopt a legitimate, established
+                                # formalism for representing discourse structure (e.g. SDRT)
+
+                                # (Ordered) Concept pair with which implicatures will be
+                                # computed
+                                if c1 in occurring_preds and c2 not in occurring_preds:
+                                    rel_conc_pair = (c1, c2)
+                                elif c2 in occurring_preds and c1 not in occurring_preds:
+                                    rel_conc_pair = (c2, c1)
+                                else:
+                                    rel_conc_pair = None
+                            else:
+                                rel_conc_pair = None
+
+                            if rel_conc_pair is not None:
+                                # Compute appropriate implicatures for the concept pairs
+                                # found
+                                c1, c2 = rel_conc_pair
+
+                                # Negative implicature; replace occurrence of c1 with c2
+                                # then negate head conjunction (i.e. move head conj to body)
+                                head_repl = tuple(
+                                    l.substitute(preds={ c1: c2 }) for l in head
+                                )
+                                body_repl = tuple(
+                                    l.substitute(preds={ c1: c2 }) for l in body
+                                )
+                                negImpl = ((list(head_repl),), body_repl)
+                                generics.append((negImpl, A_IM_PR, f"{raw} (Neg. Impl.)"))
+
+                                # Collect explicit generics provided for the concept pair
+                                # and negative implicature computed from the context, with
+                                # which scalar implicatures will be computed
+                                pairRules[frozenset(rel_conc_pair)] += [
+                                    rule, negImpl
+                                ]
+
+            # Update knowledge base with obtained generic statements
+            for rule, w_pr, provenance in generics:
+                kb_updated |= self.lt_mem.kb.add(
+                    rule, w_pr, provenance
+                )
+            
+            # Recursive helper method for substituting predicates while preserving
+            # structure
+            _substitute = lambda cnj, ps: cnj.substitute(preds=ps) \
+                if isinstance(cnj, Literal) else [_substitute(nc, ps) for nc in cnj]
+
+            # Scalar implicature; infer implicit concept similarities by copying
+            # properties for c1/c2 and replacing the predicates with c2/c1, unless
+            # the properties are denied by rules of "higher precedence level"
+            if self.strat_generic == "semNegScal":
+                # Helper method factored out for symmetric applications
+                def computeScalarImplicature(c1, c2, rules):
+                    # Return boolean flag indicating whether KB was updated
+                    kb_updated = False
+
+                    # Existing properties of c1
+                    for i in self.kb_snap[c1]:
+                        # Fetch KB entry
+                        (head, body), _ = self.lt_mem.kb.entries[i]
+
+                        # Replace occurrences of c1 with c2
+                        head = tuple(_substitute(h, { c1: c2 }) for h in head)
+                        body = tuple(_substitute(b, { c1: c2 }) for b in body)
+
+                        # Negation of the replaced copy
+                        if all(isinstance(h, Literal) for h in head):
+                            # Positive conjunction head
+                            head_neg = (list(head),)
+                        elif all(isinstance(h, list) for h in head) and len(head)==1:
+                            # Negated conjunction head
+                            head_neg = tuple(head[0])
+                        else:
+                            # Cannot handle cases with rule head that is mixture
+                            # of positive literals and negated conjunctions
+                            raise NotImplementedError
+                        
+                        # Test the negated copy against explicitly stated generics
+                        # and their negative implicature counterparts; they take
+                        # precedence over defeasible implicatures
+                        defeated = any(
+                            Literal.isomorphic_conj_pair((head_neg, body), r)
+                            for r in rules
+                        )
+
+                        if not defeated:
+                            # Add the inferred generic that successfully survived
+                            # the test against the higher-precedence rules
+                            kb_updated |= self.lt_mem.kb.add(
+                                (head, body), A_IM_PR, f"{c1} ~= {c2} (Scal. Impl.)"
+                            )
+                    
+                    return kb_updated
+
+                for (c1, c2), rules in pairRules.items():
+                    kb_updated |= computeScalarImplicature(c1, c2, rules)
+                    kb_updated |= computeScalarImplicature(c2, c1, rules)
 
             # Handle neologisms
             neologisms = {
@@ -631,9 +685,9 @@ class ITLAgent:
                 if den is None
             }
             for tok, sym in neologisms.items():
-                neo_in_rule_head = tok[1].startswith("r") and tok[2].startswith("h")
+                neo_in_rule_head = tok[2] == "rh"
                 neos_in_same_rule_body = [
-                    n for n in neologisms if tok[:2]==n[:2] and n[2].startswith("b")
+                    n for n in neologisms if tok[:3]==n[:3] and n[3].startswith("b")
                 ]
                 if neo_in_rule_head and len(neos_in_same_rule_body)==0:
                     # Occurrence in rule head implies either definition or exemplar is
@@ -656,11 +710,11 @@ class ITLAgent:
                     # Acquire novel concept by updating lexicon
                     self.lt_mem.lexicon.add((name, pos), novel_concept)
 
-                    ui = int(tok[0].strip("u"))
-                    ri = int(tok[1].strip("r"))
-                    rule_head, rule_body, _ = dialogue_state["record"][ui][1][0][ri]
+                    ti = int(tok[0].strip("t"))
+                    ci = int(tok[1].strip("c"))
+                    rule_head, rule_body = dialogue_state["record"][ti][1][ci][0][0]
 
-                    if rule_body is None:
+                    if len(rule_body) == 0:
                         # Labelled exemplar provided; add new concept exemplars to
                         # memory, as feature vectors at the penultimate layer right
                         # before category prediction heads
@@ -695,13 +749,6 @@ class ITLAgent:
 
                         # Set flag that XB is updated
                         xb_updated = True
-
-                        # This now shouldn't strike the agent as surprise, at least in this
-                        # loop (Ideally this doesn't need to be enforced this way, if the
-                        # few-shot learning capability is perfect)
-                        self.doubt_no_more.add(Rule(
-                            head=Literal(f"{conc_type}_{conc_ind}", wrap_args(*args))
-                        ))
                 else:
                     # Otherwise not immediately resolvable
                     self.lang.unresolved_neologisms.add((sym, tok))
@@ -709,8 +756,6 @@ class ITLAgent:
             # Terminate the loop when 'equilibrium' is reached
             if not (xb_updated or kb_updated):
                 break
-
-        # self.vision.reshow_pred()
 
     def _act(self):
         """
@@ -732,8 +777,8 @@ class ITLAgent:
         # now; we will see later if we'll ever need to generalize and implement the said
         # procedure.)
 
-        for ui in self.lang.dialogue.unanswered_Q:
-            self.practical.agenda.append(("address_unanswered_Q", ui))
+        for ti, ci in self.lang.dialogue.unanswered_Q:
+            self.practical.agenda.append(("address_unanswered_Q", (ti, ci)))
         for n in self.lang.unresolved_neologisms:
             self.practical.agenda.append(("address_neologism", n))
         for m in self.symbolic.mismatches:
@@ -742,10 +787,6 @@ class ITLAgent:
             self.practical.agenda.append(("address_confusion", c))
 
         return_val = []
-
-        # if self.lang.new_input is not None and len(self.practical.agenda) == 0:
-        #     # Everything seems okay, acknowledge user input
-        #     self.practical.agenda.append(("acknowledge", None))
 
         while True:
             resolved_items = []
@@ -775,7 +816,7 @@ class ITLAgent:
             if len(resolved_items) == 0:
                 # No resolvable agenda item any more
                 if (len(return_val) == 0 and self.lang.new_input is not None and
-                    self.lang.new_input["raw"] != "Correct."):
+                    self.lang.new_input[0]["raw"] != "Correct."):
                     # Nothing to add, acknowledge any user input
                     self.practical.agenda.append(("acknowledge", None))
                 else:
@@ -787,6 +828,7 @@ class ITLAgent:
                 for i in resolved_items:
                     del self.practical.agenda[i]
 
+        # Act; in our scope only available actions are dialogue utterance generation
         for act_type, act_data in return_val:
             if act_type == "generate":
                 logger.info(f"A> {act_data}")

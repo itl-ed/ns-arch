@@ -3,6 +3,8 @@ Miscellaneous utility methods that don't classify into other files in utils
 """
 import numpy as np
 
+from .. import Literal
+
 
 def wrap_args(*args):
     """
@@ -48,17 +50,28 @@ def sigmoid(l):
     else:
         return float(1 / (1 + np.exp(-l)))
 
-def cacheable(fn):
-    """ Class method decorator that caches output values by input params """
-    fn_name = fn.__name__
+def flatten_head_body(head, body):
+    """
+    Rearrange until any nested conjunctions are all properly flattened out,
+    so that rule can be translated into appropriate ASP clause
+    """
+    head = list(head) if head is not None else []
+    body = list(body) if body is not None else []
+    cnjs = head + body
+    while any(not isinstance(c, Literal) for c in cnjs):
+        # Migrate any negated conjunctions in head to body
+        cnjs_p = [h for h in head if isinstance(h, Literal)]
+        cnjs_n = [h for h in head if not isinstance(h, Literal)]
 
-    def wrapper(*args, **kwargs):
-        instance = args[0]
-        if args[1:] in instance.cache[fn_name]:
-            return instance.cache[fn_name][args[1:]]
-        else:
-            result = fn(*args, **kwargs)
-            instance.cache[fn_name][args[1:]] = result
-            return result
+        head = cnjs_p
+        body = body + sum(cnjs_n, [])
 
-    return wrapper
+        if any(not isinstance(c, Literal) for c in body):
+            # Introduce auxiliary literals that are derived when
+            # each conjunction in body is satisfied
+            # (Not needed, not implemented yet :p)
+            raise NotImplementedError
+
+        cnjs = head + body
+    
+    return head, body

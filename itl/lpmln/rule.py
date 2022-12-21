@@ -10,15 +10,15 @@ class Rule:
     """ ASP rule, as comprehensible by popular ASP solvers like clingo. """
     def __init__(self, head=None, body=None, lb=None, ub=None):
         # Accept singletons
-        if head is not None and not type(head) == list:
-            assert type(head) == Literal
+        if head is not None and not (isinstance(head, list) or isinstance(head, tuple)):
+            assert isinstance(head, Literal)
             head = [head]
-        if body is not None and not type(body) == list:
-            assert type(body) == Literal
+        if body is not None and not (isinstance(body, list) or isinstance(body, tuple)):
+            assert isinstance(body, Literal)
             body = [body]
 
-        self.head = [] if head is None else head
-        self.body = [] if body is None else body
+        self.head = [] if head is None else list(head)
+        self.body = [] if body is None else list(body)
 
         # Lower bounds and upper bounds, used in case the rule is treated as choice rule
         self.lb = lb
@@ -110,16 +110,12 @@ class Rule:
         return (len(self.head) == 1) and (len(self.body) == 0)
 
     def is_single_body_constraint(self):
-        """ Return True if rule consists of its head and empty body """
+        """ Return True if rule consists of single-lit body and empty head """
         return (len(self.head) == 0) and (len(self.body) == 1)
 
     def is_grounded(self):
         """ Returns True if the rule is variable-free """
         return all(not is_var for _, is_var in self.terms())
-    
-    def is_lifted(self):
-        """ Returns True if the rule has variable terms only """
-        return all(is_var for _, is_var in self.terms())
 
     def is_isomorphic_to(self, other):
         """
@@ -151,8 +147,8 @@ class Rule:
                 return False            # Found constant that cannot be matched
 
         # Try to find isomorphism
-        ism = Literal.isomorphism_btw(self.head, other.head, None)
-        ism = Literal.isomorphism_btw(self.body, other.body, ism)
+        ism = Literal.isomorphism_btw(self.head, other.head)
+        ism = Literal.isomorphism_btw(self.body, other.body, ism=ism)
 
         return ism is not None
 

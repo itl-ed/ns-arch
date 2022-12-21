@@ -22,7 +22,7 @@ import numpy as np
 
 from .query import query
 from ..lpmln import Literal, Rule, Program
-from ..lpmln.utils import wrap_args
+from ..lpmln.utils import wrap_args, flatten_head_body
 
 
 TAB = "\t"              # For use in format strings
@@ -43,7 +43,7 @@ class SymbolicReasonerModule:
         self.value_assignment = {}    # Store best assignments (tentative) obtained by reasoning
         self.word_senses = {}         # Store current estimate of symbol denotations
 
-        self.mismatches = set()
+        self.mismatches = []
 
     def refresh(self):
         self.concl_vis = None
@@ -53,7 +53,7 @@ class SymbolicReasonerModule:
         self.value_assignment = {}
         self.word_senses = {}
 
-        self.mismatches = set()
+        self.mismatches = []
 
     def sensemake_vis(self, vis_scene, exported_kb):
         """
@@ -178,35 +178,53 @@ class SymbolicReasonerModule:
             #             head=Literal("vis_prime", wrap_args(vc, int(score * 100)))
             #         ))
 
+        # Recursive helper methods for extracting predicates and args & flattening
+        # nested lists with arbitrary depths into a single list (along with pointer
+        # to source location)
+        extract_preds = lambda cnj: cnj[:2] if isinstance(cnj, tuple) \
+            else [extract_preds(nc) for nc in cnj]
+        extract_args = lambda cnj: cnj[2] if isinstance(cnj, tuple) \
+            else [extract_args(nc) for nc in cnj]
+        def flatten(ls):
+            for ind, x in enumerate(ls):
+                if isinstance(x, list):
+                    yield from ((inds+(ind,), x2) for inds, x2 in flatten(x))
+                else:
+                    yield (ind,), x
+
         # Understood dialogue record contents
         occurring_preds = set()
-        for ui, (speaker, (rules, question), _) in enumerate(dialogue_state["record"]):
+        for ti, (speaker, turn_clauses) in enumerate(dialogue_state["record"]):
             # Nothing particular to do with agent's own utterances
             if speaker == "A": continue
 
-            if rules is not None:
-                for ri, rule in enumerate(rules):
-                    head, body, _ = rule
+            for ci, ((rule, question), _) in enumerate(turn_clauses):
+                if rule is not None:
+                    head, body = rule
 
-                    head_preds = [] if head is None else [h[:2] for h in head]
-                    body_preds = [] if body is None else [b[:2] for b in body]
-                    occurring_preds |= set(head_preds+body_preds)
+                    head_preds = [extract_preds(h) for h in head]
+                    body_preds = [extract_preds(b) for b in body]
 
                     # Symbol token occurrence locations
                     for c, preds in [("h", head_preds), ("b", body_preds)]:
-                        for pi, p in enumerate(preds):
+                        for src, p in flatten(preds):
                             # Skip special reserved predicates
                             if p[1] == "*": continue
 
+                            occurring_preds.add(p)
+
+                            # Serialized source location
+                            src_loc = "_".join(str(i) for i in src)
+
                             sym = f"{p[1]}_{p[0].split('/')[0]}"
-                            tok_loc = f"u{ui}_r{ri}_{c}{pi}"
+                            tok_loc = f"t{ti}_c{ci}_r{c}_{src_loc}"
                             aprog.add_absolute_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
                             )
 
-                    head_args = set() if head is None else set(sum([h[2] for h in head], ()))
-                    body_args = set() if body is None else set(sum([b[2] for b in body], ()))
-                    occurring_args = head_args | body_args
+                    head_args = [extract_args(h) for h in head]
+                    body_args = [extract_args(b) for b in body]
+                    occurring_args = set(sum([a for _, a in flatten(head_args+body_args)], ()))
 
                     if all(a in dialogue_state["assignment_hard"] for a in occurring_args):
                         # Below not required if all occurring args are hard-assigned to some entity
@@ -219,69 +237,70 @@ class SymbolicReasonerModule:
                         # TODO: Update to comply with the recent changes
                         raise NotImplementedError
 
-                        # Rule instances by possible word sense selections
-                        wsd_cands = [lexicon.s2d[sym[:2]] for sym in head_preds+body_preds]
+                        # # Rule instances by possible word sense selections
+                        # wsd_cands = [lexicon.s2d[sym[:2]] for sym in head_preds+body_preds]
 
-                        for vcs in product(*wsd_cands):
-                            if head is not None:
-                                head_vcs = vcs[:len(head_preds)]
-                                rule_head = [
-                                    Literal(f"{vc[1]}_{vc[0]}", wrap_args(*h[2]), naf=h[3])
-                                    for h, vc in zip(head, head_vcs)
-                                ]
-                            else:
-                                rule_head = None
+                        # for vcs in product(*wsd_cands):
+                        #     if head is not None:
+                        #         head_vcs = vcs[:len(head_preds)]
+                        #         rule_head = [
+                        #             Literal(f"{vc[1]}_{vc[0]}", wrap_args(*h[2]), naf=h[3])
+                        #             for h, vc in zip(head, head_vcs)
+                        #         ]
+                        #     else:
+                        #         rule_head = None
 
-                            if body is not None:
-                                body_vcs = vcs[len(head_preds):]
-                                rule_body = [
-                                    Literal(f"{vc[1]}_{vc[0]}", wrap_args(*b[2]), naf=b[3])
-                                    for b, vc in zip(body, body_vcs)
-                                ]
-                            else:
-                                rule_body = None
+                        #     if body is not None:
+                        #         body_vcs = vcs[len(head_preds):]
+                        #         rule_body = [
+                        #             Literal(f"{vc[1]}_{vc[0]}", wrap_args(*b[2]), naf=b[3])
+                        #             for b, vc in zip(body, body_vcs)
+                        #         ]
+                        #     else:
+                        #         rule_body = None
 
-                            # Question to query models_v with
-                            q_rule = Rule(head=rule_head, body=rule_body)
-                            q_vars = tuple((a, False) for a in occurring_args)
-                            query_result = models_v.query(q_vars, q_rule)
+                        #     # Question to query models_v with
+                        #     q_rule = Rule(head=rule_head, body=rule_body)
+                        #     q_vars = tuple((a, False) for a in occurring_args)
+                        #     query_result = models_v.query(q_vars, q_rule)
 
-                            for ans, (_, score) in query_result.items():
-                                c_head = Literal("cons", wrap_args(f"r{ri}", int(score*100)))
-                                c_body = [
-                                    Literal("assign", wrap_args(x[0], e)) for x, e in zip(q_vars, ans)
-                                ]
-                                if head is not None:
-                                    c_body += [
-                                        Literal("denote", wrap_args(f"u{ui}_r{ri}_h{hi}", f"{d[1]}_{d[0]}"))
-                                        for hi, d in enumerate(head_vcs)
-                                    ]
-                                if body is not None:
-                                    c_body += [
-                                        Literal("denote", wrap_args(f"u{ui}_r{ri}_b{bi}", f"{d[1]}_{d[0]}"))
-                                        for bi, d in enumerate(body_vcs)
-                                    ]
+                        #     for ans, (_, score) in query_result.items():
+                        #         c_head = Literal("cons", wrap_args(f"r{ri}", int(score*100)))
+                        #         c_body = [
+                        #             Literal("assign", wrap_args(x[0], e)) for x, e in zip(q_vars, ans)
+                        #         ]
+                        #         if head is not None:
+                        #             c_body += [
+                        #                 Literal("denote", wrap_args(f"u{ui}_r{ri}_h{hi}", f"{d[1]}_{d[0]}"))
+                        #                 for hi, d in enumerate(head_vcs)
+                        #             ]
+                        #         if body is not None:
+                        #             c_body += [
+                        #                 Literal("denote", wrap_args(f"u{ui}_r{ri}_b{bi}", f"{d[1]}_{d[0]}"))
+                        #                 for bi, d in enumerate(body_vcs)
+                        #             ]
 
-                                aprog.add_absolute_rule(Rule(head=c_head, body=c_body))
-            
-            if question is not None:
-                _, q_rules = question
+                        #         aprog.add_absolute_rule(Rule(head=c_head, body=c_body))
+                
+                if question is not None:
+                    _, (head, body) = question
 
-                for qi, rule in enumerate(q_rules):
-                    head, body, _ = rule
-
-                    head_preds = [] if head is None else [h[:2] for h in head]
-                    body_preds = [] if body is None else [b[:2] for b in body]
-                    occurring_preds |= set(head_preds+body_preds)
+                    head_preds = [extract_preds(h) for h in head]
+                    body_preds = [extract_preds(b) for b in body]
 
                     # Symbol token occurrence locations
                     for c, preds in [("h", head_preds), ("b", body_preds)]:
-                        for pi, p in enumerate(preds):
+                        for src, p in flatten(preds):
                             # Skip special reserved predicates
                             if p[1] == "*": continue
 
+                            occurring_preds.add(p)
+
+                            # Serialized source location
+                            src_loc = "_".join(str(i) for i in src)
+
                             sym = f"{p[1]}_{p[0].split('/')[0]}"
-                            tok_loc = f"u{ui}_q{qi}_{c}{pi}"
+                            tok_loc = f"t{ti}_c{ci}_q{c}_{src_loc}"
                             aprog.add_absolute_rule(
                                 Rule(head=Literal("pred_token", wrap_args(tok_loc, sym)))
                             )
@@ -412,100 +431,89 @@ class SymbolicReasonerModule:
 
     def translate_dialogue_content(self, dialogue_state):
         """
-        Translate logical content of dialogue record (which should be already ASP-
-        compatible) into ASP (LP^MLN) rules/queries, based on current estimate of
-        value assignment and word sense selection. Dismiss (replace with None) any
-        utterances containing unresolved neologisms.
+        Translate logical content of dialogue record (which should be already
+        ASP- compatible) based on current estimate of value assignment and word
+        sense selection. Dismiss (replace with None) any utterances containing
+        unresolved neologisms.
         """
-        result = []
         a_map = lambda args: [self.value_assignment.get(a, a) for a in args]
 
-        for ui, (speaker, (rules, question), _) in enumerate(dialogue_state["record"]):
-            # If the utterance contains an unresolved neologism, give up translation
-            # for the time being
-            contains_unresolved_neologism = any([
-                den is None for tok, (_, den) in self.word_senses.items()
-                if tok[0]==f"u{ui}"
-            ])
-            if contains_unresolved_neologism:
-                result.append((speaker, (None, None)))
-                continue
+        # Recursive helper methods for encoding pre-translation tuples representing
+        # literals into actual Literal objects
+        encode_lits = lambda cnj, ti, ci, rqhb, inds: Literal(
+                self.word_senses.get(
+                    (f"t{ti}",f"c{ci}",rqhb)+tuple(str(i) for i in inds),
+                    # If not found (likely reserved predicate), fall back to cnj's pred
+                    (None, "_".join(cnj[1::-1]))
+                )[1],
+                args=wrap_args(*a_map(cnj[2])), naf=cnj[3]
+            ) \
+            if isinstance(cnj, tuple) \
+            else [encode_lits(nc, ti, ci, rqhb, inds+(i,)) for i, nc in enumerate(cnj)]
 
-            # Translate rules
-            if rules is not None:
-                translated_rules = []
-                for ri, rule in enumerate(rules):
-                    head, body, _ = rule
+        record_translated = []
+        for ti, (speaker, turn_clauses) in enumerate(dialogue_state["record"]):
+            turn_translated = []
+            for ci, ((rule, question), raw) in enumerate(turn_clauses):
+                # If the utterance contains an unresolved neologism, give up translation
+                # for the time being
+                contains_unresolved_neologism = any([
+                    den is None for tok, (_, den) in self.word_senses.items()
+                    if tok[:2]==(f"t{ti}", f"c{ci}")
+                ])
+                if contains_unresolved_neologism:
+                    turn_translated.append(((None, None), raw))
+                    continue
 
-                    if head is not None:
-                        rule_head = [
-                            Literal(
-                                self.word_senses[(f"u{ui}",f"r{ri}",f"h{hi}")][1],
-                                args=wrap_args(*a_map(h[2])), naf=h[3]
-                            )
-                            for hi, h in enumerate(head)
-                        ]
+                # Translate rules
+                if rule is not None:
+                    head, body = rule
+
+                    if len(head) > 0:
+                        tr_head = tuple(
+                            encode_lits(h,ti,ci,"rh",(hi,)) for hi, h in enumerate(head)
+                        )
                     else:
-                        rule_head = None
+                        tr_head = None
 
-                    if body is not None:
-                        rule_body = [
-                            Literal(
-                                self.word_senses[(f"u{ui}",f"r{ri}",f"b{bi}")][1],
-                                args=wrap_args(*a_map(b[2])), naf=b[3]
-                            )
-                            for bi, b in enumerate(body)
-                        ]
+                    if len(body) > 0:
+                        tr_body = tuple(
+                            encode_lits(b,ti,ci,"rb",(bi,)) for bi, b in enumerate(body)
+                        )
                     else:
-                        rule_body = None
+                        tr_body = None
 
-                    translated_rules.append(Rule(head=rule_head, body=rule_body))
-            else:
-                translated_rules = None
-            
-            # Translate question
-            if question is not None:
-                q_vars, q_rules = question
+                    translated_rule = (tr_head, tr_body)
+                else:
+                    translated_rule = None
+                
+                # Translate question
+                if question is not None:
+                    q_vars, (head, body) = question
 
-                translated_qrs = []
-                for qi, (head, body, _) in enumerate(q_rules):
-                    if head is not None:
-                        rule_head = [
-                            # If head literal predicate is not found in self.word_senses,
-                            # it means the predicate is a special reserved one
-                            Literal(
-                                self.word_senses[(f"u{ui}",f"q{qi}",f"h{hi}")][1],
-                                args=wrap_args(*a_map(h[2])), naf=h[3]
-                            )
-                            if (f"u{ui}",f"q{qi}",f"h{hi}") in self.word_senses
-                            else Literal(
-                                "_".join(h[1::-1]), args=wrap_args(*a_map(h[2])), naf=h[3]
-                            )
-                            for hi, h in enumerate(head)
-                        ]
+                    if len(head) > 0:
+                        tr_head = tuple(
+                            encode_lits(h,ti,ci,"qh",(hi,)) for hi, h in enumerate(head)
+                        )
                     else:
-                        rule_head = None
+                        tr_head = None
 
-                    if body is not None:
-                        rule_body = [
-                            Literal(
-                                self.word_senses[(f"u{ui}",f"q{qi}",f"b{bi}")][1],
-                                args=wrap_args(*a_map(b[2])), naf=b[3]
-                            )
-                            for bi, b in enumerate(body)
-                        ]
+                    if len(body) > 0:
+                        tr_body = tuple(
+                            encode_lits(b,ti,ci,"qb",(bi,)) for bi, b in enumerate(body)
+                        )
                     else:
-                        rule_body = None
+                        tr_body = None
 
-                    translated_qrs.append(Rule(head=rule_head, body=rule_body))
+                    translated_question = q_vars, (tr_head, tr_body)
+                else:
+                    translated_question = None
 
-                translated_question = q_vars, frozenset(translated_qrs)
-            else:
-                translated_question = None
+                turn_translated.append(((translated_rule, translated_question), raw))
 
-            result.append((speaker, (translated_rules, translated_question)))
+            record_translated.append((speaker, turn_translated))
 
-        return result
+        return record_translated
 
     def sensemake_vis_lang(self, dialogue_state):
         """
@@ -522,21 +530,29 @@ class SymbolicReasonerModule:
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking
-        for speaker, (rules, _) in self.translate_dialogue_content(dialogue_state):
+        for speaker, turn_clauses in self.translate_dialogue_content(dialogue_state):
             if speaker != "U": continue
 
-            if rules is not None:
-                for r in rules:
+            for (rule, _), _ in turn_clauses:
+                if rule is not None:
+                    head, body = flatten_head_body(*rule)
+
                     # Skip any non-grounded content
-                    head_has_var = len(r.head) > 0 and any([
-                        any(is_var for _, is_var in h.args) for h in r.head
+                    head_has_var = len(head) > 0 and any([
+                        any(is_var for _, is_var in h.args) for h in head
                     ])
-                    body_has_var = len(r.body) > 0 and any([
-                        any(is_var for _, is_var in b.args) for b in r.body
+                    body_has_var = len(body) > 0 and any([
+                        any(is_var for _, is_var in b.args) for b in body
                     ])
                     if head_has_var or body_has_var: continue
 
-                    dprog.add_rule(r, U_IN_PR)
+                    if len(head) > 0:
+                        # One ASP rule per head
+                        for hl in head:
+                            dprog.add_rule(Rule(head=hl, body=body), U_IN_PR)
+                    else:
+                        # Headless; single constraint
+                        dprog.add_rule(Rule(body=body), U_IN_PR)
 
         # Finally, reasoning with all visual+language info
         if len(dprog) > 0:

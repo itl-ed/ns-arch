@@ -70,11 +70,11 @@ def main(cfg):
     results_learningCurve = defaultdict(dict)
 
     # Collect results
-    for res_dir in dirs_with_results:
+    for res_dir in tqdm.tqdm(dirs_with_results, total=len(dirs_with_results)):
         res_dir = os.path.join(outputs_root_dir, *res_dir, "exp1_res")
         dir_contents = list(os.listdir(res_dir))
 
-        for data in tqdm.tqdm(dir_contents, total=len(dir_contents)):
+        for data in dir_contents:
             name_parse = re.findall(r"(.+)_(.+)_(.+)_(.+)_(\d+)", data)[0]
             data_type, *exp_config, seed = name_parse
             diff, feedStratT, semStratL = exp_config
@@ -89,12 +89,14 @@ def main(cfg):
 
                     if (feedStratT, semStratL) in results_cumulRegs[diff]:
                         stats_agg = results_cumulRegs[diff][(feedStratT, semStratL)]
-                        stats_agg["curve"] += curve
-                        stats_agg["trials"] += 1
+                        for i, rg in enumerate(curve):
+                            if i in stats_agg:
+                                stats_agg[i].append(int(rg))
+                            else:
+                                stats_agg[i] = [int(rg)]
                     else:
                         results_cumulRegs[diff][(feedStratT, semStratL)] = {
-                            "curve": curve,
-                            "trials": 1
+                            i: [int(rg)] for i, rg in enumerate(curve)
                         }
 
             elif data_type.startswith("confMat"):
@@ -108,13 +110,13 @@ def main(cfg):
                     confMat = np.array([[float(d) for d in row] for row in reader])
 
                     if (feedStratT, semStratL) in results_confMat[num_exs][diff]:
-                        stats_agg = results_confMat[diff][(feedStratT, semStratL)]
-                        stats_agg["matrix"] += confMat
+                        stats_agg = results_confMat[num_exs][diff][(feedStratT, semStratL)]
+                        stats_agg["matrix"].append(confMat)
                         stats_agg["num_test_suites"] += 1
                         assert stats_agg["concepts"] == concepts
                     else:
                         results_confMat[num_exs][diff][(feedStratT, semStratL)] = {
-                            "matrix": confMat,
+                            "matrix": [confMat],
                             "num_test_suites": 1,
                             "concepts": concepts
                         }
@@ -125,39 +127,53 @@ def main(cfg):
     # Pre-defined ordering for listing legends
     config_ord = [
         "semOnly_minHelp", "semOnly_medHelp", "semOnly_maxHelp",
-        "semWithImpl_minHelp", "semWithImpl_medHelp", "semWithImpl_maxHelp"
+        "semNeg_minHelp", "semNeg_medHelp", "semNeg_maxHelp",
+        "semNegScal_minHelp", "semNegScal_medHelp", "semNegScal_maxHelp"
+        # Among these, semNeg/semNegScal_min/medHelp are vacuous config combinations
     ]
 
     # Aggregate and visualize: cumulative regret curve
     for diff, agg_stats in results_cumulRegs.items():
-        fig = plt.figure()
+        fig, ax = plt.subplots()
 
         for exp_config, data in agg_stats.items():
             feedStratT, semStratL = exp_config
+            stats = [
+                (i, np.mean(rgs), 1.96 * np.std(rgs)/np.sqrt(len(rgs)))
+                for i, rgs in data.items()
+            ]
 
-            plt.plot(
-                range(1, len(data["curve"])+1),
-                data["curve"] / data["trials"],
+            # Plot mean curve
+            curve = ax.plot(
+                [i+1 for i, _, _ in stats],
+                [mrg for _, mrg, _ in stats],
                 label=f"{semStratL}_{feedStratT}"
+            )
+            # Plot confidence intervals
+            ax.fill_between(
+                [i+1 for i, _, _ in stats],
+                [mrg-cl for _, mrg, cl in stats],
+                [mrg+cl for _, mrg, cl in stats],
+                color=curve[0].get_color(), alpha=0.2
             )
 
         # Plot curve
-        plt.xlabel("# training episodes")
-        plt.ylabel("cumulative regret")
-        plt.ylim(0, int(len(data["curve"]) * 0.8))
-        plt.grid()
+        ax.set_xlabel("# training episodes")
+        ax.set_ylabel("cumulative regret")
+        ax.set_ylim(0, max(mrg+cl for _, mrg, cl in stats) * 1.2)
+        ax.grid()
 
         # Ordering legends according to the prespecified ordering above
-        handles, labels = plt.gca().get_legend_handles_labels()
+        handles, labels = ax.get_legend_handles_labels()
         hls_sorted = sorted(
             [(h, l) for h, l in zip(handles, labels)],
             key=lambda x: config_ord.index(x[1])
         )
         handles = [hl[0] for hl in hls_sorted]
         labels = [hl[1] for hl in hls_sorted]
-        plt.legend(handles, labels)
+        ax.legend(handles, labels)
         
-        plt.title(f"Cumulative regret curve for {diff} difficulty")
+        ax.set_title(f"Cumulative regret curve ({diff}; N={len(data[0])} per config)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"cumulRegs_{diff}.png"))
 
     # Aggregate and visualize: learning curve & confusion matrices
@@ -169,62 +185,75 @@ def main(cfg):
                 config_label = f"{semStratL}_{feedStratT}"
 
                 # Compute aggregate metric: mean F1 score
-                P_per_concept = [
-                    data["matrix"][i,i] / data["matrix"][:,i].sum()
-                    for i in range(len(data["matrix"]))
+                per_concept_Ps = [
+                    [confMat[i,i] / confMat[:,i].sum() for i in range(len(confMat))]
+                    for confMat in data["matrix"]
                 ]
-                R_per_concept = [
-                    data["matrix"][i,i] / data["num_test_suites"]
-                    for i in range(len(data["matrix"]))
+                per_concept_Rs = [
+                    [confMat[i,i] for i in range(len(confMat))]
+                    for confMat in data["matrix"]
                 ]
-                f1_per_concept = [
-                    2*p*r/(p+r) if p+r>0 else 0.0       # If both P & R are zero, F1 zero
-                    for p, r in zip(P_per_concept, R_per_concept)
+                per_concept_F1s = [
+                    # If both P & R are zero, F1 zero
+                    [2*p*r/(p+r) if p+r>0 else 0.0 for p, r in zip(ps, rs)]
+                    for ps, rs in zip(per_concept_Ps, per_concept_Rs)
                 ]
-                mean_f1 = sum(f1_per_concept) / len(f1_per_concept)
+                mean_F1s = [np.mean(F1s) for F1s in per_concept_F1s]
 
                 # Collect data for plotting learning curve (by # examples used vs. mF1)
                 if exp_config in results_learningCurve[diff]:
-                    results_learningCurve[diff][exp_config].append((num_exs, mean_f1))
+                    results_learningCurve[diff][exp_config].append((num_exs, mean_F1s))
                 else:
-                    results_learningCurve[diff][exp_config] = [(num_exs, mean_f1)]
+                    results_learningCurve[diff][exp_config] = [(num_exs, mean_F1s)]
 
                 if num_exs == last_num_exs:
                     # Draw confusion matrix
                     fig = plt.figure()
                     draw_matrix(
-                        data["matrix"] / data["num_test_suites"],
+                        sum(data["matrix"]) / data["num_test_suites"],
                         data["concepts"], data["concepts"], fig.gca()    # Binary choice mode
                         # data["concepts"][:-1], data["concepts"], fig.gca()    # Multiple choice mode
                     )
-                    plt.suptitle(f"Confusion matrix for {diff} difficulty", fontsize=16)
+                    plt.suptitle(f"Confusion matrix for ({diff}; N={len(data['matrix'])} per config)", fontsize=16)
                     plt.title(f"{config_label} agent", pad=18)
                     plt.tight_layout()
                     plt.savefig(os.path.join(cfg.paths.outputs_dir, f"confMat_{diff}_{config_label}.png"))
 
     # Aggregate and visualize: learning curve
     for diff, agg_stats in results_learningCurve.items():
-        fig = plt.figure()
+        fig, ax = plt.subplots()
 
         for exp_config, data in agg_stats.items():
             feedStratT, semStratL = exp_config
             data = sorted(data)
+            stats = [
+                (i, np.mean(mF1s), 1.96 * np.std(mF1s)/np.sqrt(len(mF1s)))
+                for i, mF1s in data
+            ]
 
-            plt.plot(
-                [num_exs for num_exs, _ in data],
-                [mF1 for _, mF1 in data],
+            # Plot mean curve
+            curve = ax.plot(
+                [i+1 for i, _, _ in stats],
+                [mmF1 for _, mmF1, _ in stats],
                 label=f"{semStratL}_{feedStratT}"
+            )
+            # Plot confidence intervals
+            ax.fill_between(
+                [i+1 for i, _, _ in stats],
+                [mmF1-cl for _, mmF1, cl in stats],
+                [mmF1+cl for _, mmF1, cl in stats],
+                color=curve[0].get_color(), alpha=0.2
             )
 
         # Plot curve
-        plt.xlabel("# training examples")
-        plt.ylabel("mF1 score")
-        plt.xlim(0, last_num_exs)
-        plt.ylim(0, 1)
-        plt.grid()
+        ax.set_xlabel("# training examples")
+        ax.set_ylabel("mF1 score")
+        ax.set_xlim(0, last_num_exs+10)
+        ax.set_ylim(0, 1)
+        ax.grid()
 
         # Ordering legends according to the prespecified ordering above
-        handles, labels = plt.gca().get_legend_handles_labels()
+        handles, labels = ax.get_legend_handles_labels()
         hls_sorted = sorted(
             [(h, l) for h, l in zip(handles, labels)],
             key=lambda x: config_ord.index(x[1])
@@ -233,20 +262,20 @@ def main(cfg):
         labels = [hl[1] for hl in hls_sorted]
         plt.legend(handles, labels)
         
-        plt.title(f"Learning curve for {diff} difficulty")
+        plt.title(f"Learning curve ({diff}; N={len(data[0][1])} per config)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"learningCurve_{diff}.png"))
 
     # Report final mF1 scores on terminal
     for diff, agg_stats in results_learningCurve.items():
         print("")
-        logger.info(f"Mean F1 scores ({diff}):")
+        logger.info(f"Final mean F1 scores ({diff}):")
 
         final_mF1s = {
             f"{semStratL}_{feedStratT}": sorted(data, reverse=True)[0][1]
             for (feedStratT, semStratL), data in agg_stats.items()
         }
         for cfg in sorted(final_mF1s, key=lambda x: config_ord.index(x)):
-            logger.info("\t"+f"{cfg}: {final_mF1s[cfg]}")
+            logger.info("\t"+f"{cfg}: {float(np.mean(final_mF1s[cfg]))}")
 
 
 if __name__ == "__main__":

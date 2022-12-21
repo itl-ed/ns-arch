@@ -2,6 +2,7 @@
 from itertools import product
 
 from ..lpmln import Rule, Polynomial
+from ..lpmln.utils import flatten_head_body
 from ..lpmln.program.compile import bjt_query
 
 
@@ -16,15 +17,20 @@ def query(bjt, q_vars, event):
     If q_vars is None we have a yes/no (polar) question, where having a non-empty
     tuple as q_vars indicates we have a wh-question.
     """
-    if type(event) != frozenset:
-        try:
-            # Treat as set
-            event = frozenset(event)
-        except TypeError:
-            # Accept single-rule event and wrap in a set
-            assert isinstance(event, Rule)
-            event = frozenset([event])
+    if isinstance(event, tuple):
+        # Accept single-rule (tuple) event and wrap in a set
+        event = [event]
+    else:
+        # Treat as list
+        event = list(event)
 
+    event = [
+        flatten_head_body(ev_head, ev_body) for ev_head, ev_body in event
+    ]
+    event = set(sum([
+        [Rule(head=l) for l in ev_head] if len(ev_head) > 0 else [Rule(body=ev_body)]
+        for ev_head, ev_body in event
+    ], []))
     assert all(
         ev_rule.is_fact() or ev_rule.is_single_body_constraint()
         for ev_rule in event

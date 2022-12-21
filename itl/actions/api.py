@@ -16,9 +16,10 @@ import torch
 from torchvision.ops import box_convert
 
 from ..lpmln import Literal, Rule
+from ..lpmln.utils import flatten_head_body
 
 
-SC_THRES = 0.5          # Binary decision score threshold
+SC_THRES = 0.3          # Binary decision score threshold
 
 class AgentCompositeActions:
     
@@ -35,19 +36,21 @@ class AgentCompositeActions:
         assume the user (teacher) is an infallible oracle, and the agent doesn't
         question info provided from user.
         """
-        # This mismatch is about to be handled
+        # This mismatch is about to be handled, remove
         self.agent.symbolic.mismatches.remove(mismatch)
 
         rule, _ = mismatch
+        head, body = flatten_head_body(*rule)
 
-        if rule.is_grounded() and len(rule.literals())==1:
-            if rule.is_fact():
+        is_grounded = all(not is_var for l in head+body for _, is_var in l.args)
+        if is_grounded and len(head+body)==1:
+            if len(head) == 1 and len(body) == 0:
                 # Positive grounded fact
-                atom = rule.head[0]
+                atom = head[0]
                 exm_pointer = ({0}, set())
             else:
                 # Negative grounded fact
-                atom = rule.body[0]
+                atom = body[0]
                 exm_pointer = (set(), {0})
 
             conc_type, conc_ind = atom.name.split("_")
@@ -83,11 +86,6 @@ class AgentCompositeActions:
                 pointers_exm={ conc_type: pointers_exm }
             )
 
-            # This now shouldn't strike the agent as surprise, at least in this
-            # loop (Ideally this doesn't need to be enforced this way, if the
-            # few-shot learning capability is perfect)
-            self.agent.doubt_no_more.add(rule)
-
     def handle_confusion(self, confusion):
         """
         Handle 'concept overlap' between two similar visual concepts. Two (fine-grained)
@@ -97,8 +95,9 @@ class AgentCompositeActions:
         # This confusion is about to be handled
         self.agent.vision.confusions.remove(confusion)
 
-        # Utterance index for the question to be asked
-        ui_new = len(self.agent.lang.dialogue.record)
+        # New dialogue turn & clause index for the question to be asked
+        ti_new = len(self.agent.lang.dialogue.record)
+        ci_new = 0
 
         conc_type, conc_inds = confusion
         conc_inds = list(conc_inds)
@@ -107,13 +106,11 @@ class AgentCompositeActions:
         assert conc_type == "cls"
 
         # Prepare logical form of the concept-diff question to ask
-        q_vars = ((f"X2u{ui_new}", False),)
-        q_rules = [
-            (
-                [("diff", "*", (f"x0u{ui_new}", f"x1u{ui_new}", f"X2u{ui_new}"), False)],
-                None, None
-            )
-        ]
+        q_vars = ((f"X2t{ti_new}c{ci_new}", False),)
+        q_rules = (
+            (("diff", "*", tuple(f"{ri}t{ti_new}c{ci_new}" for ri in ["x0", "x1", "X2"]), False),),
+            ()
+        )
         ques_logical_form = (q_vars, q_rules)
 
         # Prepare surface form of the concept-diff question to ask
@@ -133,8 +130,8 @@ class AgentCompositeActions:
 
         # Update cognitive state w.r.t. value assignment and word sense
         self.agent.symbolic.value_assignment.update({
-            f"x0u{ui_new}": f"{conc_type}_{conc_inds[0]}",
-            f"x1u{ui_new}": f"{conc_type}_{conc_inds[1]}"
+            f"x0t{ti_new}c{ci_new}": f"{conc_type}_{conc_inds[0]}",
+            f"x1t{ti_new}c{ci_new}": f"{conc_type}_{conc_inds[1]}"
         })
 
         ques_translated = f"How are {conc_names[0]} and {conc_names[1]} different?"
@@ -147,7 +144,7 @@ class AgentCompositeActions:
         # for the rest of the interaction episode sequence
         self.agent.confused_no_more.add(confusion)
 
-    def attempt_answer_Q(self, ui):
+    def attempt_answer_Q(self, utt_pointer):
         """
         Attempt to answer an unanswered question from user.
         
@@ -161,17 +158,18 @@ class AgentCompositeActions:
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
         translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
-        _, (_, question) = translated[ui]
+        ti, ci = utt_pointer
+        (_, question), _ = translated[ti][1][ci]
 
         if question is None:
             # Question cannot be answered for some reason
             return
         else:
             # Schedule to answer the question
-            self.agent.practical.agenda.append(("answer_Q", ui))
+            self.agent.practical.agenda.append(("answer_Q", utt_pointer))
             return
 
-    def prepare_answer_Q(self, ui):
+    def prepare_answer_Q(self, utt_pointer):
         """
         Prepare an answer to a question that has been deemed answerable, by first
         computing raw ingredients from which answer candidates can be composed,
@@ -179,31 +177,30 @@ class AgentCompositeActions:
         into natural language form to be uttered
         """
         # The question is about to be answered
-        self.agent.lang.dialogue.unanswered_Q.remove(ui)
+        self.agent.lang.dialogue.unanswered_Q.remove(utt_pointer)
 
         dialogue_state = self.agent.lang.dialogue.export_as_dict()
-        _, _, orig_utt = dialogue_state["record"][ui]
-
         translated = self.agent.symbolic.translate_dialogue_content(dialogue_state)
 
-        _, (_, question) = translated[ui]
+        ti, ci = utt_pointer
+        (_, question), orig_utt = translated[ti][1][ci]
         assert question is not None
 
-        q_vars, q_rules = question
+        q_vars, (head, _) = question
         bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
-        # Utterance index for the answer to be provided
-        ui_new = len(self.agent.lang.dialogue.record)
+        # # New dialogue turn & clause index for the answer to be provided
+        ti_new = len(self.agent.lang.dialogue.record)
+        ci_new = 0
 
         # Mapping from predicate variables to their associated entities
         pred_var_to_ent_ref = {
-            ql.args[0][0]: ql.args[1][0]
-            for qr in q_rules for ql in qr.head
-            if qr.is_fact() and ql.name == "*_?"
+            ql.args[0][0]: ql.args[1][0] for ql in head
+            if ql.name == "*_?"
         }
 
         qv_to_dis_ref = {
-            qv: f"x{ri}u{ui_new}" for ri, (qv, is_pred) in enumerate(q_vars)
+            qv: f"x{ri}t{ti_new}c{ci_new}" for ri, (qv, _) in enumerate(q_vars)
         }
         conc_type_to_pos = { "cls": "n" }
 
@@ -251,10 +248,8 @@ class AgentCompositeActions:
             ev_prob = None
 
         # From the selected answer, prepare ASP-friendly logical form of the response to
-        # generate, then translate into natural language,
+        # generate, then translate into natural language
         # (Parse the original question utterance, manipulate, then generate back)
-        answer_logical_form = []
-
         if len(answer_selected) == 0:
             # Yes/no question
 
@@ -302,12 +297,12 @@ class AgentCompositeActions:
                         # Update cognitive state w.r.t. value assignment and word sense
                         self.agent.symbolic.value_assignment[ri] = \
                             pred_var_to_ent_ref[qv]
-                        tok_ind = (f"u{ui_new}", f"r{len(answer_logical_form)}", "h0")
+                        tok_ind = (f"t{ti_new}", f"c{ci_new}", "r", "h0")
                         self.agent.symbolic.word_senses[tok_ind] = \
                             ((conc_type_to_pos[ans[1]], nl_val), f"{ans[1]}_{ans[0]}")
 
-                        answer_logical_form.append(
-                            ([(nl_val, conc_type_to_pos[ans[1]], (ri,), False)], None, None)
+                        answer_logical_form = (
+                            ((nl_val, conc_type_to_pos[ans[1]], (ri,), False),), ()
                         )
                 else:
                     # Entity by their constant name handle
@@ -344,42 +339,41 @@ class AgentCompositeActions:
         based on the agent's current knowledge-base entries and some sensemaking
         result provided as a compiled binary join tree (BJT)
         """
-        q_vars, q_rules = question
+        q_vars, (head, body) = question
 
         # Queries (in IR sense) to feed into KB for fetching search specs. Represent each
         # query as a pair of predicates of interest & arg entities of interest
         kb_queries = set()
 
-        for qr in q_rules:
-            # Inspecting literals in each q_rule for identifying search specs to feed into
-            # visual search calls
-            for q_lit in qr.literals():
-                if q_lit.name == "*_?":
-                    # Literal whose predicate is question-marked (contained for questions
-                    # like "What is this?", etc.); the first argument term, standing for
-                    # the predicate variable, must be contained in q_vars
-                    assert q_lit.args[0] in q_vars
+        # Inspecting literals in each q_rule for identifying search specs to feed into
+        # visual search calls
+        for q_lit in head:
+            if q_lit.name == "*_?":
+                # Literal whose predicate is question-marked (contained for questions
+                # like "What is this?", etc.); the first argument term, standing for
+                # the predicate variable, must be contained in q_vars
+                assert q_lit.args[0] in q_vars
 
-                    # Assume we are only interested in cls concepts with "What is this?"
-                    # type of questions
-                    kb_query_preds = frozenset([
-                        pred for pred in self.agent.lt_mem.kb.entries_by_pred 
-                        if pred.startswith("cls")
-                    ])
-                    # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
-                    # elegant way in the future...
-                    kb_query_preds = frozenset([
-                        pred for pred in kb_query_preds
-                        if pred.split("_")[0] == "cls" and int(pred.split("_")[1]) >= 11
-                    ])
+                # Assume we are only interested in cls concepts with "What is this?"
+                # type of questions
+                kb_query_preds = frozenset([
+                    pred for pred in self.agent.lt_mem.kb.entries_by_pred 
+                    if pred.startswith("cls")
+                ])
+                # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
+                # elegant way in the future...
+                kb_query_preds = frozenset([
+                    pred for pred in kb_query_preds
+                    if pred.split("_")[0] == "cls" and int(pred.split("_")[1]) >= 11
+                ])
 
-                    kb_query_args = tuple(q_lit.args[1:])
-                else:
-                    # Literal with fixed predicate, to which can narrow down the KB query
-                    kb_query_preds = frozenset([q_lit.name])
-                    kb_query_args = tuple(q_lit.args)
-                
-                kb_queries.add((kb_query_preds, kb_query_args))
+                kb_query_args = tuple(q_lit.args[1:])
+            else:
+                # Literal with fixed predicate, to which can narrow down the KB query
+                kb_query_preds = frozenset([q_lit.name])
+                kb_query_args = tuple(q_lit.args)
+            
+            kb_queries.add((kb_query_preds, kb_query_args))
 
         # Query the KB to collect search specs
         search_spec_cands = []
@@ -396,8 +390,10 @@ class AgentCompositeActions:
 
                 # Set of literals for each relevant KB entry
                 relevant_literals = [
-                    set.union(*[r.literals() for r in entry[0]])
-                    for entry in relevant_entries
+                    flatten_head_body(*entry[0]) for entry in relevant_entries
+                ]
+                relevant_literals = [
+                    set(head+body) for head, body in relevant_literals
                 ]
                 # Depending on which literal (with matching predicate name) in literal
                 # sets to use as 'anchor', there can be multiple choices of search specs
@@ -465,11 +461,11 @@ class AgentCompositeActions:
                     continue
 
                 lits = [l.substitute(terms=fn_lifting_map) for l in lits]
-                lits = frozenset([l for l in lits if any(la_is_var for _, la_is_var in l.args)])
+                lits = [l for l in lits if any(la_is_var for _, la_is_var in l.args)]
 
                 # Disregard if there's already an isomorphic literal set
                 has_isomorphic_spec = any(
-                    Literal.isomorphism_btw(lits, spc[1], None) is not None
+                    Literal.isomorphism_btw(lits, spc[1]) is not None
                     for spc in final_specs
                 )
                 if has_isomorphic_spec:
@@ -478,9 +474,7 @@ class AgentCompositeActions:
                 # Check if the agent is already (visually) aware of the potential search
                 # targets; if so, disregard this one
                 check_result = self.agent.symbolic.query(
-                    ref_bjt,
-                    tuple((v, False) for v in search_vars),
-                    frozenset([Rule(head=l) for l in lits])
+                    ref_bjt, tuple((v, False) for v in search_vars), (lits, None)
                 )
                 if len(check_result) > 0:
                     continue

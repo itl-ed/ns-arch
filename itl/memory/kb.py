@@ -2,7 +2,7 @@ import re
 from collections import defaultdict
 
 from ..lpmln import Literal, Rule, Program
-from ..lpmln.utils import logit, sigmoid, wrap_args
+from ..lpmln.utils import logit, sigmoid, wrap_args, flatten_head_body
 
 
 P_C = 0.01          # Catchall hypothesis probability
@@ -31,56 +31,62 @@ class KnowledgeBase:
     def __repr__(self):
         return f"KnowledgeBase(len={len(self)})"
 
-    def add(self, rules, weight, source):
+    def __contains__(self, item):
+        """ Test if an entry isomorphic to item exists """
+        head, body = item
+
+        for (ent_head, ent_body), _ in self.entries:
+            # Don't even bother with different set sizes
+            if len(head) != len(ent_head): continue
+            if len(body) != len(ent_body): continue
+
+            head_isomorphic = Literal.isomorphic_conj_pair(head, ent_head)
+            body_isomorphic = Literal.isomorphic_conj_pair(body, ent_body)
+
+            if head_isomorphic and body_isomorphic:
+                return True
+
+        return False
+
+    def add(self, rule, weight, source):
         """ Returns whether KB is expanded or not """
-        # More than one rules should represent conjunction of rule heads for the same
-        # rule body
-        assert all(r.body == rules[0].body for r in rules)
+        head, body = rule
 
-        # Neutralizing variable & function names by stripping off utterance indices, etc.
-        rename_var = set.union(*[
-            {t[0] for t in r.terms() if type(t[0])==str} for r in rules
-        ])
+        # Neutralizing variable & function names by stripping off turn/clause indices, etc.
         rename_var = {
-            (vn, True): (re.match("(.+)u.*$", vn).group(1), True) for vn in rename_var
+            a for a, _ in _flatten(_extract_terms(head+body)) if isinstance(a, str)
         }
-        rename_fn = set.union(*[
-            {t[0][0] for t in r.terms() if type(t[0])==tuple} for r in rules
-        ])
+        rename_var = {
+            (vn, True): (re.match("(.+?)(t\d+c\d+)?$", vn).group(1), True) for vn in rename_var
+        }
         rename_fn = {
-            fn: re.match("(.+)_.*$", fn).group(1)+str(i) for i, fn in enumerate(rename_fn)
+            a[0] for a, _ in _flatten(_extract_terms(head+body)) if isinstance(a, tuple)
         }
-        rules = { r.substitute(terms=rename_var, functions=rename_fn) for r in rules }
+        rename_fn = {
+            fn: re.match("(.+?)(_.+)?$", fn).group(1)+f"_{i}" for i, fn in enumerate(rename_fn)
+        }
+        head = tuple(_substitute(h, rename_var, rename_fn) for h in head)
+        body = tuple(_substitute(b, rename_var, rename_fn) for b in body)
 
-        occurring_preds = set.union(*[{lit.name for lit in r.literals()} for r in rules])
+        occurring_preds = set(_flatten(_extract_preds(head+body)))
 
         # Check if the input knowledge is already contained in the KB
         matched_entry_id = None
-        entries_with_overlap = set.union(*[
+        entries_with_overlap = set.intersection(*[
             self.entries_by_pred[pred] for pred in occurring_preds
         ])          # Initial filtering out entries without any overlapping
 
         for ent_id in entries_with_overlap:
-            ent_rules, _ = self.entries[ent_id]
+            (ent_head, ent_body), _ = self.entries[ent_id]
 
             # Don't even bother with different set sizes
-            if len(rules) != len(ent_rules): continue
+            if len(head) != len(ent_head): continue
+            if len(body) != len(ent_body): continue
 
-            no_match = False
-            rules_proxy = [r for r in rules]; ent_rules_proxy = [er for er in ent_rules]
-            while len(rules_proxy) > 0:
-                r = rules_proxy.pop()
-                for er in ent_rules_proxy:
-                    if r.is_isomorphic_to(er):
-                        ent_rules_proxy.remove(er)
-                        break
-                else:
-                    no_match = True
+            head_isomorphic = Literal.isomorphic_conj_pair(head, ent_head)
+            body_isomorphic = Literal.isomorphic_conj_pair(body, ent_body)
 
-                # Break if there's a rule that's not isomorphic to any
-                if no_match: break
-
-            if len(rules_proxy) == len(ent_rules_proxy) == 0:
+            if head_isomorphic and body_isomorphic:
                 # Match found; record ent_id and break
                 matched_entry_id = ent_id
                 break
@@ -89,7 +95,7 @@ class KnowledgeBase:
         if is_new_entry:
             # If not contained, add the rules as a new entry along with the weight-source
             # pair and index it by predicate
-            self.entries.append((rules, {(weight, source)}))
+            self.entries.append(((head, body), {(weight, source)}))
             for pred in occurring_preds:
                 self.entries_by_pred[pred].add(len(self.entries)-1)
         else:
@@ -146,22 +152,21 @@ class KnowledgeBase:
         intermediate_outputs = []
 
         # Process each entry
-        for i, (rules, _) in enumerate(self.entries):
-            all_fn_args = set(); all_var_names = set()
-            for r in rules:
-                # All function term args used in this rule
-                all_fn_args |= {
-                    a for a in set.union(*[set(l.args) for l in r.literals()])
-                    if type(a[0])==tuple
-                }
+        for i, (rule, _) in enumerate(self.entries):
+            head, body = flatten_head_body(*rule)
 
-                # Keep track of variable names used to avoid accidentally using
-                # overlapping names for 'lifting' variables (see below)
-                all_var_names |= {
-                    t_val
-                    for t_val, t_is_var in set.union(*[l.nonfn_terms() for l in r.literals()])
-                    if t_is_var
-                }
+            # Keep track of variable names used to avoid accidentally using
+            # overlapping names for 'lifting' variables (see below)
+            all_var_names = {
+                a for a, _ in _flatten(_extract_terms(head+body))
+                if isinstance(a, str)
+            }
+
+            # All function term args used in this rule
+            all_fn_args = {
+                a for a in _flatten(_extract_terms(head+body))
+                if isinstance(a[0], tuple)
+            }
 
             # Attach unique identifier suffixes to function names, so that functions
             # from different KB entries can be distinguished; names are shared across
@@ -176,19 +181,24 @@ class KnowledgeBase:
                 for i, fa in enumerate(all_fn_args)
             }
 
-            rules_fn_subs = [r.substitute(functions=fn_name_map) for r in rules]
-            rules_lifted = [r.substitute(terms=fn_lifting_map) for r in rules_fn_subs]
+            rule_fn_subs = {
+                "head": [h.substitute(functions=fn_name_map) for h in head],
+                "body": [b.substitute(functions=fn_name_map) for b in body]
+            }
+            rule_lifted = {
+                "head": [h.substitute(terms=fn_lifting_map) for h in rule_fn_subs["head"]],
+                "body": [b.substitute(terms=fn_lifting_map) for b in rule_fn_subs["body"]]
+            }
 
             # List of unique non-function variable arguments in 1) rule head and 2) rule body
-            # (effectively whole rule as well) in the order of occurrence
+            # (effectively whole rule) in the order of occurrence
             h_var_signature = []; b_var_signature = []
-            for r in rules_fn_subs:
-                for hl in r.head:
-                    for v_val, _ in hl.nonfn_terms():
-                        if v_val not in h_var_signature: h_var_signature.append(v_val)
-                for bl in r.body:
-                    for v_val, _ in bl.nonfn_terms():
-                        if v_val not in b_var_signature: b_var_signature.append(v_val)
+            for hl in rule_fn_subs["head"]:
+                for v_val, _ in hl.nonfn_terms():
+                    if v_val not in h_var_signature: h_var_signature.append(v_val)
+            for bl in rule_fn_subs["body"]:
+                for v_val, _ in bl.nonfn_terms():
+                    if v_val not in b_var_signature: b_var_signature.append(v_val)
 
             # Rule head/body satisfaction flags literals
             h_sat_lit = Literal(f"head_sat_{i}", wrap_args(*h_var_signature))
@@ -197,58 +207,49 @@ class KnowledgeBase:
             # Flag literal is derived when head/body is satisfied; in the meantime, lift
             # occurrences of function terms and add appropriate function value assignment
             # literals
-            h_sat_conds = list(set.union(*[set(r.head) for r in rules_lifted]))
-            h_sat_conds_pure = [         # Conditions having only 'pure' non-function args
-                lit for lit in h_sat_conds
+            h_sat_conds_pure = [        # Conditions having only 'pure' non-function args
+                lit for lit in rule_lifted["head"]
                 if all(a[0] in h_var_signature for a in lit.args)
             ]
-            h_sat_conds_nonpure = [      # Conditions having some function args
-                lit for lit in h_sat_conds
-                if any(a[0] not in h_var_signature for a in lit.args)
-            ]
             h_fn_terms = set.union(*[
-                set.union(*[{a for a in hl.args if type(a[0])==tuple} for hl in r.head])
-                for r in rules_fn_subs
-            ])
+                {a for a in l.args if type(a[0])==tuple} for l in rule_fn_subs["head"]
+            ]) if len(rule_fn_subs["head"]) > 0 else set()
             h_fn_assign = [
                 Literal(f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[fn_lifting_map[ft]])
                 for ft in h_fn_terms
             ]
 
-            b_sat_conds = list(set.union(*[set(r.body) for r in rules_lifted]))
             b_sat_conds_pure = [
-                lit for lit in b_sat_conds
+                lit for lit in rule_lifted["body"]
                 if all(a[0] in b_var_signature for a in lit.args)
             ]
-            b_sat_conds_nonpure = [
-                lit for lit in b_sat_conds
-                if any(a[0] not in b_var_signature for a in lit.args)
-            ]
             b_fn_terms = set.union(*[
-                set.union(*[{a for a in bl.args if type(a[0])==tuple} for bl in r.body])
-                for r in rules_fn_subs
+                {a for a in l.args if type(a[0])==tuple} for l in rule_fn_subs["body"]
             ])
             b_fn_assign = [
                 Literal(f"assign_{ft[0][0]}", wrap_args(*ft[0][1])+[fn_lifting_map[ft]])
                 for ft in b_fn_terms
             ]
 
-            inference_prog.add_absolute_rule(
-                Rule(head=h_sat_lit, body=h_sat_conds_pure+h_fn_assign)
-            )
+            if len(h_sat_conds_pure+h_fn_assign) > 0:
+                # Skip headless rules
+                inference_prog.add_absolute_rule(
+                    Rule(head=h_sat_lit, body=h_sat_conds_pure+h_fn_assign)
+                )
             inference_prog.add_absolute_rule(
                 Rule(head=b_sat_lit, body=b_sat_conds_pure+b_fn_assign)
             )
 
-            # Indexing & storing the entry by head
-            hd_content = set.union(*[set(hl for hl in r.head) for r in rules])
-            for h_lits in entries_by_head:
-                ism = Literal.isomorphism_btw(hd_content, h_lits, None)
-                if ism is not None:
-                    entries_by_head[h_lits].append((i, ism))
-                    break
-            else:
-                entries_by_head[frozenset(hd_content)].append((i, None))
+            # Indexing & storing the entry by head for later abductive rule
+            # translation (thus, no need to consider headless constraints)
+            if len(head) > 0:
+                for h_lits in entries_by_head:
+                    ism = Literal.isomorphism_btw(head, h_lits)
+                    if ism is not None:
+                        entries_by_head[h_lits].append((i, ism))
+                        break
+                else:
+                    entries_by_head[frozenset(head)].append((i, None))
 
             # Choice rule for function value assignments
             def add_assignment_choices(fn_terms, sat_conds):
@@ -258,10 +259,7 @@ class KnowledgeBase:
                     ft_lifted = fn_lifting_map[ft]
 
                     # Filter relevant conditions for filtering options worth considering
-                    rel_conds = [
-                        cl for cl in sat_conds
-                        if ft_lifted in cl.args or any(fa in cl.args for fa in fn_args)
-                    ]
+                    rel_conds = [cl for cl in sat_conds if ft_lifted in cl.args]
                     inference_prog.add_absolute_rule(
                         Rule(
                             head=Literal(
@@ -270,13 +268,14 @@ class KnowledgeBase:
                             body=rel_conds
                         )
                     )
-            add_assignment_choices(h_fn_terms, h_sat_conds)
-            add_assignment_choices(b_fn_terms, b_sat_conds)
+            add_assignment_choices(h_fn_terms, rule_lifted["head"])
+            add_assignment_choices(b_fn_terms, rule_lifted["body"])
 
             # Rule violation flag
             r_unsat_lit = Literal(f"deduc_viol_{i}", wrap_args(*b_var_signature))
             inference_prog.add_absolute_rule(Rule(
-                head=r_unsat_lit, body=[h_sat_lit.flip(), b_sat_lit]
+                head=r_unsat_lit,
+                body=[b_sat_lit] + ([h_sat_lit.flip()] if len(head) > 0 else [])
             ))
             
             # Add appropriately weighted rule for applying 'probabilistic pressure'
@@ -350,3 +349,20 @@ class KnowledgeBase:
             # against resorting to catchall hypothesis due to absence of abductive
             # explanation of head
             inference_prog.add_rule(Rule(body=coll_h_catchall_lit), 1-P_C)
+
+
+# Recursive helper methods for fetching predicate terms and names, substituting
+# variables and function names while preserving structure, and flattening nested
+# lists with arbitrary depths into a single list
+_extract_terms = lambda cnj: cnj.args if isinstance(cnj, Literal) \
+    else [_extract_terms(nc) for nc in cnj]
+_extract_preds = lambda cnj: cnj.name if isinstance(cnj, Literal) \
+    else [_extract_preds(nc) for nc in cnj]
+_substitute = lambda cnj, ts, fs: cnj.substitute(terms=ts, functions=fs) \
+    if isinstance(cnj, Literal) else [_substitute(nc, ts, fs) for nc in cnj]
+def _flatten(ls):
+    for x in ls:
+        if isinstance(x, list):
+            yield from _flatten(x)
+        else:
+            yield x
