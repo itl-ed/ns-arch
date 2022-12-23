@@ -8,6 +8,7 @@ sys.path.insert(
     0,
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
+import uuid
 from collections import defaultdict
 import logging
 import warnings
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 TAB = "\t"
 
+OmegaConf.register_new_resolver(
+    "randid", lambda: str(uuid.uuid4())[:6]
+)
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
@@ -110,7 +114,7 @@ def main(cfg):
     logger.info("**************")
     logger.info("Sys> Experiment finished. Result:")
 
-    cumul_regret = 0; regret_curve = []; confMats_seq = []
+    cumul_regret = 0; regret_curve = []; midterm_results = []
     for i, ep in enumerate(user.episode_records):
         if ep["answer_correct"]:
             logger.info(f"Sys> {TAB}Episode {i+1}: Correct")
@@ -124,24 +128,30 @@ def main(cfg):
         regret_curve.append(cumul_regret)
 
         if "midterm_result" in ep:
-            confMats_seq.append(ep["midterm_result"])
+            midterm_results.append(ep["midterm_result"])
 
     with open(os.path.join(res_dir, f"cumulRegs_{tail}.csv"), "w") as out_csv:
         out_csv.write("Episode,Regret\n")
         for i, cumul_regret in enumerate(regret_curve):
             out_csv.write(f"{i},{cumul_regret}\n")
 
-    for num_exs, data in confMats_seq:
-        with open(os.path.join(res_dir, f"confMat{num_exs}_{tail}.csv"), "w") as out_csv:
-            out_csv.write(",".join(concepts_ordered)+"\n")          # Binary mode
-            # out_csv.write(",".join(concepts_ordered+["NA"])+"\n")   # Multiple choice mode
-            for row in data / cfg.exp1.test_set_size:
-                out_csv.write(",".join([str(d) for d in row])+"\n")
+    mAP_curve = []
+    for num_exs, mAP, conf_mat in midterm_results:
+        mAP_curve.append((num_exs, mAP))
 
+        with open(os.path.join(res_dir, f"confMat{num_exs}_{tail}.csv"), "w") as out_csv:
+            out_csv.write(",".join(concepts_ordered)+"\n")
+            for row in conf_mat / cfg.exp1.test_set_size:
+                out_csv.write(",".join([str(d) for d in row])+"\n")
+    
+    with open(os.path.join(res_dir, f"mAPs_{tail}.csv"), "w") as out_csv:
+        out_csv.write("num_exs,mAP\n")
+        for num_exs, mAP in mAP_curve:
+            out_csv.write(f"{num_exs},{mAP}\n")
 
 def midterm_test(agent, user, num_exs):
     # 'Mid-term exams' during the series of ITL interactions
-    exam_result = defaultdict(lambda: defaultdict(int))
+    exam_result = defaultdict(list)
     test_problems = {
         conc.split(".")[0].replace("_", " "): imgs
         for conc, imgs in user.test_exemplars["cls"].items()
@@ -161,50 +171,86 @@ def midterm_test(agent, user, num_exs):
                 instance_bbox,
                 user.target_concepts["cls"]
             )
-            for conc_test in user.test_exemplars["cls"]:
-                if agent_answers[conc_test]:
-                    concept_test_string = conc_test.split(".")[0]
-                    concept_test_string = concept_test_string.replace("_", " ")
-                    exam_result[concept_string][concept_test_string] += 1
+            for conc_ans, score in agent_answers.items():
+                concept_ans_string = conc_ans.split(".")[0]
+                concept_ans_string = concept_ans_string.replace("_", " ")
+                exam_result[concept_string].append((concept_ans_string, score))
 
-            ## Multiple-choice, pick-one mode
-            # test_input = {
-            #     "v_usr_in": os.path.join(user.image_dir_prefix, img_f),
-            #     "l_usr_in": f"What is this?",
-            #     "pointing": { "this": [instance_bbox] }
-            # }
-
-            # agent_reaction = agent.loop(**test_input)
-            # agent_utterances = [
-            #     content for act_type, content in agent_reaction
-            #     if act_type == "generate"
-            # ]
-
-            # if any(utt.startswith("This is") for utt in agent_utterances):
-            #     answer_utt = [
-            #         utt for utt in agent_utterances if utt.startswith("This is")
-            #     ][0]
-            #     answer_content = re.findall(r"This is a (.*)\.$", answer_utt)[0]
-            #     exam_result[concept_string][answer_content] += 1
-            # else:
-            #     exam_result[concept_string]["NA"] += 1
-
-    # Store exam result as confusion matrix
+    # Compute and store mAP score, best-F1 score (across possible threshold values)
+    # and confusion matrix (at F1-best threshold) from the collected exam result
     C = len(test_problems)
     concepts_ordered = sorted(list(test_problems))      # Sort for consistent ordering
 
-    data = np.zeros([C,C])      # Binary mode
-    # data = np.zeros([C,C+1])    # Multiple choice mode
+    # Obtaining mAP (mean average precision) score
+    # Collect results and sort (decreasing) by confidence score per answers,
+    # to obtain per-concept P/R curve
+    sorted_preds = defaultdict(list)
+    for conc_truth, answers in exam_result.items():
+        for conc_ans, score in answers:
+            sorted_preds[conc_ans].append((score, conc_ans==conc_truth))
+    sorted_preds = {
+        conc_ans: sorted(preds, reverse=True, key=lambda x: x[0])
+        for conc_ans, preds in sorted_preds.items()
+    }
+
+    # (Interpolated) Precision-recall curves, AP scores, mAP score
+    APs = []
+    for preds in sorted_preds.values():
+        # Original (jagged) precision-recall curve
+        cumul_TPs = np.cumsum([is_TP for _, is_TP in preds])
+        pr_curve = [
+            (true_pos/agent.cfg.exp1.test_set_size, true_pos/(all_pos+1))
+            for all_pos, true_pos in zip(range(len(preds)), cumul_TPs)
+        ]
+
+        # Interpolated precision-recall curve
+        pr_curve_interp = [
+            (float(ir), float(ip))
+            for ir, ip in zip(
+                [r for r, _ in pr_curve],
+                np.maximum.accumulate([p for _, p in pr_curve[::-1]])[::-1]
+            )
+        ]
+        # Compute AP value as AUC of the interpolated curve; sum of boxes
+        # spanning until unique recall points
+        AP = 0.0; r_last = 0.0; p_current = pr_curve_interp[0][1]
+        for i, (r, p) in enumerate(pr_curve_interp):
+            if i == len(pr_curve_interp)-1:
+                # Reached end of recall axis; should increment AP
+                increment_AP = True
+            else:
+                # Increment AP if reached a "cliff edge" on the curve
+                r_not_same = i==0 or (r != pr_curve_interp[i-1][0])
+                p_will_drop = p > pr_curve_interp[i+1][1]
+                increment_AP = r_not_same and p_will_drop
+
+            if increment_AP:
+                # Increment AP by area, then update r_last by left-end of new box
+                AP += (r-r_last) * p_current
+                r_last = r
+
+            if i < len(pr_curve_interp)-1 and pr_curve_interp[i+1][1]==p:
+                # Dropping precision reached next plateau
+                p_current = pr_curve_interp[i+1][1]
+        
+        APs.append(AP)
+
+    # Mean AP across concepts being tested
+    mAP = sum(APs) / len(APs)
+
+    # Obtaining confusion matrix at threshold 0.3
+    conf_mat = np.zeros([C,C])
     for i in range(C):
         for j in range(C):
             conc_i = concepts_ordered[i]
             conc_j = concepts_ordered[j]
 
-            data[i,j] = exam_result[conc_i][conc_j]
-            # When multiple choice mode
-            # data[i,-1] = exam_result[conc_i]["NA"]
+            conf_mat[i,j] = sum(
+                score >= 0.3 for conc, score in exam_result[conc_i]
+                if conc==conc_j
+            )
 
-    user.episode_records[-1]["midterm_result"] = (num_exs, data)
+    user.episode_records[-1]["midterm_result"] = (num_exs, mAP, conf_mat)
 
     # Return sequence of concepts for bookkeeping concept order
     return concepts_ordered

@@ -174,7 +174,7 @@ class ITLAgent:
         denotations = [f"{conc_type}_{conc_ind}" for conc_ind, conc_type in denotations]
 
         agent_answers = {
-            c: (d,) in answers_raw and answers_raw[(d,)] > SC_THRES
+            c: 0.0 if (d,) not in answers_raw else answers_raw[(d,)]
             for c, d in zip(concepts, denotations)
         }
 

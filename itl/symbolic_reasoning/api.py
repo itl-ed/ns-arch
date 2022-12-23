@@ -29,9 +29,9 @@ TAB = "\t"              # For use in format strings
 
 EPS = 1e-10             # Value used for numerical stabilization
 U_IN_PR = 1.0           # How much the agent values information provided by the user
-SCORE_THRES = 0.5       # Only consider recognised categories with category score higher
+SCORE_THRES = 0.25      # Only consider recognised categories with category score higher
                         # than this value, unless focused attention warranted by KB
-LOWER_THRES = 0.3       # Lower threshold for predicates that deserve closer look
+LOWER_THRES = 0.15      # Lower threshold for predicates that deserve closer look
 
 class SymbolicReasonerModule:
 

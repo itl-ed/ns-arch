@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from torchvision.ops import box_convert
 
-from ..lpmln import Literal, Rule
+from ..lpmln import Literal
 from ..lpmln.utils import flatten_head_body
 
 

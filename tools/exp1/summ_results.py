@@ -10,6 +10,7 @@ sys.path.insert(
 )
 import re
 import csv
+import uuid
 import logging
 from collections import defaultdict
 
@@ -47,6 +48,9 @@ def draw_matrix(data, row_labs, col_labs, ax):
             ax.text(i, j, round(data[j, i].item(), 2), ha="center", va="center")
 
 
+OmegaConf.register_new_resolver(
+    "randid", lambda: str(uuid.uuid4())[:6]
+)
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
@@ -121,6 +125,26 @@ def main(cfg):
                             "concepts": concepts
                         }
 
+            elif data_type.startswith("mAPs"):
+                # Learning curve data (performance measured by mAP)
+                with open(os.path.join(res_dir, data)) as data_f:
+                    reader = csv.reader(data_f)
+                    _ = next(reader)
+
+                    curve = [(int(row[0]), float(row[1])) for row in reader]
+
+                    if (feedStratT, semStratL) in results_learningCurve[diff]:
+                        stats_agg = results_learningCurve[diff][(feedStratT, semStratL)]
+                        for num_exs, mAP in curve:
+                            if num_exs in stats_agg:
+                                stats_agg[num_exs].append(mAP)
+                            else:
+                                stats_agg[i] = [mAP]
+                    else:
+                        results_learningCurve[diff][(feedStratT, semStratL)] = {
+                            num_exs: [mAP] for num_exs, mAP in curve
+                        }
+
             else:
                 continue
 
@@ -131,6 +155,13 @@ def main(cfg):
         "semNegScal_minHelp", "semNegScal_medHelp", "semNegScal_maxHelp"
         # Among these, semNeg/semNegScal_min/medHelp are vacuous config combinations
     ]
+    config_aliases = {
+        "semOnly_minHelp": "minHelp",
+        "semOnly_medHelp": "medHelp",
+        "semOnly_maxHelp": "maxHelp_semOnly",
+        "semNeg_maxHelp": "maxHelp_semNeg",
+        "semNegScal_maxHelp": "maxHelp_semNegScal"
+    }   # To be actually displayed in legend
 
     # Aggregate and visualize: cumulative regret curve
     for diff, agg_stats in results_cumulRegs.items():
@@ -170,13 +201,13 @@ def main(cfg):
             key=lambda x: config_ord.index(x[1])
         )
         handles = [hl[0] for hl in hls_sorted]
-        labels = [hl[1] for hl in hls_sorted]
+        labels = [config_aliases.get(hl[1], hl[1]) for hl in hls_sorted]
         ax.legend(handles, labels)
         
         ax.set_title(f"Cumulative regret curve ({diff}; N={len(data[0])} per config)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"cumulRegs_{diff}.png"))
 
-    # Aggregate and visualize: learning curve & confusion matrices
+    # Aggregate and visualize: confusion matrices
     last_num_exs = max(results_confMat)
     for num_exs, agg_stats in results_confMat.items():
         for diff, per_diff in agg_stats.items():
@@ -184,35 +215,12 @@ def main(cfg):
                 feedStratT, semStratL = exp_config
                 config_label = f"{semStratL}_{feedStratT}"
 
-                # Compute aggregate metric: mean F1 score
-                per_concept_Ps = [
-                    [confMat[i,i] / confMat[:,i].sum() for i in range(len(confMat))]
-                    for confMat in data["matrix"]
-                ]
-                per_concept_Rs = [
-                    [confMat[i,i] for i in range(len(confMat))]
-                    for confMat in data["matrix"]
-                ]
-                per_concept_F1s = [
-                    # If both P & R are zero, F1 zero
-                    [2*p*r/(p+r) if p+r>0 else 0.0 for p, r in zip(ps, rs)]
-                    for ps, rs in zip(per_concept_Ps, per_concept_Rs)
-                ]
-                mean_F1s = [np.mean(F1s) for F1s in per_concept_F1s]
-
-                # Collect data for plotting learning curve (by # examples used vs. mF1)
-                if exp_config in results_learningCurve[diff]:
-                    results_learningCurve[diff][exp_config].append((num_exs, mean_F1s))
-                else:
-                    results_learningCurve[diff][exp_config] = [(num_exs, mean_F1s)]
-
                 if num_exs == last_num_exs:
                     # Draw confusion matrix
                     fig = plt.figure()
                     draw_matrix(
                         sum(data["matrix"]) / data["num_test_suites"],
                         data["concepts"], data["concepts"], fig.gca()    # Binary choice mode
-                        # data["concepts"][:-1], data["concepts"], fig.gca()    # Multiple choice mode
                     )
                     plt.suptitle(f"Confusion matrix for ({diff}; N={len(data['matrix'])} per config)", fontsize=16)
                     plt.title(f"{config_label} agent", pad=18)
@@ -225,29 +233,29 @@ def main(cfg):
 
         for exp_config, data in agg_stats.items():
             feedStratT, semStratL = exp_config
-            data = sorted(data)
+            data = sorted(data.items())
             stats = [
-                (i, np.mean(mF1s), 1.96 * np.std(mF1s)/np.sqrt(len(mF1s)))
-                for i, mF1s in data
+                (num_exs, np.mean(mAPs), 1.96 * np.std(mAPs)/np.sqrt(len(mAPs)))
+                for num_exs, mAPs in data
             ]
 
             # Plot mean curve
             curve = ax.plot(
-                [i+1 for i, _, _ in stats],
-                [mmF1 for _, mmF1, _ in stats],
+                [num_exs for num_exs, _, _ in stats],
+                [mmAP for _, mmAP, _ in stats],
                 label=f"{semStratL}_{feedStratT}"
             )
             # Plot confidence intervals
             ax.fill_between(
-                [i+1 for i, _, _ in stats],
-                [mmF1-cl for _, mmF1, cl in stats],
-                [mmF1+cl for _, mmF1, cl in stats],
+                [num_exs for num_exs, _, _ in stats],
+                [mmAP-cl for _, mmAP, cl in stats],
+                [mmAP+cl for _, mmAP, cl in stats],
                 color=curve[0].get_color(), alpha=0.2
             )
 
         # Plot curve
         ax.set_xlabel("# training examples")
-        ax.set_ylabel("mF1 score")
+        ax.set_ylabel("mAP score")
         ax.set_xlim(0, last_num_exs+10)
         ax.set_ylim(0, 1)
         ax.grid()
@@ -259,23 +267,23 @@ def main(cfg):
             key=lambda x: config_ord.index(x[1])
         )
         handles = [hl[0] for hl in hls_sorted]
-        labels = [hl[1] for hl in hls_sorted]
+        labels = [config_aliases.get(hl[1], hl[1]) for hl in hls_sorted]
         plt.legend(handles, labels)
         
         plt.title(f"Learning curve ({diff}; N={len(data[0][1])} per config)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"learningCurve_{diff}.png"))
 
-    # Report final mF1 scores on terminal
+    # Report final mAP scores on terminal
     for diff, agg_stats in results_learningCurve.items():
         print("")
-        logger.info(f"Final mean F1 scores ({diff}):")
+        logger.info(f"Final mAP scores ({diff}):")
 
-        final_mF1s = {
-            f"{semStratL}_{feedStratT}": sorted(data, reverse=True)[0][1]
+        final_mAPs = {
+            f"{semStratL}_{feedStratT}": sorted(data.items(), reverse=True)[0][1]
             for (feedStratT, semStratL), data in agg_stats.items()
         }
-        for cfg in sorted(final_mF1s, key=lambda x: config_ord.index(x)):
-            logger.info("\t"+f"{cfg}: {float(np.mean(final_mF1s[cfg]))}")
+        for cfg in sorted(final_mAPs, key=lambda x: config_ord.index(x)):
+            logger.info("\t"+f"{config_aliases.get(cfg, cfg)}: {float(np.mean(final_mAPs[cfg]))}")
 
 
 if __name__ == "__main__":

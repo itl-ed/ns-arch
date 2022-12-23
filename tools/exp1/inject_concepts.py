@@ -9,6 +9,7 @@ sys.path.insert(
     0,
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
+import uuid
 import random
 from PIL import Image
 from collections import defaultdict
@@ -28,6 +29,9 @@ from tools.sim_user import SimulatedTeacher
 
 TAB = "\t"
 
+OmegaConf.register_new_resolver(
+    "randid", lambda: str(uuid.uuid4())[:6]
+)
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))

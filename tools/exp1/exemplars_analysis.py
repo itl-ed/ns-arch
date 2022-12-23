@@ -7,6 +7,7 @@ sys.path.insert(
     0,
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
+import uuid
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -26,6 +27,9 @@ from itl import ITLAgent
 
 TAB = "\t"
 
+OmegaConf.register_new_resolver(
+    "randid", lambda: str(uuid.uuid4())[:6]
+)
 @hydra.main(config_path="../../itl/configs", config_name="config")
 def main(cfg):
     print(OmegaConf.to_yaml(cfg))
