@@ -5,7 +5,7 @@ hydra:
 defaults:
     - vision: base
     - lang: base
-    - exp1: 
+    - exp1: easy
 
 paths:
     root_dir: "${hydra:runtime.cwd}"
