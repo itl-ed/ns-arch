@@ -4,7 +4,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "tapered.a.01"]
+            "bowl.n.01": ["elliptical.a.01", "tapered.a.01"]
         }
     },
 
@@ -32,7 +32,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "tapered.a.01"]
+            "bowl.n.01": ["elliptical.a.01", "tapered.a.01"]
         }
     },
 
@@ -59,7 +59,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["broad.a.01", "conic.a.01"]
+            "bowl.n.01": ["broad.a.01", "conical.a.01"]
         }
     },
 
@@ -68,7 +68,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "flared.a.?"]
+            "bowl.n.01": ["elliptical.a.01", "flared.a.?"]
         }
     },
 
@@ -77,7 +77,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "upright.s.01"]
+            "bowl.n.01": ["elliptical.a.01", "upright.s.01"]
         }
     },
 
@@ -95,7 +95,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "bulbed.a.01"]
+            "bowl.n.01": ["elliptical.a.01", "bulbed.a.01"]
         }
     },
 
@@ -104,7 +104,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "upright.s.01"]
+            "bowl.n.01": ["elliptical.a.01", "upright.s.01"]
         }
     },
 
@@ -113,7 +113,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "tapered.a.01", "small.a.01"]
+            "bowl.n.01": ["elliptical.a.01", "tapered.a.01", "small.a.01"]
         }
     },
 
@@ -131,7 +131,7 @@
             "drinking_glass.n.01"
         ],
         "part_property": {
-            "bowl.n.01": ["oval.a.01", "tapered.a.01"]
+            "bowl.n.01": ["elliptical.a.01", "tapered.a.01"]
         }
     }
 }

@@ -52,6 +52,17 @@ def main(cfg):
                 "brandy_glass.n.*"
             ]
         }
+    elif cfg.exp1.difficulty == "fineHard":
+        target_concepts = {
+            "cls": [
+                "champagne_coupe.n.*",
+                "burgundy_glass.n.*",
+                "brandy_glass.n.*",
+                "riesling_glass.n.*",
+                "martini_glass.n.*",
+                "bordeaux_glass.n.*"
+            ]
+        }
     else:
         raise NotImplementedError
 

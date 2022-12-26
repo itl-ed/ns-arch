@@ -5,6 +5,7 @@ hydra:
 defaults:
     - vision: base
     - lang: base
+    - exp1: 
 
 paths:
     root_dir: "${hydra:runtime.cwd}"
@@ -14,12 +15,5 @@ paths:
 
 agent:
     strat_generic: "semOnly"    # Options: "semOnly", "semNeg", "semNegScal"
-
-exp1:
-    difficulty: "nonFine"       # Options: "nonFine", "fineEasy", "fineHard"
-    strat_feedback: "minHelp"   # Options: "minHelp", "medHelp", "maxHelp"
-    num_examples: 40
-    test_interval: 5
-    test_set_size: 30
 
 seed: 42

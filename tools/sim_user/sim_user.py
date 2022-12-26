@@ -241,7 +241,14 @@ class SimulatedTeacher:
                 conc1_props_diff[part].add(prop)
             for part, props in conc1_props_diff.items():
                 part_name = pluralize(part.split(".")[0])
-                part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                props = list(props)
+                if len(props) <= 2:
+                    part_descriptor = " and ".join(pr.split(".")[0] for pr in props)
+                else:
+                    part_descriptor = " and ".join(pr.split(".")[0] for pr in props[-2:])
+                    part_descriptor = ", ".join(
+                        [pr.split(".")[0] for pr in props[:-2]]+[part_descriptor]
+                    )
                 generic = f"{conc1_subj} have {part_descriptor} {part_name}."
                 answer_response["l_usr_in"].append(generic)
 
@@ -251,7 +258,14 @@ class SimulatedTeacher:
                 conc2_props_diff[part].add(prop)
             for part, props in conc2_props_diff.items():
                 part_name = pluralize(part.split(".")[0])
-                part_descriptor = ", ".join(pr.split(".")[0] for pr in props)
+                props = list(props)
+                if len(props) <= 2:
+                    part_descriptor = " and ".join(pr.split(".")[0] for pr in props)
+                else:
+                    part_descriptor = " and ".join(pr.split(".")[0] for pr in props[-2:])
+                    part_descriptor = ", ".join(
+                        [pr.split(".")[0] for pr in props[:-2]]+[part_descriptor]
+                    )
                 generic = f"{conc2_subj} have {part_descriptor} {part_name}."
                 answer_response["l_usr_in"].append(generic)
 

@@ -252,13 +252,13 @@ class AgentCompositeActions:
         # (Parse the original question utterance, manipulate, then generate back)
         if len(answer_selected) == 0:
             # Yes/no question
-
-            # Cast original question to proposition
-            answer_translated = self.agent.lang.semantic.nl_change_sf(orig_utt, "prop")
-
+            raise NotImplementedError
             if ev_prob < SC_THRES:
-                # Flip polarity for negative answer with event probability lower than SC_THRES
-                answer_translated = self.agent.lang.semantic.nl_negate(answer_translated)
+                # Positive answer
+                ...
+            else:
+                # Negative answer
+                ...
         else:
             # Wh- question
 
@@ -317,16 +317,10 @@ class AgentCompositeActions:
 
                 replace_values.append((nl_val, is_named))
 
-            # Replace wh-quantified referent(s) with appropriate answer values
-            answer_translated = orig_utt
-
-            # Plug in the selected answer in place of the wh-quantified referent
-            answer_translated = self.agent.lang.semantic.nl_replace_wh(
-                answer_translated, replace_targets, replace_values
-            )
-
-            # Don't forget to make it a prop
-            answer_translated = self.agent.lang.semantic.nl_change_sf(answer_translated, "prop")
+            # Split camelCased predicate name
+            splits = re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", nl_val)
+            splits = [w[0].lower()+w[1:] for w in splits]
+            answer_translated = f"This is a {' '.join(splits)}."
 
         # Push the translated answer to buffer of utterances to generate
         self.agent.lang.dialogue.to_generate.append(

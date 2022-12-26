@@ -170,11 +170,16 @@ class ITLAgent:
             )
             for c in concepts
         ]
-        denotations = [self.lt_mem.lexicon.s2d[(c, "n")][0] for c in denotations]
+        denotations = [
+            self.lt_mem.lexicon.s2d[(c, "n")][0]
+                if (c, "n") in self.lt_mem.lexicon.s2d else (-1, "cls")
+            for c in denotations
+        ]
         denotations = [f"{conc_type}_{conc_ind}" for conc_ind, conc_type in denotations]
 
         agent_answers = {
-            c: 0.0 if (d,) not in answers_raw else answers_raw[(d,)]
+            c: (0.0 if (d,) not in answers_raw else answers_raw[(d,)])
+                if d != "cls_-1" else 0.3
             for c, d in zip(concepts, denotations)
         }
 

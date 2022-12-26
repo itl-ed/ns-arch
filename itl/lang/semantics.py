@@ -65,6 +65,8 @@ class SemanticParser:
                     # 'Surface' (in ERG parlance) predicates with lexical symbols
                     lemma, pos, sense = predicate.split(ep.predicate)
 
+                    if lemma == "and" and pos == "c": continue
+
                     if sense == "unknown":
                         # Predicate not covered by parser lexicon
                         lemma, pos = lemma.split("/")
@@ -84,9 +86,71 @@ class SemanticParser:
                                 # behavior, but welp
                                 lemma = singularized
                         elif pos.startswith("j"):
-                            pos = "a"
+                            # In our use case, unknown predicate with jj POS are mostly
+                            # fragments of compound noun tokens (e.g. "pinot"). Let's
+                            # intervene and manipulate the parse result as if relations
+                            # came from compound nouns
+                            pos = "n"
+
+                            # Instance about which this 'jj' originally predicates
+                            predicated_inst = rel["args"][1]
+
+                            # Need new instance var index
+                            max_x = max(
+                                int(ep.iv.strip("x")) for ep in parsed.rels
+                                if ep.iv.startswith("x")
+                            )
+                            rel["id"] = f"x{max_x+1}"
+                            rel["args"] = (f"x{max_x+1}",)
+
+                            # Need new event var index
+                            max_e = max(
+                                int(ep.iv.strip("e")) for ep in parsed.rels
+                                if ep.iv.startswith("e")
+                            )
+
+                            # Need new handle indices
+                            max_h = max(int(ep.label.strip("h")) for ep in parsed.rels)
+                            rel["handle"] = f"h{max_h+1}"
+
+                            # Add two additional relations: udef and compound
+                            new_udef_rel = {
+                                "args": rel["args"],
+                                "lexical": False,
+                                "id": f"q{max_x+1}",
+                                "handle": f"h{max_h+2}",
+                                "crange": rel["crange"],
+                                "predicate": "udef",
+                                "pos": "q"
+                            }
+                            parse["relations"]["by_args"][rel["args"]].append(new_udef_rel)
+                            parse["relations"]["by_id"][f"q{max_x+1}"] = new_udef_rel
+                            parse["relations"]["by_handle"][f"h{max_h+2}"] = new_udef_rel
+
+                            cmpd_args = (
+                                f"e{max_e+1}", predicated_inst, f"x{max_x+1}"
+                            )
+                            cmpd_rel = [
+                                ep for ep in parsed.rels if ep.id==predicated_inst
+                            ][0]        # Label of instance being predicated
+                            new_cmpd_rel = {
+                                "args": cmpd_args,
+                                "lexical": False,
+                                "id": f"e{max_e+1}",
+                                "handle": cmpd_rel.label,
+                                "crange": (rel["crange"][0], cmpd_rel.cto),
+                                "predicate": "compound",
+                                "pos": None
+                            }
+                            parse["relations"]["by_args"][cmpd_args].append(new_cmpd_rel)
+                            parse["relations"]["by_id"][f"e{max_e+1}"] = new_cmpd_rel
+                            parse["relations"]["by_handle"][cmpd_rel.label] = new_cmpd_rel
+                            
                         elif pos.startswith("v"):
                             pos = "v"
+                        elif pos.startswith("fw"):
+                            # Foreign token (e.g. 'noir')
+                            pos = "n"
                         else:
                             raise ValueError(f"I don't know how to grammatically process the token '{lemma}'")
 
@@ -98,7 +162,7 @@ class SemanticParser:
                         "pos": pos,
                         "sense": sense
                     })
-                
+
                 else:
                     # Reserved, 'abstract' (in ERG parlance) predicates
                     if ep.is_quantifier():
@@ -115,7 +179,7 @@ class SemanticParser:
                         })
 
                         if ep.predicate == "named":
-                            rel["carg"] = ep.carg
+                            rel["predicate"] = ep.carg.lower()
 
                         if ep.predicate == "neg":
                             hcons = {hc.hi: hc.lo for hc in parsed.hcons if hc.relation=="qeq"}
@@ -124,9 +188,9 @@ class SemanticParser:
 
                             rel["neg"] = negated.label
                     
-                parse["relations"]["by_args"][args].append(rel)
-                parse["relations"]["by_id"][ep.id] = rel
-                parse["relations"]["by_handle"][ep.label] = rel
+                parse["relations"]["by_args"][rel["args"]].append(rel)
+                parse["relations"]["by_id"][rel["id"]] = rel
+                parse["relations"]["by_handle"][rel["handle"]] = rel
             
             parse["relations"]["by_args"] = dict(parse["relations"]["by_args"])
             
@@ -168,314 +232,58 @@ class SemanticParser:
 
         return parses
 
-    def nl_negate(self, sentence):
-        """
-        Return the negated version of the sentence by parsing, manipulating MRS, then
-        generating with grammar
-        """
-        # MRS parse
-        parsed = ace.parse(
-            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
-        )
-        parsed = parsed.result(0).mrs()
-
-        # pydelphin EP and HCons constructor shoplifted
-        EP_Class = type(parsed.rels[0])
-        HCons_Class = type(parsed.hcons[0])
-
-        # Find appropriate indices for new variables
-        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
-        handle_hi = max_var_ind+1
-        handle_lo = max_var_ind+2
-        ev_var_neg = max_var_ind+3
-
-        # New handle constraint list
-        hcons_orig_top = [hc for hc in parsed.hcons if hc.hi == parsed.top][0]
-        hcons_kept = [hc for hc in parsed.hcons if hc.hi != parsed.top]
-        hcons_hi = HCons_Class(parsed.top, "qeq", f"h{handle_hi}")
-        hcons_lo = HCons_Class(f"h{handle_lo}", "qeq", hcons_orig_top.lo)
-        new_hcons = hcons_kept + [hcons_hi, hcons_lo]
-
-        if [r for r in parsed.rels if r.label==hcons_orig_top.lo][0].predicate == "neg":
-            # Return sentence as-is if it already has negative polarity
-            return sentence
-
-        # New EP object for neg predicate
-        neg_args = {"ARG0": f"e{ev_var_neg}", "ARG1": f"h{handle_lo}"}
-        neg_EP = EP_Class("neg", f"h{handle_hi}", args=neg_args)
-
-        parsed.rels.append(neg_EP)
-        parsed.hcons = new_hcons
-
-        # Generate with grammar
-        generated = ace.generate(
-            self.grammar, codecs.simplemrs.encode(parsed),
-            executable=self.ace_bin, stderr=self.null_sink
-        )
-        try:
-            replaced = generated.result(0)["surface"]
-        except IndexError:
-            # In unfortunate cases the predicate is not in ERG lexicon. Fall back
-            # to passing val as named proper noun...
-            unk_rels = [r for r in parsed.rels if r.predicate.endswith("unknown")]
-            for r in unk_rels:
-                r.args["CARG"] = r.predicate.split("/")[0][1:]
-                r.predicate = "named"
-
-            generated = ace.generate(
-                self.grammar, codecs.simplemrs.encode(parsed),
-                executable=self.ace_bin, stderr=self.null_sink
-            )
-            replaced = generated.result(0)["surface"]
-
-        return replaced
-
-    def nl_change_sf(self, sentence, new_SF):
-        """
-        Return the version of the sentence with specified sentential force (SF) by parsing,
-        manipulating MRS, then generating with grammar
-        """
-        assert new_SF == "prop" or new_SF == "ques"
-
-        # MRS parse
-        parsed = ace.parse(
-            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
-        )
-        parsed = parsed.result(0).mrs()
-
-        # Apply new SF provided
-        parsed.variables[parsed.index]["SF"] = new_SF
-        
-        # Generate with grammar
-        generated = ace.generate(
-            self.grammar, codecs.simplemrs.encode(parsed),
-            executable=self.ace_bin, stderr=self.null_sink
-        )
-        try:
-            replaced = generated.result(0)["surface"]
-        except IndexError:
-            # In unfortunate cases the predicate is not in ERG lexicon. Fall back
-            # to passing val as named proper noun...
-            unk_rels = [r for r in parsed.rels if r.predicate.endswith("unknown")]
-            for r in unk_rels:
-                r.args["CARG"] = r.predicate.split("/")[0][1:]
-                r.predicate = "named"
-
-            generated = ace.generate(
-                self.grammar, codecs.simplemrs.encode(parsed),
-                executable=self.ace_bin, stderr=self.null_sink
-            )
-            replaced = generated.result(0)["surface"]
-
-        return replaced
-
-    def nl_replace_wh(self, sentence, replace_targets, replace_values):
-        # MRS parse
-        parsed = ace.parse(
-            self.grammar, sentence, executable=self.ace_bin, stderr=self.null_sink
-        )
-        parsed = parsed.result(0).mrs()
-
-        # MRS flips the arg order when subject is quantified with 'which',
-        # presumably seeing it as wh-movement? Re-flip, except when the
-        # wh-word is 'what' (represented as 'which thing' in MRS)
-        index_rel = [r for r in parsed.rels if parsed.index==r.id][0]
-        index_sf = parsed.variables[parsed.index]["SF"]
-        if index_rel.predicate=="_be_v_id" and index_sf=="ques":
-            a2_rels = [r.predicate for r in parsed.rels if index_rel.args["ARG2"]==r.iv]
-            a2_wh_quantified = ("which_q" in a2_rels) or ("_which_q" in a2_rels)
-
-            if a2_wh_quantified and ("thing" not in a2_rels):
-                index_rel.args["ARG1"], index_rel.args["ARG2"] = \
-                    index_rel.args["ARG2"], index_rel.args["ARG1"]
-
-        # pydelphin EP and HCons constructor shoplifted
-        EP_Class = type(parsed.rels[0])
-        HCons_Class = type(parsed.hcons[0])
-
-        hcons_h2l = {h.hi: h.lo for h in parsed.hcons}
-
-        # Find appropriate indices for new variables
-        max_var_ind = max(int("".join(filter(str.isdigit, v))) for v in parsed.variables)
-
-        for tgt, (val, is_named) in zip(replace_targets, replace_values):
-            # Recover target referent by id
-            tgt = [
-                r for r in parsed.rels
-                if (r.cfrom, r.cto)==tgt and r.id[0]=="x"
-            ][0].id
-
-            # The wh-quantifying relation
-            wh_i, wh_rel = [
-                (i, r) for i, r in enumerate(parsed.rels)
-                if r.iv==tgt and r.predicate.endswith("which_q")
-            ][0]
-
-            # Find relations & hcons to be replaced in the new MRS, sweeping down the
-            # MRS starting from wh_rel down to all children
-            rels_to_replace = {wh_i}
-            encountered_referents = {tgt}
-            encountered_handles = {wh_rel.args["RSTR"], hcons_h2l[wh_rel.args["RSTR"]]}
-            sweep_frontier = [hcons_h2l[wh_rel.args["RSTR"]]]
-
-            while len(sweep_frontier) > 0:
-                h = sweep_frontier.pop()
-
-                # Relations with the handle being explored
-                h_rels = {i: r for i, r in enumerate(parsed.rels) if r.label==h}
-
-                # Update relations to replace
-                rels_to_replace |= set(h_rels.keys())
-
-                # Newly encountered referents, and update set of encountered ones
-                new_referents = set.union(*[
-                    {a for n, a in r.args.items() if n.startswith("ARG")}
-                    for r in h_rels.values()
-                ]) - encountered_referents
-                encountered_referents |= new_referents
-
-                # Expand frontier with labels of rels that have newly encountered
-                # referents as argument
-                sweep_frontier += [
-                    hcons_h2l[r.label] for r in parsed.rels
-                    if len(new_referents & set(r.args.values())) > 0 and r.label!=h
-                ]
-                encountered_handles |= set(sweep_frontier)
-            
-            hcons_to_replace = {i: {h.hi, h.lo} for i, h in enumerate(parsed.hcons)}
-            hcons_to_replace = {
-                i for i, hs in hcons_to_replace.items()
-                if len(encountered_handles & hs) > 0
-            }
-
-            # Filter out rels/hcons to be replaced
-            for i in reversed(range(len(parsed.rels))):
-                if i in rels_to_replace: del parsed.rels[i]
-            for i in reversed(range(len(parsed.hcons))):
-                if i in hcons_to_replace: del parsed.hcons[i]
-
-            # 'Seed' relations to be added, no matter how long the camelCased split is
-            handle_lbl = f"h{max_var_ind+1}"
-            handle_rstr = f"h{max_var_ind+2}"
-            handle_body = f"h{max_var_ind+3}"
-            handle_n = f"h{max_var_ind+4}"
-            max_var_ind += 4
-
-            q_args = {
-                "ARG0": tgt, "RSTR": handle_rstr, "BODY": handle_body
-            }
-            if val is None:
-                # Nothing is answer
-                q_EP = EP_Class("_no_q", handle_lbl, args=q_args)
-                n_EP = EP_Class("thing", handle_n, args={"ARG0": tgt})
-
-                splits = []
-            else:
-                if is_named:
-                    # Named referent quantified by proper_q
-                    q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
-
-                    # Short name, no camelCase splits
-                    splits = [val]
-                else:
-                    # Common noun referent quantified by _a_q
-                    # (It will attach the indefinte 'a' to uncountable nouns as well,
-                    # let's keep it this way for now)
-                    q_EP = EP_Class("_a_q", handle_lbl, args=q_args)
-
-                    # Check if string val is camelCased and needs to be split
-                    splits = re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", val)
-                    splits = [w[0].lower()+w[1:] for w in splits]
-                
-                n_args = {"ARG0": tgt, "CARG": splits[-1]}
-                n_EP = EP_Class("named", handle_n, args=n_args)
-
-            hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
-
-            parsed.rels.extend([q_EP, n_EP])
-            parsed.hcons.append(hcons_add)
-
-            # Handle compound nouns by adding appropriate relations & hcons in order
-            prev_ref_n = tgt; prev_handle_n = handle_n
-            for w in splits[:-1]:
-                ref_c = f"e{max_var_ind+1}"
-                ref_n = f"x{max_var_ind+2}"
-                handle_lbl = f"h{max_var_ind+3}"
-                handle_rstr = f"h{max_var_ind+4}"
-                handle_body = f"h{max_var_ind+5}"
-                handle_n = f"h{max_var_ind+6}"
-                max_var_ind += 6
-
-                q_args = {
-                    "ARG0": ref_n, "RSTR": handle_rstr, "BODY": handle_body
-                }
-                q_EP = EP_Class("proper_q", handle_lbl, args=q_args)
-
-                n_args = {"ARG0": ref_n, "CARG": w}
-                n_EP = EP_Class("named", handle_n, args=n_args)
-
-                c_args = {"ARG0": ref_c, "ARG1": prev_ref_n, "ARG2": ref_n}
-                c_EP = EP_Class("compound", prev_handle_n, args=c_args)
-
-                hcons_add = HCons_Class(handle_rstr, "qeq", handle_n)
-
-                parsed.rels.extend([q_EP, n_EP, c_EP])
-                parsed.hcons.append(hcons_add)
-
-                prev_ref_n = ref_n
-                prev_handle_n = handle_n
-
-            # Generate with grammar
-            generated = ace.generate(
-                self.grammar, codecs.simplemrs.encode(parsed),
-                executable=self.ace_bin, stderr=self.null_sink
-            )
-            replaced = generated.result(0)["surface"]
-
-            # Weird behaviour of ACE ERG generator; for some reason, 'indefinite
-            # named' nouns in a non-trivially manipulated MRS often get surface
-            # form trailing "an" even if it doesn't start with a vowel... Patch
-            # this by manual replacement
-            if len(splits) > 0:
-                if splits[0][0] not in 'aeiou':
-                    replaced = replaced.replace(f"an {splits[0]}", f"a {splits[0]}")
-                if splits[0][0] in 'aeiou':
-                    replaced = replaced.replace(f"a {splits[0]}", f"an {splits[0]}")
-
-        return replaced
-
     @staticmethod
     def asp_translate(parses):
         translations = []
         ref_maps = []
         for parse in parses:
             # First find chains of compound NPs and then appropriately merge them
-            chains = {}
-            for args in parse["relations"]["by_args"]:
-                for rel in parse["relations"]["by_args"][args]:
-                    if rel["lexical"] == False and rel["predicate"] == "compound":
-                        chains[args[2], args[0]] = args[1]
-            
-            while len(chains) > 0:
-                for x in chains:
-                    if x[0] not in chains.values():
-                        # Backtrack by one step to merge
-                        p1 = parse["relations"]["by_id"][x[0]]
-                        p2 = parse["relations"]["by_id"][chains[x]]
-                        merged = p1["predicate"] + p2["predicate"].capitalize()
-                        parse["relations"]["by_id"][chains[x]]["predicate"] = merged
+            cmpd_rels = [
+                rel for rel in parse["relations"]["by_id"].values()
+                if rel["lexical"] == False and rel["predicate"]=="compound"
+            ]
+            while len(cmpd_rels) > 0:
+                # Pick a compound rel arg pair that is immediately mergeable; i.e.
+                # one without any smaller crange
+                mergeable_rels = [
+                    rel for rel in cmpd_rels
+                    if not any(
+                        rel2["crange"][0] >= rel["crange"][0] and
+                            rel2["crange"][1] <= rel["crange"][1] and
+                            rel2["id"] != rel["id"]
+                        for rel2 in cmpd_rels
+                    )
+                ]
+                rel_to_merge = mergeable_rels[0]
 
-                        args_to_del = []
-                        for args, rels in parse["relations"]["by_args"].items():
-                            if x[0] in args:
-                                args_to_del.append(args)
-                                for r in rels:
-                                    del parse["relations"]["by_id"][r["id"]]
-                                    del parse["relations"]["by_handle"][r["handle"]]
-                        for args in args_to_del:
-                            del parse["relations"]["by_args"][args]
+                # Fetch predicate rels; notice how arg order flips (1-2 vs. 2-1),
+                # due to how MRS handles compound rels
+                p1 = parse["relations"]["by_id"][rel_to_merge["args"][2]]
+                p2 = parse["relations"]["by_id"][rel_to_merge["args"][1]]
 
-                        del chains[x]; break
+                # Merge & camelCase predicate names, update p2 predicate & crange
+                merged = p1["predicate"] + p2["predicate"][:1].upper() + p2["predicate"][1:]
+                p2["predicate"] = merged
+                p2["crange"] = (p1["crange"][0], p2["crange"][1])
+
+                # Delete any traces of p1; it's now merged into p2
+                parse["relations"]["by_args"] = {
+                    args: rels for args, rels in parse["relations"]["by_args"].items()
+                    if p1["id"] not in args
+                }
+                parse["relations"]["by_handle"] = {
+                    r["handle"]: r
+                    for rels in parse["relations"]["by_args"].values() for r in rels
+                }
+                parse["relations"]["by_id"] = {
+                    r["id"]: r
+                    for rels in parse["relations"]["by_args"].values() for r in rels
+                }
+
+                # Update list of mergeable relations
+                cmpd_rels = [
+                    rel for rel in cmpd_rels if rel["id"] != rel_to_merge["id"]
+                ]
 
             # Equivalence classes mapping referents to rule variables, while tracking whether
             # they come from referential expressions or not
@@ -632,7 +440,7 @@ def _traverse_dt(parse, rel_id, ref_map, covered, negs):
 
         # Setting up arg1 (& arg2) variables
         rel_args = rel["args"]
-        if len(rel_args) > 1 and rel_args[1].startswith("i"):
+        if len(rel_args) > 1 and rel["pos"]=="n" and rel_args[1].startswith("i"):
             # Let's deal with i-referents later... Just ignore it for now
             rel_args = rel_args[:1]
 

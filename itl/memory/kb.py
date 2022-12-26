@@ -6,8 +6,6 @@ from ..lpmln.utils import logit, sigmoid, wrap_args, flatten_head_body
 
 
 P_C = 0.01          # Catchall hypothesis probability
-LOWER_THRES = 0.5   # Lower threshold for predicates that deserve closer look (see
-                    # ../symbolic_reasoning/api.py)
 
 class KnowledgeBase:
     """
