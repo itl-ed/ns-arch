@@ -114,6 +114,10 @@ class Polynomial:
             # Multiplication by zero
             return Polynomial(float_val=0.0)
 
+        # Multiplication by one: identity
+        if self.is_one(): return other
+        if other.is_one(): return self
+
         if hasattr(self, "denom_terms") or hasattr(other, "denom_terms"):
             # If fractions are involved, need recursive calls
             # and denominators
@@ -174,6 +178,12 @@ class Polynomial:
     def is_zero(self):
         """ Test if the value of self is zero (empty self.terms) """
         return len(self.terms) == 0
+
+    def is_one(self):
+        """
+        Test if the value of self is one (singleton terms dict with zero-zero value)
+        """
+        return self.terms == { 0: 0 }
 
     def at_limit(self):
         """

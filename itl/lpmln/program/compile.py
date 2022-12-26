@@ -429,7 +429,7 @@ def _belief_propagation(bjt, node_set):
             # and store it in the directed edge's storage register
             _compute_message(bjt, from_node_set, node_set)
             msg = bjt.edges[(from_node_set, node_set)]["message"]
-        
+
         incoming_messages.append(msg)
 
     # Combine incoming messages; combine entries by multiplying 'fully-alive'
@@ -535,26 +535,79 @@ def _combine_factors_outer(factors):
     are combined by calling _combine_factors_inner()
     """
     assert len(factors) > 0
+    # Each factors are specifications of cases sharing the same atom set signature,
+    # differing only whether elements are positive or negative
+    assert all(
+        len({frozenset([abs(a) for a in ff]) for ff in f})==1
+        for f in factors
+    )
+
+    # Efficient factor combination by exploiting factorization with common atom
+    # signatures and respective complements
+
+    # Find atoms common to all signatures of the factors, then partition each
+    # case in the factors according to the partition
+    factor_signatures = [list(f)[0] for f in factors]
+    signature_common = frozenset.intersection(*factor_signatures)
+    signature_common_pn = frozenset(
+        sum([[atm, -atm] for atm in signature_common], [])
+    )
+    signature_diffs_pn = [
+        frozenset(
+            sum([[atm, -atm] for atm in f_sig-signature_common], [])
+        )
+        for f_sig in factor_signatures
+    ]
+    factors_partitioned = [
+        {(ff&signature_common_pn, ff&sig_diff) for ff in f}
+        for f, sig_diff in zip(factors, signature_diffs_pn)
+    ]
+
+    # Collect factor-specific cases by common cases
+    factored_cases = defaultdict(lambda: defaultdict(set))
+    for fi, per_factor in enumerate(factors_partitioned):
+        for f_common, f_uniq in per_factor:
+            factored_cases[fi][f_common].add(f_uniq)
+
+    # Combine and expand each product of factor-specific cases
+    valid_cases_common = set.intersection(*[
+        set(cases_common) for cases_common in factored_cases.values()
+    ])
+    valid_cases_by_common = defaultdict(list)
+    for case_common in valid_cases_common:
+        for fi, f_common in factored_cases.items():
+            valid_cases_by_common[case_common].append(
+                frozenset(f_common[case_common])
+            )
+    valid_cases = {
+        case_common: [
+            case_sp for case_sp in product(*case_specifics)
+            if _literal_set_is_consistent(frozenset.union(*case_sp))
+        ]
+        for case_common, case_specifics in valid_cases_by_common.items()
+    }
 
     # Compute entry values for possible cases considered
     combined_factor = {}
-    for case in product(*factors):
-        # Union of case specification
-        case_union = frozenset.union(*case)
+    for case_common, case_specifics in valid_cases.items():
+        for case_sp in case_specifics:
+            # Corresponding entry fetched from the factor
+            entries_per_factor = [
+                factors[i][frozenset.union(c, case_common)]
+                for i, c in enumerate(case_sp)
+            ]
 
-        # Incompatible, cannot combine
-        if not _literal_set_is_consistent(case_union): continue
+            # Ensure combination is happening at the outer layer for all factors
+            assert isinstance(entries_per_factor[0], dict)
+            assert all(
+                type(e) == type(entries_per_factor[0]) for e in entries_per_factor
+            )
 
-        # Corresponding entry fetched from the factor
-        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
+            case_union = frozenset.union(case_common, *case_sp)
 
-        # Ensure combination is happening at the outer layer for all factors
-        assert isinstance(entries_per_factor[0], dict)
-        assert all(type(e) == type(entries_per_factor[0]) for e in entries_per_factor)
-
-        # Outer-layer combination where entries can be considered 'mini-factors'
-        # defined per postive atom clearances
-        combined_factor[case_union] = _combine_factors_inner(entries_per_factor)
+            # Outer-layer combination where entries can be considered 'mini-factors'
+            # defined per postive atom clearances
+            combined_factor[case_union] = _combine_factors_inner(entries_per_factor)
 
     return combined_factor
 
