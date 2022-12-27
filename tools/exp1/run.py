@@ -58,7 +58,6 @@ def main(cfg):
                 "champagne_coupe.n.*",
                 "burgundy_glass.n.*",
                 "brandy_glass.n.*",
-                "riesling_glass.n.*",
                 "martini_glass.n.*",
                 "bordeaux_glass.n.*"
             ]
