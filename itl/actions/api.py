@@ -19,7 +19,7 @@ from ..lpmln import Literal
 from ..lpmln.utils import flatten_head_body
 
 
-SC_THRES = 0.1          # Binary decision score threshold
+SC_THRES = 0.15         # Binary decision score threshold
 
 class AgentCompositeActions:
     

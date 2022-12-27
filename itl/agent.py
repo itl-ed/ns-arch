@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 SR_THRES = 0.5               # Mismatch surprisal threshold
-SC_THRES = 0.1               # Binary decision score threshold
+SC_THRES = 0.15              # Binary decision score threshold
 U_IN_PR = 1.00               # How much the agent values information provided by the user
 A_IM_PR = 0.80               # How much the agent values inferred implicature
 EPS = 1e-10                  # Value used for numerical stabilization
@@ -179,7 +179,7 @@ class ITLAgent:
 
         agent_answers = {
             c: (0.0 if (d,) not in answers_raw else answers_raw[(d,)])
-                if d != "cls_-1" else 0.1
+                if d != "cls_-1" else 0.15
             for c, d in zip(concepts, denotations)
         }
 
