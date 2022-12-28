@@ -366,10 +366,10 @@ def _map_and_format(data, ref_map, ti, si, r2i, se2i):
 
             return f"{term_char}{r2i[rf]}{turn_clause_tag}"
 
-    process_conjuncts = lambda conjs: tuple(
-        (cnj[0], cnj[1], tuple(fmt(a) for a in cnj[2]), cnj[3])
-            if isinstance(cnj, tuple) else list(process_conjuncts(cnj))
-        for cnj in conjs
+    process_conjuncts = lambda conjuncts: tuple(
+        (cnjt[0], cnjt[1], tuple(fmt(a) for a in cnjt[2]), cnjt[3])
+            if isinstance(cnjt, tuple) else list(process_conjuncts(cnjt))
+        for cnjt in conjuncts
     )
 
     if isinstance(data[0], list):

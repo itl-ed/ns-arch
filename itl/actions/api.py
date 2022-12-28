@@ -19,8 +19,6 @@ from ..lpmln import Literal
 from ..lpmln.utils import flatten_head_body
 
 
-SC_THRES = 0.15         # Binary decision score threshold
-
 class AgentCompositeActions:
     
     def __init__(self, agent):
@@ -187,7 +185,8 @@ class AgentCompositeActions:
         assert question is not None
 
         q_vars, (head, _) = question
-        bjt_vl, _ = self.agent.symbolic.concl_vis_lang
+        bjt_v, _ = self.agent.symbolic.concl_vis
+        # bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
         # # New dialogue turn & clause index for the answer to be provided
         ti_new = len(self.agent.lang.dialogue.record)
@@ -210,7 +209,7 @@ class AgentCompositeActions:
         # critical influence on the symbolic sensemaking process. Make sure such entities, if
         # actually present, are captured in scene graphs by performing visual search as needed.
         if len(self.agent.lt_mem.kb.entries) > 0:
-            search_specs = self._search_specs_from_kb(question, bjt_vl)
+            search_specs = self._search_specs_from_kb(question, bjt_v)
             if len(search_specs) > 0:
                 self.agent.vision.predict(
                     None, self.agent.lt_mem.exemplars,
@@ -221,12 +220,13 @@ class AgentCompositeActions:
                 exported_kb = self.agent.lt_mem.kb.export_reasoning_program()
                 self.agent.symbolic.sensemake_vis(self.agent.vision.scene, exported_kb)
                 self.agent.symbolic.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
-                self.agent.symbolic.sensemake_vis_lang(dialogue_state)
+                # self.agent.symbolic.sensemake_vis_lang(dialogue_state)
 
-                bjt_vl, _ = self.agent.symbolic.concl_vis_lang
+                bjt_v, _ = self.agent.symbolic.concl_vis
+                # bjt_vl, _ = self.agent.symbolic.concl_vis_lang
 
         # Compute raw answer candidates by appropriately querying compiled BJT
-        answers_raw = self.agent.symbolic.query(bjt_vl, *question)
+        answers_raw = self.agent.symbolic.query(bjt_v, *question)
 
         if q_vars is not None:
             # (Temporary) Enforce non-part concept as answer. This may be enforced in a more
@@ -274,12 +274,10 @@ class AgentCompositeActions:
                 tgt = dialogue_state["referents"]["dis"][qv]["provenance"]
                 replace_targets.append(tgt)
 
-                low_confidence = ev_prob is not None and ev_prob < SC_THRES
-
                 # Value to replace the designated wh-quantified referent with
                 if is_pred:
                     # Predicate name; fetch from lexicon
-                    if ans is None or low_confidence:
+                    if ans is None:
                         # No answer predicate to "What is X" question; let's simply generate
                         # "I am not sure" as answer for these cases
                         self.agent.lang.dialogue.to_generate.append(
@@ -297,7 +295,7 @@ class AgentCompositeActions:
                         # Update cognitive state w.r.t. value assignment and word sense
                         self.agent.symbolic.value_assignment[ri] = \
                             pred_var_to_ent_ref[qv]
-                        tok_ind = (f"t{ti_new}", f"c{ci_new}", "r", "h0")
+                        tok_ind = (f"t{ti_new}", f"c{ci_new}", "rh", "0")
                         self.agent.symbolic.word_senses[tok_ind] = \
                             ((conc_type_to_pos[ans[1]], nl_val), f"{ans[1]}_{ans[0]}")
 
@@ -307,10 +305,7 @@ class AgentCompositeActions:
                 else:
                     # Entity by their constant name handle
                     is_named = True
-                    if low_confidence:
-                        nl_val = None
-                    else:
-                        nl_val = ans
+                    nl_val = ans
 
                     # TODO?: Logical form for this case
                     raise NotImplementedError
@@ -459,7 +454,7 @@ class AgentCompositeActions:
 
                 # Disregard if there's already an isomorphic literal set
                 has_isomorphic_spec = any(
-                    Literal.isomorphism_btw(lits, spc[1]) is not None
+                    Literal.entailing_mapping_btw(lits, spc[1])[1] == 0
                     for spc in final_specs
                 )
                 if has_isomorphic_spec:

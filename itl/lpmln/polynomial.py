@@ -114,6 +114,9 @@ class Polynomial:
             # Multiplication by zero
             return Polynomial(float_val=0.0)
 
+        if self.is_one(): return other
+        if other.is_one(): return self
+
         if hasattr(self, "denom_terms") or hasattr(other, "denom_terms"):
             # If fractions are involved, need recursive calls
             # and denominators
@@ -129,24 +132,35 @@ class Polynomial:
                 # other is a fraction
                 new_denom_poly = new_denom_poly * Polynomial(terms=other.denom_terms)
 
-            if new_denom_poly.terms != { 0: 0.0 }:
+            if not new_denom_poly.is_one():
                 setattr(multiplied, "denom_terms", new_denom_poly.terms)
 
             return multiplied
 
         else:
             # Base case; multiplication of two polys without denominators
-            term_products = product(self.terms.items(), other.terms.items())
-            expanded_terms = [
-                (deg1+deg2, coeff1+coeff2)
-                for (deg1, coeff1), (deg2, coeff2) in term_products
-            ]
+            # term_products = product(self.terms.items(), other.terms.items())
+            # expanded_terms = [
+            #     (deg1+deg2, coeff1+coeff2)
+            #     for (deg1, coeff1), (deg2, coeff2) in term_products
+            # ]
 
-            poly_product_terms = defaultdict(lambda: float("-inf"))
-            for deg, coeff in expanded_terms:
-                poly_product_terms[deg] = float(np.logaddexp(poly_product_terms[deg], coeff))
+            # poly_product_terms = defaultdict(lambda: float("-inf"))
+            # for deg, coeff in expanded_terms:
+            #     poly_product_terms[deg] = float(np.logaddexp(poly_product_terms[deg], coeff))
 
-            return Polynomial(terms=poly_product_terms)
+            # return Polynomial(terms=poly_product_terms)
+
+            # Let's approximate by multiplying only the max-a-order terms from
+            # self and other, as lower a-order terms will be sent to zero when
+            # a is sent to inf at limit
+            max_ord_s = max(self.terms)
+            max_ord_o = max(other.terms)
+            coeff_s = self.terms[max_ord_s]
+            coeff_o = other.terms[max_ord_o]
+            approx_product_terms = { max_ord_s+max_ord_o: coeff_s+coeff_o }
+
+            return Polynomial(terms=approx_product_terms)
 
     def __truediv__(self, other):
         """ Division of self by some other polynomial """
@@ -174,6 +188,12 @@ class Polynomial:
     def is_zero(self):
         """ Test if the value of self is zero (empty self.terms) """
         return len(self.terms) == 0
+
+    def is_one(self):
+        if hasattr(self, "denom_terms"):
+            return self.terms == self.denom_terms
+        else:
+            return self.terms == { 0: 0.0 }
 
     def at_limit(self):
         """

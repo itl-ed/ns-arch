@@ -117,41 +117,6 @@ class Rule:
         """ Returns True if the rule is variable-free """
         return all(not is_var for _, is_var in self.terms())
 
-    def is_isomorphic_to(self, other):
-        """
-        Return true if self is isomorphic to other up to variable renaming (but not constant
-        renaming)
-        """
-        # Trivially true if equal
-        if self == other: return True
-
-        # False if heads/bodies have different length
-        if len(self.head) != len(other.head): return False
-        if len(self.body) != len(other.body): return False
-
-        # False if heads/bodies have predicate mismatch
-        head_preds_s = {(hl.name, len(hl.args)) for hl in self.head}
-        head_preds_o = {(hl.name, len(hl.args)) for hl in other.head}
-        if head_preds_s != head_preds_o: return False
-        body_preds_s = {(bl.name, len(bl.args)) for bl in self.body}
-        body_preds_o = {(bl.name, len(bl.args)) for bl in other.body}
-        if body_preds_s != body_preds_o: return False
-
-        terms_s = self.terms(); terms_o = other.terms()
-
-        consts_s = {t for t, is_var in terms_s if not is_var}
-        consts_o = {t for t, is_var in terms_o if not is_var}
-
-        for c_o in consts_o:
-            if c_o not in consts_s:
-                return False            # Found constant that cannot be matched
-
-        # Try to find isomorphism
-        ism = Literal.isomorphism_btw(self.head, other.head)
-        ism = Literal.isomorphism_btw(self.body, other.body, ism=ism)
-
-        return ism is not None
-
     def is_instance_of(self, other):
         """
         Returns true if self can be instantiated from other by grounding variables (if any)

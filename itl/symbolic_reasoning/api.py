@@ -181,10 +181,10 @@ class SymbolicReasonerModule:
         # Recursive helper methods for extracting predicates and args & flattening
         # nested lists with arbitrary depths into a single list (along with pointer
         # to source location)
-        extract_preds = lambda cnj: cnj[:2] if isinstance(cnj, tuple) \
-            else [extract_preds(nc) for nc in cnj]
-        extract_args = lambda cnj: cnj[2] if isinstance(cnj, tuple) \
-            else [extract_args(nc) for nc in cnj]
+        extract_preds = lambda cnjt: cnjt[:2] if isinstance(cnjt, tuple) \
+            else [extract_preds(nc) for nc in cnjt]
+        extract_args = lambda cnjt: cnjt[2] if isinstance(cnjt, tuple) \
+            else [extract_args(nc) for nc in cnjt]
         def flatten(ls):
             for ind, x in enumerate(ls):
                 if isinstance(x, list):
@@ -440,16 +440,16 @@ class SymbolicReasonerModule:
 
         # Recursive helper methods for encoding pre-translation tuples representing
         # literals into actual Literal objects
-        encode_lits = lambda cnj, ti, ci, rqhb, inds: Literal(
+        encode_lits = lambda cnjt, ti, ci, rqhb, inds: Literal(
                 self.word_senses.get(
                     (f"t{ti}",f"c{ci}",rqhb)+tuple(str(i) for i in inds),
-                    # If not found (likely reserved predicate), fall back to cnj's pred
-                    (None, "_".join(cnj[1::-1]))
+                    # If not found (likely reserved predicate), fall back to cnjt's pred
+                    (None, "_".join(cnjt[1::-1]))
                 )[1],
-                args=wrap_args(*a_map(cnj[2])), naf=cnj[3]
+                args=wrap_args(*a_map(cnjt[2])), naf=cnjt[3]
             ) \
-            if isinstance(cnj, tuple) \
-            else [encode_lits(nc, ti, ci, rqhb, inds+(i,)) for i, nc in enumerate(cnj)]
+            if isinstance(cnjt, tuple) \
+            else [encode_lits(nc, ti, ci, rqhb, inds+(i,)) for i, nc in enumerate(cnjt)]
 
         record_translated = []
         for ti, (speaker, turn_clauses) in enumerate(dialogue_state["record"]):
@@ -527,6 +527,8 @@ class SymbolicReasonerModule:
         """
         dprog = Program()
         bjt_v, prog = self.concl_vis
+
+        # TODO (in some future): Incremental BJT update from existing bjt_v and additional dprog info
 
         # Incorporate additional information provided by the user in language for updated
         # sensemaking

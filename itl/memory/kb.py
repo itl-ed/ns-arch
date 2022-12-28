@@ -2,7 +2,7 @@ import re
 from collections import defaultdict
 
 from ..lpmln import Literal, Rule, Program
-from ..lpmln.utils import logit, sigmoid, wrap_args, flatten_head_body
+from ..lpmln.utils import wrap_args, flatten_head_body, unify_mappings
 
 
 P_C = 0.01          # Catchall hypothesis probability
@@ -50,62 +50,134 @@ class KnowledgeBase:
         """ Returns whether KB is expanded or not """
         head, body = rule
 
-        # Neutralizing variable & function names by stripping off turn/clause indices, etc.
+        # Neutralizing variable & function names by stripping off turn/clause
+        # indices, etc.
         rename_var = {
-            a for a, _ in _flatten(_extract_terms(head+body)) if isinstance(a, str)
+            a for a, _ in _flatten(_extract_terms(head+body))
+            if isinstance(a, str)
         }
         rename_var = {
-            (vn, True): (re.match("(.+?)(t\d+c\d+)?$", vn).group(1), True) for vn in rename_var
+            (vn, True): (re.match("(.+?)(t\d+c\d+)?$", vn).group(1), True)
+            for vn in rename_var
         }
         rename_fn = {
-            a[0] for a, _ in _flatten(_extract_terms(head+body)) if isinstance(a, tuple)
+            a[0] for a, _ in _flatten(_extract_terms(head+body))
+            if isinstance(a, tuple)
         }
         rename_fn = {
-            fn: re.match("(.+?)(_.+)?$", fn).group(1)+f"_{i}" for i, fn in enumerate(rename_fn)
+            fn: re.match("(.+?)(_.+)?$", fn).group(1)+f"_{i}"
+            for i, fn in enumerate(rename_fn)
         }
         head = tuple(_substitute(h, rename_var, rename_fn) for h in head)
         body = tuple(_substitute(b, rename_var, rename_fn) for b in body)
 
-        occurring_preds = set(_flatten(_extract_preds(head+body)))
+        preds_head = set(_flatten(_extract_preds(head)))
+        preds_body = set(_flatten(_extract_preds(body)))
 
-        # Check if the input knowledge is already contained in the KB
-        matched_entry_id = None
-        entries_with_overlap = set.intersection(*[
-            self.entries_by_pred[pred] for pred in occurring_preds
-        ])          # Initial filtering out entries without any overlapping
+        # Check if the input knowledge can be logically entailed by some existing
+        # KB entry (or is already contained in the KB). For now, just check
+        # simple one-step entailments (by A,B |- A).
 
+        # Initial filtering of irrelevant entries without any overlapping for
+        # both head and body
+        entries_with_overlap = set.union(*[
+            self.entries_by_pred[pred] for pred in preds_head
+        ]) & set.union(*[
+            self.entries_by_pred[pred] for pred in preds_body
+        ])
+
+        entries_entailed = set()       # KB entries entailed by input
+        entries_entailing = set()      # KB entries that entail input
         for ent_id in entries_with_overlap:
-            (ent_head, ent_body), _ = self.entries[ent_id]
+            (ent_head, ent_body), ent_weight, _ = self.entries[ent_id]
 
-            # Don't even bother with different set sizes
-            if len(head) != len(ent_head): continue
-            if len(body) != len(ent_body): continue
+            # Find (partial) term mapping between the KB entry and input with
+            # which they can unify
+            mapping_b, ent_dir_b = Literal.entailing_mapping_btw(
+                body, ent_body
+            )
+            if mapping_b is not None:
+                mapping_h, ent_dir_h = Literal.entailing_mapping_btw(
+                    head, ent_head, mapping_b
+                )
+                if mapping_h is not None and {ent_dir_h, ent_dir_b} != {1, -1}:
+                    # Entailment relation detected
+                    if ent_dir_h >= 0 and ent_dir_b <= 0 and weight >= ent_weight:
+                        entries_entailed.add(ent_id)
+                    if ent_dir_h <= 0 and ent_dir_b >= 0 and weight <= ent_weight:
+                        entries_entailing.add(ent_id)
 
-            head_isomorphic = Literal.isomorphic_conj_pair(head, ent_head)
-            body_isomorphic = Literal.isomorphic_conj_pair(body, ent_body)
-
-            if head_isomorphic and body_isomorphic:
-                # Match found; record ent_id and break
-                matched_entry_id = ent_id
-                break
-
-        is_new_entry = matched_entry_id is None
-        if is_new_entry:
-            # If not contained, add the rules as a new entry along with the weight-source
-            # pair and index it by predicate
-            self.entries.append(((head, body), {(weight, source)}))
-            for pred in occurring_preds:
+        if len(entries_entailing) == len(entries_entailed) == 0:
+            # Add the input as a whole new entry along with the weight & source
+            # and index it by occurring predicates
+            self.entries.append(((head, body), weight, [(source, weight)]))
+            for pred in preds_head | preds_body:
                 self.entries_by_pred[pred].add(len(self.entries)-1)
+            
+            kb_updated = True
         else:
-            # If already contained, add to existing set of weight-source pairs for the rules
-            # (only if from new source)
-            _, metadata = self.entries[matched_entry_id]
-            existing_sources = {src for _, src in metadata}
+            # Due to the invariant condition that there's no two KB entries such
+            # that one is strictly stronger than the other, the input shouldn't be
+            # entailed by some entries and entail others at the same time -- except
+            # for the case of exact match.
+            if len(entries_entailing) > 0 and len(entries_entailed) > 0:
+                assert entries_entailing == entries_entailed
+                # Equivalent entry exists; just add to provenance list
+                for ent_id in entries_entailing:
+                    self.entries[ent_id][2].append((source, weight))
 
-            if source not in existing_sources:
-                metadata.add((weight, source))
+                kb_updated = False
 
-        return is_new_entry
+            else:
+                if len(entries_entailed) > 0:
+                    # Stronger input entails some KB entries and render them
+                    # 'obsolete'; the entailed entries may be removed and merged
+                    # into the newly added entry
+
+                    # First find the mapping from previous set of indices to new 
+                    # set of indices, as indices will change as entries shift
+                    # their positions to fill in blank positions
+                    ind_map = {}; ni = 0
+                    for ent_id in range(len(self.entries)):
+                        if ent_id in entries_entailed:
+                            ni += 1
+                        else:
+                            ind_map[ent_id] = ent_id - ni
+
+                    # Also collect the provenance lists for the entries to be
+                    # removed, so that they can be added to that of the new entry
+                    existing_provenances = sum([
+                        self.entries[ent_id][2] for ent_id in entries_entailed
+                    ], [])
+
+                    # Cull the weaker entries and update entry indexing by predicate
+                    # (self.entries_by_pred) according to the mapping found above
+                    self.entries = [
+                        entry for ent_id, entry in enumerate(self.entries)
+                        if ent_id in ind_map
+                    ]
+                    self.entries_by_pred = {
+                        pred: {ind_map[ei] for ei in ent_ids if ei in ind_map}
+                        for pred, ent_ids in self.entries_by_pred.items()
+                    }
+
+                    # Finally add the stronger input as new entry
+                    self.entries.append(
+                        ((head, body), weight, [(source, weight)]+existing_provenances)
+                    )
+                    for pred in preds_head | preds_body:
+                        self.entries_by_pred[pred].add(len(self.entries)-1)
+
+                    kb_updated = True
+                else:
+                    assert len(entries_entailing) > 0
+                    # Entry entailing the given input exists; just add to provenance list
+                    for ent_id in entries_entailing:
+                        self.entries[ent_id][2].append((source, weight))
+
+                    kb_updated = False
+
+        return kb_updated
 
     def export_reasoning_program(self):
         """
@@ -150,7 +222,7 @@ class KnowledgeBase:
         intermediate_outputs = []
 
         # Process each entry
-        for i, (rule, _) in enumerate(self.entries):
+        for i, (rule, weight, _) in enumerate(self.entries):
             head, body = flatten_head_body(*rule)
 
             # Keep track of variable names used to avoid accidentally using
@@ -242,8 +314,8 @@ class KnowledgeBase:
             # translation (thus, no need to consider headless constraints)
             if len(head) > 0:
                 for h_lits in entries_by_head:
-                    ism = Literal.isomorphism_btw(head, h_lits)
-                    if ism is not None:
+                    ism, ent_dir = Literal.entailing_mapping_btw(head, h_lits)
+                    if ent_dir == 0:
                         entries_by_head[h_lits].append((i, ism))
                         break
                 else:
@@ -253,7 +325,6 @@ class KnowledgeBase:
             def add_assignment_choices(fn_terms, sat_conds):
                 for ft in fn_terms:
                     # Function arguments and function term lifted
-                    fn_args = wrap_args(*ft[0][1])
                     ft_lifted = fn_lifting_map[ft]
 
                     # Filter relevant conditions for filtering options worth considering
@@ -277,10 +348,8 @@ class KnowledgeBase:
             ))
             
             # Add appropriately weighted rule for applying 'probabilistic pressure'
-            # against to deductive rule violation
-            provenances = self.entries[i][1]
-            r_pr = sigmoid(sum(logit(w) for w, _ in provenances))
-            inference_prog.add_rule(Rule(body=r_unsat_lit), r_pr)
+            # against deductive rule violation
+            inference_prog.add_rule(Rule(body=r_unsat_lit), weight)
 
             # Store intermediate outputs for later reuse
             intermediate_outputs.append((
@@ -352,12 +421,12 @@ class KnowledgeBase:
 # Recursive helper methods for fetching predicate terms and names, substituting
 # variables and function names while preserving structure, and flattening nested
 # lists with arbitrary depths into a single list
-_extract_terms = lambda cnj: cnj.args if isinstance(cnj, Literal) \
-    else [_extract_terms(nc) for nc in cnj]
-_extract_preds = lambda cnj: cnj.name if isinstance(cnj, Literal) \
-    else [_extract_preds(nc) for nc in cnj]
-_substitute = lambda cnj, ts, fs: cnj.substitute(terms=ts, functions=fs) \
-    if isinstance(cnj, Literal) else [_substitute(nc, ts, fs) for nc in cnj]
+_extract_terms = lambda cnjt: cnjt.args if isinstance(cnjt, Literal) \
+    else [_extract_terms(nc) for nc in cnjt]
+_extract_preds = lambda cnjt: cnjt.name if isinstance(cnjt, Literal) \
+    else [_extract_preds(nc) for nc in cnjt]
+_substitute = lambda cnjt, ts, fs: cnjt.substitute(terms=ts, functions=fs) \
+    if isinstance(cnjt, Literal) else [_substitute(nc, ts, fs) for nc in cnjt]
 def _flatten(ls):
     for x in ls:
         if isinstance(x, list):

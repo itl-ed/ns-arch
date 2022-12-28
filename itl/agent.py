@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 SR_THRES = 0.5               # Mismatch surprisal threshold
-SC_THRES = 0.15              # Binary decision score threshold
 U_IN_PR = 1.00               # How much the agent values information provided by the user
 A_IM_PR = 0.80               # How much the agent values inferred implicature
 EPS = 1e-10                  # Value used for numerical stabilization
@@ -82,10 +81,6 @@ class ITLAgent:
         # with which scalar implicatures will be computed. Won't be necessary
         # if we were to use more structured discourse representation...
         self.kb_snap = copy.deepcopy(self.lt_mem.kb.entries_by_pred)
-
-        # (Temporary) Restrict our attention to newly acquired visual concepts
-        # when it comes to dealing with concept confusions
-        self.cls_offset = self.vision.inventories.cls
 
     def __call__(self):
         """Main function: Kickstart infinite ITL agent loop with user interface"""
@@ -179,7 +174,7 @@ class ITLAgent:
 
         agent_answers = {
             c: (0.0 if (d,) not in answers_raw else answers_raw[(d,)])
-                if d != "cls_-1" else 0.15
+                if d != "cls_-1" else 0.1
             for c, d in zip(concepts, denotations)
         }
 
@@ -389,10 +384,10 @@ class ITLAgent:
 
         # Recursive helper methods for checking whether rule head/body is grounded
         # (variable-free) or lifted (all variables)
-        is_grounded = lambda cnj: all(not is_var for _, is_var in cnj.args) \
-            if isinstance(cnj, Literal) else all(is_grounded(nc) for nc in cnj)
-        is_lifted = lambda cnj: all(is_var for _, is_var in cnj.args) \
-            if isinstance(cnj, Literal) else all(is_lifted(nc) for nc in cnj)
+        is_grounded = lambda cnjt: all(not is_var for _, is_var in cnjt.args) \
+            if isinstance(cnjt, Literal) else all(is_grounded(nc) for nc in cnjt)
+        is_lifted = lambda cnjt: all(is_var for _, is_var in cnjt.args) \
+            if isinstance(cnjt, Literal) else all(is_lifted(nc) for nc in cnjt)
 
         # Keep updating beliefs until there's no more immediately exploitable learning
         # opportunities
@@ -461,9 +456,9 @@ class ITLAgent:
                     dialogue_state, self.lt_mem.lexicon
                 )
 
-                if self.vision.scene is not None:
-                    # Sensemaking from vision & language input
-                    self.symbolic.sensemake_vis_lang(dialogue_state)
+                # if self.vision.scene is not None:
+                #     # Sensemaking from vision & language input
+                #     self.symbolic.sensemake_vis_lang(dialogue_state)
 
             ###################################################################
             ##           Identify & exploit learning opportunities           ##
@@ -527,30 +522,31 @@ class ITLAgent:
                             # the single and first entity from the arg list
                             conc_type, conc_ind = lit.name.split("_")
                             conc_ind = int(conc_ind)
-                            ent = lit.args[0][0]
 
-                            # (Temporary) Only consider non-part concepts as potential
-                            # cases of confusion. This may be enforced in a more elegant
-                            # way in the future..
-                            cls_probs = self.vision.scene[ent]["pred_classes"][self.cls_offset:]
+                            if (conc_ind, conc_type) not in novel_concepts:
+                                # Fetch agent's last answer from dialogue record
+                                agent_utts = [
+                                    rule
+                                    for speaker, turn_clauses in translated
+                                    for (rule, _), _ in turn_clauses
+                                    if speaker == "A" and rule is not None \
+                                        and len(rule[0])==1 and rule[1] is None
+                                ]
+                                if len(agent_utts) > 0:
+                                    agent_last_ans = agent_utts[-1][0][0]
+                                    _, agent_last_ans = agent_last_ans.name.split("_")
+                                    agent_last_ans = int(agent_last_ans)
+                                else:
+                                    agent_last_ans = None
 
-                            if ((conc_ind, conc_type) not in novel_concepts and
-                                len(cls_probs) >= 2):
-                                # Highest-score concept prediction for the entity of interest,
-                                # and prediction score for true label
-                                best_ind = np.argmax(cls_probs)
-                                true_conc_score = cls_probs[conc_ind-self.cls_offset]
+                                if agent_last_ans is not None and agent_last_ans != conc_ind:
+                                    # Potential confusion case, as unordered label pair
+                                    confusion_pair = frozenset([agent_last_ans, conc_ind])
 
-                                confusion_pair = frozenset(
-                                    [best_ind+self.cls_offset, conc_ind]
-                                )       # Potential confusion case, as unordered label pair
-
-                                if (best_ind+self.cls_offset != conc_ind and
-                                    true_conc_score >= SC_THRES and
-                                    ("cls", confusion_pair) not in self.confused_no_more):
-                                    # Agent's best guess disagrees with the user-provided
-                                    # information, and score gap is small
-                                    self.vision.confusions.add(("cls", confusion_pair))
+                                    if ("cls", confusion_pair) not in self.confused_no_more:
+                                        # Agent's best guess disagrees with the user-provided
+                                        # information
+                                        self.vision.confusions.add(("cls", confusion_pair))
 
                     # Symbolic knowledge base expansion; for generic rules without
                     # constant terms. Integrate the rule into KB by adding (for now
@@ -630,8 +626,8 @@ class ITLAgent:
             
             # Recursive helper method for substituting predicates while preserving
             # structure
-            _substitute = lambda cnj, ps: cnj.substitute(preds=ps) \
-                if isinstance(cnj, Literal) else [_substitute(nc, ps) for nc in cnj]
+            _substitute = lambda cnjt, ps: cnjt.substitute(preds=ps) \
+                if isinstance(cnjt, Literal) else [_substitute(nc, ps) for nc in cnjt]
 
             # Scalar implicature; infer implicit concept similarities by copying
             # properties for c1/c2 and replacing the predicates with c2/c1, unless
@@ -645,7 +641,7 @@ class ITLAgent:
                     # Existing properties of c1
                     for i in self.kb_snap[c1]:
                         # Fetch KB entry
-                        (head, body), _ = self.lt_mem.kb.entries[i]
+                        (head, body), *_ = self.lt_mem.kb.entries[i]
 
                         # Replace occurrences of c1 with c2
                         head = tuple(_substitute(h, { c1: c2 }) for h in head)

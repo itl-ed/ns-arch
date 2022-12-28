@@ -5,6 +5,8 @@ from itertools import permutations
 
 import clingo
 
+from .utils import unify_mappings
+
 
 class Literal:
     """
@@ -175,129 +177,218 @@ class Literal:
         return Literal(name=name, args=args)
 
     @staticmethod
-    def isomorphism_btw(lits1, lits2, ism=None):
+    def entailing_mapping_btw(iter1, iter2, mapping=None):
         """
-        Helper method for testing whether two iterables of literals are isomorphic up to
-        variable & function renaming. Return an isomorphism if found to be so; otherwise,
-        return None.
+        Helper method for testing whether two finite iterables of literals or negated
+        conjunctions of literals, representing conjunctions of the components, are
+        (partially) mappable up to variable & function renaming, so that one entails
+        the other under the mapping. Return a mapping if found one, along with 3-valued
+        flag of the direction of entailment.
         """
-        if len(lits1) != len(lits2):
-            # Don't even bother
-            return None
+        mapping = mapping or { "terms": {}, "functions": {} }
 
-        isomorphism = ism or {
-            "terms": {}, "functions": {}
-        }
-        for hl_s in lits1:
-            lit_matched = False
+        # Cast into sequences to assign indicies, in order to keep track of
+        # entailability between components
+        iter1 = tuple(iter1); iter2 = tuple(iter2)
+        entailabilities = {}
 
-            for hl_o in lits2:
-                potential_mapping = { "terms": {}, "functions": {} }
-                args_mappable = True
+        # 3-valued flags indicate value of iter1 - iter2 (analogously...):
+        #   0: iter1 and iter2 are equivalent (iter1 == iter2)
+        #   1: iter1 is strictly stronger and entails iter2 (iter1 > iter2)
+        #   -1: iter2 is strictly stronger and entails iter1 (iter1 < iter2)
 
-                if hl_s.name != hl_o.name:
-                    # Predicate name mismatch
-                    continue
+        for i1, cnjt1 in enumerate(iter1):
+            # Note: list type encodes negated conjunction
+            assert isinstance(cnjt1, Literal) or isinstance(cnjt1, list)
 
-                for sa, oa in zip(hl_s.args, hl_o.args):
-                    sa_term, sa_is_var = sa
-                    oa_term, oa_is_var = oa
+            for i2, cnjt2 in enumerate(iter2):
+                assert isinstance(cnjt2, Literal) or isinstance(cnjt2, list)
 
-                    if sa_is_var != oa_is_var:
-                        # Term type mismatch
-                        args_mappable = False; break
+                if isinstance(cnjt1, Literal) and isinstance(cnjt2, Literal):
+                    # Base case, both cnjt1 and cnjt2 are literals
+                    potential_mapping = { "terms": {}, "functions": {} }
+                    args_mappable = True
 
-                    if sa_is_var == oa_is_var == False:
-                        if sa_term != oa_term:
-                            # Constant term mismatch
+                    if cnjt1.name != cnjt2.name:
+                        # Predicate name mismatch
+                        entailabilities[(i1, i2)] = (None, None)
+                        continue
+
+                    for sa, oa in zip(cnjt1.args, cnjt2.args):
+                        sa_term, sa_is_var = sa
+                        oa_term, oa_is_var = oa
+
+                        if sa_is_var != oa_is_var:
+                            # Term type mismatch
                             args_mappable = False; break
-                    else:
-                        if type(sa_term) != type(oa_term):
-                            # Function vs. non-function term mismatch
-                            args_mappable = False; break
 
-                        if type(sa_term) == type(oa_term) == str:
-                            # Both args are variable terms
-                            if sa_term in isomorphism["terms"]:
-                                if isomorphism["terms"][sa_term] != oa_term:
-                                    # Conflict with existing mapping
-                                    args_mappable = False; break
-                            elif sa_term in potential_mapping["terms"]:
-                                if potential_mapping["terms"][sa_term] != oa_term:
-                                    # Conflict with existing potential mapping
-                                    args_mappable = False; break
-                            else:
-                                # Record potential mapping
-                                potential_mapping["terms"][sa_term] = oa_term
-
-                        elif type(sa_term) == type(oa_term) == tuple:
-                            sa_f_name, sa_f_args = sa_term
-                            oa_f_name, oa_f_args = oa_term
-
-                            if len(sa_f_args) != len(oa_f_args):
-                                # Function arity mismatch
+                        if sa_is_var == oa_is_var == False:
+                            if sa_term != oa_term:
+                                # Constant term mismatch
+                                args_mappable = False; break
+                        else:
+                            if type(sa_term) != type(oa_term):
+                                # Function vs. non-function term mismatch
                                 args_mappable = False; break
 
-                            # Function name mismatch
-                            if sa_f_name in isomorphism["functions"]:
-                                if isomorphism["functions"][sa_f_name] != oa_f_name:
-                                    # Conflict with existing mapping
-                                    args_mappable = False; break
-                            elif sa_f_name in potential_mapping["functions"]:
-                                if potential_mapping["functions"][sa_f_name] != oa_f_name:
-                                    # Conflict with existing potential mapping
-                                    args_mappable = False; break
-                            else:
-                                # Record potential mapping
-                                potential_mapping["functions"][sa_f_name] = oa_f_name
-
-                            for sfa, ofa in zip(sa_f_args, oa_f_args):
-                                if sfa in isomorphism["terms"]:
-                                    if isomorphism["terms"][sfa] != ofa:
+                            if type(sa_term) == type(oa_term) == str:
+                                # Both args are variable terms
+                                if sa_term in mapping["terms"]:
+                                    if mapping["terms"][sa_term] != oa_term:
                                         # Conflict with existing mapping
                                         args_mappable = False; break
-                                elif sfa in potential_mapping["terms"]:
-                                    if potential_mapping["terms"][sfa] != ofa:
+                                elif sa_term in potential_mapping["terms"]:
+                                    if potential_mapping["terms"][sa_term] != oa_term:
                                         # Conflict with existing potential mapping
                                         args_mappable = False; break
                                 else:
-                                    # Both args are variable terms, record potential mapping
-                                    potential_mapping["terms"][sfa] = ofa
-                        
-                        else:
-                            raise NotImplementedError
+                                    # Record potential mapping
+                                    potential_mapping["terms"][sa_term] = oa_term
 
-                if args_mappable:
-                    # Update isomorphism
-                    lit_matched = True
-                    isomorphism["terms"].update(potential_mapping["terms"])
-                    isomorphism["functions"].update(potential_mapping["functions"])
+                            elif type(sa_term) == type(oa_term) == tuple:
+                                sa_f_name, sa_f_args = sa_term
+                                oa_f_name, oa_f_args = oa_term
+
+                                if len(sa_f_args) != len(oa_f_args):
+                                    # Function arity mismatch
+                                    args_mappable = False; break
+
+                                # Function name mismatch
+                                if sa_f_name in mapping["functions"]:
+                                    if mapping["functions"][sa_f_name] != oa_f_name:
+                                        # Conflict with existing mapping
+                                        args_mappable = False; break
+                                elif sa_f_name in potential_mapping["functions"]:
+                                    if potential_mapping["functions"][sa_f_name] != oa_f_name:
+                                        # Conflict with existing potential mapping
+                                        args_mappable = False; break
+                                else:
+                                    # Record potential mapping
+                                    potential_mapping["functions"][sa_f_name] = oa_f_name
+
+                                for sfa, ofa in zip(sa_f_args, oa_f_args):
+                                    if sfa in mapping["terms"]:
+                                        if mapping["terms"][sfa] != ofa:
+                                            # Conflict with existing mapping
+                                            args_mappable = False; break
+                                    elif sfa in potential_mapping["terms"]:
+                                        if potential_mapping["terms"][sfa] != ofa:
+                                            # Conflict with existing potential mapping
+                                            args_mappable = False; break
+                                    else:
+                                        # Both args are variable terms, record potential mapping
+                                        potential_mapping["terms"][sfa] = ofa
+                            
+                            else:
+                                raise NotImplementedError
+
+                    if args_mappable:
+                        # Potential mapping found
+                        entailabilities[(i1, i2)] = (potential_mapping, 0)
+                    else:
+                        # Not entailable; discard potential mapping and move on
+                        entailabilities[(i1, i2)] = (None, None)
+
+                elif isinstance(cnjt1, list) and isinstance(cnjt2, list):
+                    # Recursive call for trying to find a mapping between the
+                    # two negated conjunctions
+                    nc_mapping, nc_entail_dir = Literal.entailing_mapping_btw(
+                        cnjt1, cnjt2, mapping
+                    )
+                    entailabilities[(i1, i2)] = (nc_mapping, nc_entail_dir)
+
                 else:
-                    # Discard potential mapping and move on
-                    continue
+                    # Type mismatch or invalid types
+                    entailabilities[(i1, i2)] = (None, None)
 
-            # Return None as soon as any literal is found to be unmappable to any
-            if not lit_matched: return None
-
-        # Successfully found an isomorphism
-        return isomorphism
+        # In order to find a valid final mapping, the mappings between components
+        # in iter1 & iter2 should be unifiable, either literals in iter1 or iter2
+        # must be exhausted ahd have consistent entailment directions. A mapping
+        # is considered 'complete' if both are exhausted (same length).
+        valid_prms = []
+        if len(iter1) >= len(iter2):
+            # All conjuncts in iter2 must be matched to some conjunct in iter1
+            for prm in permutations(range(len(iter1)), len(iter2)):
+                to_unify = [
+                    entailabilities[(i1, i2)] for i2, i1 in enumerate(prm)
+                ]
+                all_matched = all(
+                    mapping_piece is not None for mapping_piece, _ in to_unify
+                )
+                directions_consistent = not {1, -1}.issubset(
+                    {ent_dir for _, ent_dir in to_unify}
+                )
+                if all_matched and directions_consistent:
+                    terms_unified = unify_mappings(
+                        [mapping["terms"]] + \
+                            [mapping_piece["terms"] for mapping_piece, _ in to_unify]
+                    )
+                    fns_unified = unify_mappings(
+                        [mapping["functions"]] + \
+                            [mapping_piece["functions"] for mapping_piece, _ in to_unify]
+                    )
+                    if terms_unified is not None and fns_unified is not None:
+                        valid_prms.append((terms_unified, fns_unified))
+        else:
+            # len(iter1) < len(iter2):
+            # All conjuncts in iter1 must be matched to some conjunct in iter2
+            for prm in permutations(range(len(iter2)), len(iter1)):
+                to_unify = [
+                    entailabilities[(i1, i2)] for i1, i2 in enumerate(prm)
+                ]
+                all_matched = all(
+                    mapping_piece is not None for mapping_piece, _ in to_unify
+                )
+                directions_consistent = not {1, -1}.issubset(
+                    {ent_dir for _, ent_dir in to_unify}
+                )
+                if all_matched and directions_consistent:
+                    terms_unified = unify_mappings(
+                        [mapping["terms"]] + \
+                            [mapping_piece["terms"] for mapping_piece, _ in to_unify]
+                    )
+                    fns_unified = unify_mappings(
+                        [mapping["functions"]] + \
+                            [mapping_piece["functions"] for mapping_piece, _ in to_unify]
+                    )
+                    if terms_unified is not None and fns_unified is not None:
+                        valid_prms.append((terms_unified, fns_unified))
+        
+        if len(valid_prms) > 0:
+            # Valid permutation(s) found; use the first one in the list (not sure
+            # if there's any real difference between prms when more than one found)
+            final_mapping = {
+                "terms": valid_prms[0][0], "functions": valid_prms[0][0]
+            }
+            if len(iter1) > len(iter2):
+                entail_dir = 1
+            elif len(iter1) < len(iter2):
+                entail_dir = -1
+            else:
+                len(iter1) == len(iter2)
+                entail_dir = 0
+            
+            return final_mapping, entail_dir
+        else:
+            # No valid permutations found, no mapping
+            return None, None
 
     @staticmethod
-    def isomorphic_conj_pair(cnj1, cnj2):
+    def isomorphic_conj_pair(iter1, iter2):
         """
         Recursive helper method for checking whether two nested lists of Literals
         with arbitrary depths are isomorphic
         """
-        leaves1 = {l for l in cnj1 if isinstance(l, Literal)}
-        leaves2 = {l for l in cnj2 if isinstance(l, Literal)}
+        leaves1 = {l for l in iter1 if isinstance(l, Literal)}
+        leaves2 = {l for l in iter2 if isinstance(l, Literal)}
 
-        branches1 = [nc for nc in cnj1 if not isinstance(nc, Literal)]
-        branches2 = [nc for nc in cnj2 if not isinstance(nc, Literal)]
+        branches1 = [nc for nc in iter1 if not isinstance(nc, Literal)]
+        branches2 = [nc for nc in iter2 if not isinstance(nc, Literal)]
 
-        if Literal.isomorphism_btw(leaves1, leaves2) is None:
+        if Literal.entailing_mapping_btw(leaves1, leaves2)[1] != 0:
             # Not isomorphic if sets of leaf nodes are not isomorphic
             return False
-        
+
         if len(branches1) != len(branches2):
             # Not isomorphic if sets of branch nodes have different lengths
             return False

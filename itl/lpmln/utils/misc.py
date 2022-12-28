@@ -3,8 +3,6 @@ Miscellaneous utility methods that don't classify into other files in utils
 """
 import numpy as np
 
-from .. import Literal
-
 
 def wrap_args(*args):
     """
@@ -55,16 +53,18 @@ def flatten_head_body(head, body):
     Rearrange until any nested conjunctions are all properly flattened out,
     so that rule can be translated into appropriate ASP clause
     """
+    from .. import Literal
+
     head = list(head) if head is not None else []
     body = list(body) if body is not None else []
-    cnjs = head + body
-    while any(not isinstance(c, Literal) for c in cnjs):
+    conjuncts = head + body
+    while any(not isinstance(c, Literal) for c in conjuncts):
         # Migrate any negated conjunctions in head to body
-        cnjs_p = [h for h in head if isinstance(h, Literal)]
-        cnjs_n = [h for h in head if not isinstance(h, Literal)]
+        conjuncts_p = [h for h in head if isinstance(h, Literal)]
+        conjuncts_n = [h for h in head if not isinstance(h, Literal)]
 
-        head = cnjs_p
-        body = body + sum(cnjs_n, [])
+        head = conjuncts_p
+        body = body + sum(conjuncts_n, [])
 
         if any(not isinstance(c, Literal) for c in body):
             # Introduce auxiliary literals that are derived when
@@ -72,6 +72,21 @@ def flatten_head_body(head, body):
             # (Not needed, not implemented yet :p)
             raise NotImplementedError
 
-        cnjs = head + body
+        conjuncts = head + body
     
     return head, body
+
+def unify_mappings(mappings):
+    """
+    Find the unification of a sequence of mappings; return None if not unifiable
+    """
+    unified = {}
+    for mapping in mappings:
+        for k, v in mapping.items():
+            if k in unified:
+                if unified[k] != v:
+                    return None
+            else:
+                unified[k] = v
+
+    return unified

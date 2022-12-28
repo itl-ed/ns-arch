@@ -542,12 +542,143 @@ def _combine_factors_outer(factors):
         for f in factors
     )
 
-    # Efficient factor combination by exploiting factorization with common atom
-    # signatures and respective complements
+    # Valid unions of cases
+    valid_cases = _consistent_unions(factors)
 
+    # Compute entry values for possible cases considered
+    combined_factor = {}
+    for case_common, case_specifics in valid_cases.items():
+        for case_sp in case_specifics:
+            # Corresponding entry fetched from the factor
+            entries_per_factor = [
+                factors[i][frozenset.union(c, case_common)]
+                for i, c in enumerate(case_sp)
+            ]
+
+            case_union = frozenset.union(case_common, *case_sp)
+
+            # Outer-layer combination where entries can be considered 'mini-factors'
+            # defined per postive atom clearances
+            combined_factor[case_union] = _combine_factors_inner(entries_per_factor)
+
+    return combined_factor
+
+
+def _combine_factors_inner(factors):
+    """
+    Subroutine for combining a set of input factors at the inner-layer; entries
+    (which are Polynomials) are multiplied then marginalized by case union
+    """
+    assert len(factors) > 0
+
+    # Compute entry values for possible cases considered
+    combined_factor = defaultdict(lambda: Polynomial(float_val=0.0))
+    for case in product(*factors):
+        # Union of case specification
+        case_union = (
+            frozenset.union(*[c[0] for c in case]),
+            frozenset.union(*[c[1] for c in case]),
+        )
+
+        # Corresponding entry fetched from the factor
+        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
+
+        combined_factor[case_union] += reduce(operator.mul, entries_per_factor)
+
+    return dict(combined_factor)
+
+
+def _combine_factors_simple(factors):
+    """
+    Subroutine for combining a set of 'simple' factors without layers (likely those
+    stored in 'output_beliefs' register for a BJT node); entries are combined by
+    multiplication
+    """
+    assert len(factors) > 0
+
+    # Compute entry values for possible cases considered
+    combined_factor = {}
+    for case in product(*factors):
+        # Union of case specification
+        case_union = frozenset.union(*case)
+
+        # Incompatible, cannot combine
+        if not _literal_set_is_consistent(case_union): continue
+
+        # Corresponding entry fetched from the factor
+        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
+
+        # Outer-layer combination where entries can be considered 'mini-factors'
+        # defined per postive atom clearances
+        combined_factor[case_union] = reduce(operator.mul, entries_per_factor)
+
+    return combined_factor
+
+
+def _marginalize_outer(factor, node_set):
+    """
+    Subroutine for (partially) marginalizing a factor at the outer-layer (while
+    maintaining subdivision by positive requirement clearance) down to some domain
+    specified by node_set
+    """
+    marginalized_factor = defaultdict(
+        lambda: defaultdict(lambda: Polynomial(float_val=0.0))
+    )
+    node_set_pn = frozenset(sum([(n, -n) for n in node_set], ()))
+
+    for f_case, f_inner in factor.items():
+        matching_case = node_set_pn & f_case
+
+        for pos_clrs, val in f_inner.items():
+            marginalized_factor[matching_case][pos_clrs] += val
+
+    marginalized_factor = {
+        case: dict(outer_marginals)
+        for case, outer_marginals in marginalized_factor.items()
+    }
+
+    return marginalized_factor
+
+
+def _marginalize_simple(factor, node_set):
+    """
+    Subroutine for simple marginalization of factor without layers (likely those
+    stored in 'output_beliefs' register for a BJT node) down to some domain specified
+    by node_set
+    """
+    marginalized_factor = defaultdict(lambda: Polynomial(float_val=0.0))
+    node_set_pn = frozenset(sum([(n, -n) for n in node_set], ()))
+
+    for f_case, f_val in factor.items():
+        matching_case = node_set_pn & f_case
+        marginalized_factor[matching_case] += f_val
+
+    return dict(marginalized_factor)
+
+
+def _literal_set_is_consistent(lit_set):
+    """
+    Subroutine for checking if a set of literals (represented with signed integer
+    indices) is consistent; i.e. doesn't contain a literal and its negation at the
+    same time
+    """
+    atm_set = {abs(lit) for lit in lit_set}
+
+    # Inconsistent if and only if lit_set contained both atm & -atm for some atm,
+    # which would be reduced to atm in atm_set
+    return len(atm_set) == len(lit_set)
+
+
+def _consistent_unions(factors):
+    """
+    Efficient factor combination by exploiting factorization with common atom
+    signatures and respective complements
+    """
     # Find atoms common to all signatures of the factors, then partition each
     # case in the factors according to the partition
-    factor_signatures = [list(f)[0] for f in factors]
+    factor_signatures = [
+        frozenset(abs(atm) for atm in list(f)[0]) for f in factors
+    ]
     signature_common = frozenset.intersection(*factor_signatures)
     signature_common_pn = frozenset(
         sum([[atm, -atm] for atm in signature_common], [])
@@ -580,146 +711,44 @@ def _combine_factors_outer(factors):
                 frozenset(f_common[case_common])
             )
     valid_cases = {
-        case_common: [
-            case_sp for case_sp in product(*case_specifics)
-            if _literal_set_is_consistent(frozenset.union(*case_sp))
-        ]
+        case_common: reduce(_pairwise_consistent_unions, [[]]+case_specifics)
         for case_common, case_specifics in valid_cases_by_common.items()
     }
 
-    # Compute entry values for possible cases considered
-    combined_factor = {}
-    for case_common, case_specifics in valid_cases.items():
-        for case_sp in case_specifics:
-            # Corresponding entry fetched from the factor
-            entries_per_factor = [
-                factors[i][frozenset.union(c, case_common)]
-                for i, c in enumerate(case_sp)
-            ]
-
-            # Ensure combination is happening at the outer layer for all factors
-            assert isinstance(entries_per_factor[0], dict)
-            assert all(
-                type(e) == type(entries_per_factor[0]) for e in entries_per_factor
-            )
-
-            case_union = frozenset.union(case_common, *case_sp)
-
-            # Outer-layer combination where entries can be considered 'mini-factors'
-            # defined per postive atom clearances
-            combined_factor[case_union] = _combine_factors_inner(entries_per_factor)
-
-    return combined_factor
+    return valid_cases
 
 
-def _combine_factors_inner(factors):
+def _pairwise_consistent_unions(cumul, next_cases):
     """
-    Subroutine for combining a set of input factors at the inner-layer; entries
-    (which are Polynomials) are multiplied then marginalized by case union
+    Helper method to be provided as argument for functool.reduce(); collect
+    unions of cases that are consistent (i.e. doesn't contain some positive
+    literal atm and negative literal -atm at the same time), across some
+    sequence of set of cases. Intended to be used with sequences whose common
+    atoms in signatures are first factored out.
     """
-    assert len(factors) > 0
+    # Reduction of each choice of cases into component unions
+    if len(cumul) > 0:
+        cases_cumul = [frozenset.union(*c) for c in cumul]
+    else:
+        cases_cumul = [frozenset()]
 
-    # Compute entry values for possible cases considered
-    combined_factor = defaultdict(lambda: Polynomial(float_val=0.0))
-    for case in product(*factors):
-        # Union of case specification
-        case_union = (
-            frozenset.union(*[c[0] for c in case]),
-            frozenset.union(*[c[1] for c in case]),
-        )
+    # Common atom signatures between cumulation so far and next_cases
+    signature_common = {abs(a) for a in list(cases_cumul)[0]} & \
+        {abs(a) for a in list(next_cases)[0]}
+    signature_common_pn = set(sum([(-a, a) for a in signature_common], ()))
 
-        # Corresponding entry fetched from the factor
-        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
+    cumul_new = []
+    for i, lits1 in enumerate(cases_cumul):
+        cm_case1 = lits1 & signature_common_pn
 
-        # Ensure combination is happening at the outer layer for all factors
-        assert isinstance(entries_per_factor[0], Polynomial)
-        assert all(type(e) == type(entries_per_factor[0]) for e in entries_per_factor)
+        for lits2 in next_cases:
+            cm_case2 = lits2 & signature_common_pn
 
-        combined_factor[case_union] += reduce(operator.mul, entries_per_factor)
+            # Add to new cumulation list if not inconsistent
+            if cm_case1 == cm_case2:
+                if len(cumul) > 0:
+                    cumul_new.append(cumul[i] + (lits2,))
+                else:
+                    cumul_new.append((lits2,))
 
-    return dict(combined_factor)
-
-
-def _combine_factors_simple(factors):
-    """
-    Subroutine for combining a set of 'simple' factors without layers (likely those
-    stored in 'output_beliefs' register for a BJT node); entries are combined by
-    multiplication
-    """
-    assert len(factors) > 0
-
-    # Compute entry values for possible cases considered
-    combined_factor = {}
-    for case in product(*factors):
-        # Union of case specification
-        case_union = frozenset.union(*case)
-
-        # Incompatible, cannot combine
-        if not _literal_set_is_consistent(case_union): continue
-
-        # Corresponding entry fetched from the factor
-        entries_per_factor = [factors[i][c] for i, c in enumerate(case)]
-
-        # Ensure combination is happening with polynomial values
-        assert isinstance(entries_per_factor[0], Polynomial)
-        assert all(type(e) == type(entries_per_factor[0]) for e in entries_per_factor)
-
-        # Outer-layer combination where entries can be considered 'mini-factors'
-        # defined per postive atom clearances
-        combined_factor[case_union] = reduce(operator.mul, entries_per_factor)
-
-    return combined_factor
-
-
-def _marginalize_outer(factor, node_set):
-    """
-    Subroutine for (partially) marginalizing a factor at the outer-layer (while
-    maintaining subdivision by positive requirement clearance) down to some domain
-    specified by node_set
-    """
-    marginalized_factor = {}
-
-    for case in product(*[(ai, -ai) for ai in node_set]):
-        case = frozenset(case)
-
-        outer_marginals = defaultdict(lambda: Polynomial(float_val=0.0))
-        for f_case, f_inner in factor.items():
-            if not f_case >= case: continue     # Irrelevant f_case
-
-            for pos_clrs, val in f_inner.items():
-                outer_marginals[pos_clrs] += val
-
-        marginalized_factor[case] = dict(outer_marginals)
-
-    return marginalized_factor
-
-
-def _marginalize_simple(factor, node_set):
-    """
-    Subroutine for simple marginalization of factor without layers (likely those
-    stored in 'output_beliefs' register for a BJT node) down to some domain specified
-    by node_set
-    """
-    marginalized_factor = defaultdict(lambda: Polynomial(float_val=0.0))
-
-    for case in product(*[(ai, -ai) for ai in node_set]):
-        case = frozenset(case)
-
-        for f_case, f_val in factor.items():
-            if not f_case >= case: continue     # Irrelevant f_case
-            marginalized_factor[case] += f_val
-
-    return dict(marginalized_factor)
-
-
-def _literal_set_is_consistent(lit_set):
-    """
-    Subroutine for checking if a set of literals (represented with signed integer
-    indices) is consistent; i.e. doesn't contain a literal and its negation at the
-    same time
-    """
-    atm_set = {abs(lit) for lit in lit_set}
-
-    # Inconsistent if and only if lit_set contained both atm & -atm for some atm,
-    # which would be reduced to atm in atm_set
-    return len(atm_set) == len(lit_set)
+    return cumul_new
