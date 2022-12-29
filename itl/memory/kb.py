@@ -81,9 +81,9 @@ class KnowledgeBase:
         # Initial filtering of irrelevant entries without any overlapping for
         # both head and body
         entries_with_overlap = set.union(*[
-            self.entries_by_pred[pred] for pred in preds_head
+            self.entries_by_pred.get(pred, set()) for pred in preds_head
         ]) & set.union(*[
-            self.entries_by_pred[pred] for pred in preds_body
+            self.entries_by_pred.get(pred, set()) for pred in preds_body
         ])
 
         entries_entailed = set()       # KB entries entailed by input

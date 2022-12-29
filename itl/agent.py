@@ -21,7 +21,7 @@ from .lang import LanguageModule
 from .symbolic_reasoning import SymbolicReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 from .actions import AgentCompositeActions
-from .lpmln import Rule, Literal
+from .lpmln import Literal
 from .lpmln.utils import wrap_args
 # from .utils.completer import DatasetImgsCompleter
 

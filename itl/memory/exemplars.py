@@ -122,7 +122,7 @@ class Exemplars:
                         y = ([1] * len(pos_inds)) + ([0] * len(neg_inds))
 
                         # Fit classifier and update
-                        bin_clf = SVC(C=1.0, gamma=0.1, probability=True)
+                        bin_clf = SVC(C=1.0, gamma=0.1, probability=True, random_state=42)
                         bin_clf.fit(X, y)
                         self.binary_classifiers[conc_type][conc_ind] = bin_clf
                     else:

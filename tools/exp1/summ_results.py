@@ -256,7 +256,7 @@ def main(cfg):
         # Plot curve
         ax.set_xlabel("# training examples")
         ax.set_ylabel("mAP score")
-        ax.set_xlim(0, last_num_exs+10)
+        ax.set_xlim(0, last_num_exs+5)
         ax.set_ylim(0, 1)
         ax.grid()
 
@@ -276,7 +276,21 @@ def main(cfg):
     # Report final mAP scores on terminal
     for diff, agg_stats in results_learningCurve.items():
         print("")
-        logger.info(f"Final mAP scores ({diff}):")
+        first_num_exs = sorted(list(agg_stats.values())[0])[0]
+        logger.info(f"mAP scores after {first_num_exs} examples ({diff}):")
+
+        final_mAPs = {
+            f"{semStratL}_{feedStratT}": sorted(data.items())[0][1]
+            for (feedStratT, semStratL), data in agg_stats.items()
+        }
+        for cfg in sorted(final_mAPs, key=lambda x: config_ord.index(x)):
+            logger.info("\t"+f"{config_aliases.get(cfg, cfg)}: {float(np.mean(final_mAPs[cfg]))}")
+    
+    # Report final mAP scores on terminal
+    for diff, agg_stats in results_learningCurve.items():
+        print("")
+        last_num_exs = sorted(list(agg_stats.values())[0], reverse=True)[0]
+        logger.info(f"mAP scores after {last_num_exs} examples ({diff}):")
 
         final_mAPs = {
             f"{semStratL}_{feedStratT}": sorted(data.items(), reverse=True)[0][1]

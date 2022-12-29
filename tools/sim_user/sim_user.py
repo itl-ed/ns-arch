@@ -237,7 +237,7 @@ class SimulatedTeacher:
             # appropriate constrastive generic explanations
             conc1_props_diff = defaultdict(set)
             conc1_subj = ques_content[0].capitalize()
-            for part, prop in conc1_props - conc2_props:
+            for part, prop in sorted(conc1_props - conc2_props):
                 conc1_props_diff[part].add(prop)
             for part, props in conc1_props_diff.items():
                 part_name = pluralize(part.split(".")[0])
@@ -254,7 +254,7 @@ class SimulatedTeacher:
 
             conc2_props_diff = defaultdict(set)
             conc2_subj = ques_content[1].capitalize()
-            for part, prop in conc2_props - conc1_props:
+            for part, prop in sorted(conc2_props - conc1_props):
                 conc2_props_diff[part].add(prop)
             for part, props in conc2_props_diff.items():
                 part_name = pluralize(part.split(".")[0])

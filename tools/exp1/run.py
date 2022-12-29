@@ -60,7 +60,6 @@ def main(cfg):
                 "brandy_glass.n.*",
                 "martini_glass.n.*",
                 "bordeaux_glass.n.*",
-                "riesling_glass.n.*"
             ]
         }
     else:
