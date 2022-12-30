@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 SR_THRES = 0.5               # Mismatch surprisal threshold
 U_IN_PR = 1.00               # How much the agent values information provided by the user
-A_IM_PR = 0.80               # How much the agent values inferred implicature
+A_IM_PR = 1.00               # How much the agent values inferred implicature
 EPS = 1e-10                  # Value used for numerical stabilization
 TAB = "\t"                   # For use in format strings
 
@@ -635,8 +635,8 @@ class ITLAgent:
             if self.strat_generic == "semNegScal":
                 # Helper method factored out for symmetric applications
                 def computeScalarImplicature(c1, c2, rules):
-                    # Return boolean flag indicating whether KB was updated
-                    kb_updated = False
+                    # Return value; list of inferred rules to add
+                    scal_impls = []
 
                     # Existing properties of c1
                     for i in self.kb_snap[c1]:
@@ -659,26 +659,45 @@ class ITLAgent:
                             # of positive literals and negated conjunctions
                             raise NotImplementedError
                         
-                        # Test the negated copy against explicitly stated generics
-                        # and their negative implicature counterparts; they take
-                        # precedence over defeasible implicatures
-                        defeated = any(
-                            Literal.isomorphic_conj_pair((head_neg, body), r)
-                            for r in rules
-                        )
+                        # Test the negated copy against rules with higher precedence
+                        # (explicitly stated generics and their negative implicature
+                        # counterparts)
+                        defeated = False
+                        for r in rules:
+                            # Single-step entailment test; if the negation of inferred
+                            # rule is entailed by r, consider the scalar implicature
+                            # defeated
+                            r_head, r_body = r
+
+                            mapping_b, ent_dir_b = Literal.entailing_mapping_btw(
+                                r_body, body
+                            )
+                            if mapping_b is not None:
+                                mapping_h, ent_dir_h = Literal.entailing_mapping_btw(
+                                    r_head, head_neg, mapping_b
+                                )
+                                if mapping_h is not None and {ent_dir_h, ent_dir_b} != {1, -1}:
+                                    # Entailment relation detected
+                                    if ent_dir_h >= 0 and ent_dir_b <= 0:
+                                        defeated = True
+                                        break
 
                         if not defeated:
                             # Add the inferred generic that successfully survived
                             # the test against the higher-precedence rules
-                            kb_updated |= self.lt_mem.kb.add(
-                                (head, body), A_IM_PR, f"{c1} ~= {c2} (Scal. Impl.)"
-                            )
+                            scal_impls.append((head, body))
                     
-                    return kb_updated
+                    return scal_impls
 
                 for (c1, c2), rules in pairRules.items():
-                    kb_updated |= computeScalarImplicature(c1, c2, rules)
-                    kb_updated |= computeScalarImplicature(c2, c1, rules)
+                    scal_impls = []
+                    scal_impls += computeScalarImplicature(c1, c2, rules)
+                    scal_impls += computeScalarImplicature(c2, c1, rules)
+
+                    for head, body in scal_impls:
+                        kb_updated |= self.lt_mem.kb.add(
+                            (head, body), A_IM_PR, f"{c1} ~= {c2} (Scal. Impl.)"
+                        )
 
             # Handle neologisms
             neologisms = {

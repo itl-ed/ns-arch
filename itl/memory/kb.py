@@ -156,10 +156,10 @@ class KnowledgeBase:
                         entry for ent_id, entry in enumerate(self.entries)
                         if ent_id in ind_map
                     ]
-                    self.entries_by_pred = {
+                    self.entries_by_pred = defaultdict(set, {
                         pred: {ind_map[ei] for ei in ent_ids if ei in ind_map}
                         for pred, ent_ids in self.entries_by_pred.items()
-                    }
+                    })
 
                     # Finally add the stronger input as new entry
                     self.entries.append(
