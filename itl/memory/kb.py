@@ -133,37 +133,11 @@ class KnowledgeBase:
                     # Stronger input entails some KB entries and render them
                     # 'obsolete'; the entailed entries may be removed and merged
                     # into the newly added entry
+                    self.remove_by_ids(entries_entailed)
 
-                    # First find the mapping from previous set of indices to new 
-                    # set of indices, as indices will change as entries shift
-                    # their positions to fill in blank positions
-                    ind_map = {}; ni = 0
-                    for ent_id in range(len(self.entries)):
-                        if ent_id in entries_entailed:
-                            ni += 1
-                        else:
-                            ind_map[ent_id] = ent_id - ni
-
-                    # Also collect the provenance lists for the entries to be
-                    # removed, so that they can be added to that of the new entry
-                    existing_provenances = sum([
-                        self.entries[ent_id][2] for ent_id in entries_entailed
-                    ], [])
-
-                    # Cull the weaker entries and update entry indexing by predicate
-                    # (self.entries_by_pred) according to the mapping found above
-                    self.entries = [
-                        entry for ent_id, entry in enumerate(self.entries)
-                        if ent_id in ind_map
-                    ]
-                    self.entries_by_pred = defaultdict(set, {
-                        pred: {ind_map[ei] for ei in ent_ids if ei in ind_map}
-                        for pred, ent_ids in self.entries_by_pred.items()
-                    })
-
-                    # Finally add the stronger input as new entry
+                    # Add the stronger input as new entry
                     self.entries.append(
-                        ((head, body), weight, [(source, weight)]+existing_provenances)
+                        ((head, body), weight, [(source, weight)])
                     )
                     for pred in preds_head | preds_body:
                         self.entries_by_pred[pred].add(len(self.entries)-1)
@@ -178,6 +152,31 @@ class KnowledgeBase:
                     kb_updated = False
 
         return kb_updated
+
+    def remove_by_ids(self, ent_ids):
+        """
+        Update KB by removing entries designated by the list of entry ids provided
+        """
+        # First find the mapping from previous set of indices to new set of indices,
+        # as indices will change as entries shift their positions to fill in blank
+        # positions
+        ind_map = {}; ni = 0
+        for ent_id in range(len(self.entries)):
+            if ent_id in ent_ids:
+                ni += 1
+            else:
+                ind_map[ent_id] = ent_id - ni
+
+        # Cull the specified entries and update entry indexing by predicate
+        # (self.entries_by_pred) according to the mapping found above
+        self.entries = [
+            entry for ent_id, entry in enumerate(self.entries)
+            if ent_id in ind_map
+        ]
+        self.entries_by_pred = defaultdict(set, {
+            pred: {ind_map[ei] for ei in ent_ids if ei in ind_map}
+            for pred, ent_ids in self.entries_by_pred.items()
+        })
 
     def export_reasoning_program(self):
         """

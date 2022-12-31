@@ -220,7 +220,7 @@ class AgentCompositeActions:
                 exported_kb = self.agent.lt_mem.kb.export_reasoning_program()
                 self.agent.symbolic.sensemake_vis(self.agent.vision.scene, exported_kb)
                 self.agent.symbolic.resolve_symbol_semantics(dialogue_state, self.agent.lt_mem.lexicon)
-                # self.agent.symbolic.sensemake_vis_lang(dialogue_state)
+                self.agent.symbolic.sensemake_vis_lang(dialogue_state)
 
                 bjt_v, _ = self.agent.symbolic.concl_vis
                 # bjt_vl, _ = self.agent.symbolic.concl_vis_lang

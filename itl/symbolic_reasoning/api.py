@@ -65,7 +65,7 @@ class SymbolicReasonerModule:
             vis_scene: Predictions (scene graphs) from the vision module
             exported_kb: Output from KnowledgeBase().export_reasoning_program()
         """
-        inference_prog, preds_in_kb = exported_kb
+        kb_prog, preds_in_kb = exported_kb
 
         # Build ASP program for processing perception outputs
         pprog = Program()
@@ -115,11 +115,11 @@ class SymbolicReasonerModule:
                         pprog.add_rule(rule, r_pr)
 
         # Solve with clingo to find the best models of the program
-        prog = pprog + inference_prog
+        prog = pprog + kb_prog
         bjt_v = prog.compile()
 
         # Store sensemaking result as module state
-        self.concl_vis = bjt_v, prog
+        self.concl_vis = bjt_v, (pprog, kb_prog)
     
     def resolve_symbol_semantics(self, dialogue_state, lexicon):
         """
@@ -526,7 +526,7 @@ class SymbolicReasonerModule:
                 manager
         """
         dprog = Program()
-        bjt_v, prog = self.concl_vis
+        bjt_v, (pprog, kb_prog) = self.concl_vis
 
         # TODO (in some future): Incremental BJT update from existing bjt_v and additional dprog info
 
@@ -558,13 +558,13 @@ class SymbolicReasonerModule:
 
         # Finally, reasoning with all visual+language info
         if len(dprog) > 0:
-            prog += dprog
+            prog = pprog + kb_prog + dprog
             bjt_vl = prog.compile()
         else:
             bjt_vl = bjt_v
 
         # Store sensemaking result as module state
-        self.concl_vis_lang = bjt_vl, prog
+        self.concl_vis_lang = bjt_vl, (pprog, kb_prog, dprog)
 
     @staticmethod
     def query(bjt, q_vars, event):

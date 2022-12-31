@@ -21,7 +21,7 @@ from .lang import LanguageModule
 from .symbolic_reasoning import SymbolicReasonerModule
 from .practical_reasoning import PracticalReasonerModule
 from .actions import AgentCompositeActions
-from .lpmln import Literal
+from .lpmln import Literal, Polynomial
 from .lpmln.utils import wrap_args
 # from .utils.completer import DatasetImgsCompleter
 
@@ -80,7 +80,11 @@ class ITLAgent:
         # Snapshot of KB, to be taken at the beginning of every training episode,
         # with which scalar implicatures will be computed. Won't be necessary
         # if we were to use more structured discourse representation...
-        self.kb_snap = copy.deepcopy(self.lt_mem.kb.entries_by_pred)
+        self.kb_snap = copy.deepcopy(self.lt_mem.kb)
+
+        # (Temporary) Episodic memory; may be bumped up into proper long-term memory
+        # component if KB maintenance with episodic memory works well
+        self.episodic_memory = []
 
     def __call__(self):
         """Main function: Kickstart infinite ITL agent loop with user interface"""
@@ -399,6 +403,17 @@ class ITLAgent:
             ###################################################################
 
             if self.vision.new_input is not None or xb_updated:
+                # Prior to resetting visual context, store current one into the
+                # episodic memory (visual perceptions & user language inputs),
+                # in the form of LP^MLN program fragments
+                if self.vision.new_input is not None:
+                    if (self.vision.scene is not None and
+                        len(self.vision.scene) > 1 and
+                        self.symbolic.concl_vis_lang is not None):
+
+                        pprog, _, dprog = self.symbolic.concl_vis_lang[1]
+                        self.episodic_memory.append((pprog, dprog))
+
                 # Ground raw visual perception with scene graph generation module
                 self.vision.predict(
                     self.vision.last_input, self.lt_mem.exemplars,
@@ -412,7 +427,7 @@ class ITLAgent:
                 self.symbolic.refresh()
 
                 # Reset below on episode-basis
-                self.kb_snap = copy.deepcopy(self.lt_mem.kb.entries_by_pred)
+                self.kb_snap = copy.deepcopy(self.lt_mem.kb)
 
             # Understand the user input in the context of the dialogue
             if self.lang.new_input is not None and self.lang.new_input[0]["raw"] != "Correct.":
@@ -456,9 +471,9 @@ class ITLAgent:
                     dialogue_state, self.lt_mem.lexicon
                 )
 
-                # if self.vision.scene is not None:
-                #     # Sensemaking from vision & language input
-                #     self.symbolic.sensemake_vis_lang(dialogue_state)
+                if self.vision.scene is not None:
+                    # Sensemaking from vision & language input
+                    self.symbolic.sensemake_vis_lang(dialogue_state)
 
             ###################################################################
             ##           Identify & exploit learning opportunities           ##
@@ -639,9 +654,9 @@ class ITLAgent:
                     scal_impls = []
 
                     # Existing properties of c1
-                    for i in self.kb_snap[c1]:
+                    for i in self.kb_snap.entries_by_pred[c1]:
                         # Fetch KB entry
-                        (head, body), *_ = self.lt_mem.kb.entries[i]
+                        (head, body), *_ = self.kb_snap.entries[i]
 
                         # Replace occurrences of c1 with c2
                         head = tuple(_substitute(h, { c1: c2 }) for h in head)
@@ -695,9 +710,66 @@ class ITLAgent:
                     scal_impls += computeScalarImplicature(c2, c1, rules)
 
                     for head, body in scal_impls:
-                        kb_updated |= self.lt_mem.kb.add(
+                        self.lt_mem.kb.add(
                             (head, body), A_IM_PR, f"{c1} ~= {c2} (Scal. Impl.)"
                         )
+
+                # Regular inspection of KB by weeding out defeasible rules inferred
+                # from scalar implicatures, by comparison against episodic memory
+                entries_from_scalImpl = [
+                    (ent_id, rule)
+                    for ent_id, (rule, _, provenances) in enumerate(self.lt_mem.kb.entries)
+                    if all(prov[0].endswith("(Scal. Impl.)") for prov in provenances)
+                ]
+                entries_to_remove = {}
+                for ent_id, rule in entries_from_scalImpl:
+                    # Mini-KB consisting of only this rule to be tested
+                    kb_type = type(self.lt_mem.kb)
+                    mini_kb = kb_type()
+                    mini_kb.add(rule, 0.5, "For inspection")
+
+                    # Test for any deductive violations of the rule with cases in
+                    # the episodic memory
+                    mini_kb_prog, _ = mini_kb.export_reasoning_program()
+                    inspection_outputs = [
+                        (pprog+dprog+mini_kb_prog).compile()
+                        for pprog, dprog in self.episodic_memory
+                    ]
+                    deduc_viol_cases = [
+                        bjt for bjt in inspection_outputs
+                        if any(atm.name=="deduc_viol_0" for atm in bjt.graph["atoms_map"])
+                    ]
+                    deduc_viol_probs = [
+                        {
+                            node: bjt.nodes[frozenset({node})]["output_beliefs"]
+                            for atm, node in bjt.graph["atoms_map"].items()
+                            if atm.name=="deduc_viol_0"
+                        }
+                        for bjt in deduc_viol_cases
+                    ]
+                    deduc_viol_probs = [
+                        [
+                            (
+                                potentials[frozenset({node})],
+                                sum(potentials.values(), Polynomial(float_val=0.0))
+                            )
+                            for node, potentials in per_bjt.items()
+                        ]
+                        for per_bjt in deduc_viol_probs
+                    ]
+                    deduc_viol_probs = [
+                        sum((unnorm / Z).at_limit() for unnorm, Z in per_bjt) / len(per_bjt)
+                        for per_bjt in deduc_viol_probs
+                    ]
+
+                    # Retract the defeasible inference if refuted by memory of
+                    # some episode with sufficiently high probability
+                    if len(deduc_viol_probs) > 0 and max(deduc_viol_probs) > 0.2:
+                        entries_to_remove[ent_id] = max(deduc_viol_probs)
+
+                if len(entries_to_remove) > 0:
+                    # Remove the listed entries from KB
+                    self.lt_mem.kb.remove_by_ids(list(entries_to_remove))
 
             # Handle neologisms
             neologisms = {

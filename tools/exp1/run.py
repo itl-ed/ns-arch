@@ -248,7 +248,7 @@ def midterm_test(agent, user, num_exs):
     # Mean AP across concepts being tested
     mAP = sum(APs) / len(APs)
 
-    # Obtaining confusion matrix at threshold 0.3
+    # Obtaining confusion matrix at threshold 0.15
     conf_mat = np.zeros([C,C])
     for i in range(C):
         for j in range(C):
@@ -256,7 +256,7 @@ def midterm_test(agent, user, num_exs):
             conc_j = concepts_ordered[j]
 
             conf_mat[i,j] = sum(
-                score >= 0.3 for conc, score in exam_result[conc_i]
+                score >= 0.15 for conc, score in exam_result[conc_i]
                 if conc==conc_j
             )
 
