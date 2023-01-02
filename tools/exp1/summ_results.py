@@ -113,13 +113,13 @@ def main(cfg):
 
                     confMat = np.array([[float(d) for d in row] for row in reader])
 
-                    if (feedStratT, semStratL) in results_confMat[num_exs][diff]:
-                        stats_agg = results_confMat[num_exs][diff][(feedStratT, semStratL)]
+                    if (feedStratT, semStratL) in results_confMat[diff][num_exs]:
+                        stats_agg = results_confMat[diff][num_exs][(feedStratT, semStratL)]
                         stats_agg["matrix"].append(confMat)
                         stats_agg["num_test_suites"] += 1
                         assert stats_agg["concepts"] == concepts
                     else:
-                        results_confMat[num_exs][diff][(feedStratT, semStratL)] = {
+                        results_confMat[diff][num_exs][(feedStratT, semStratL)] = {
                             "matrix": [confMat],
                             "num_test_suites": 1,
                             "concepts": concepts
@@ -162,6 +162,13 @@ def main(cfg):
         "semNeg_maxHelp": "maxHelp_semNeg",
         "semNegScal_maxHelp": "maxHelp_semNegScal"
     }   # To be actually displayed in legend
+    config_colors = {
+        "semOnly_minHelp": "tab:red",
+        "semOnly_medHelp": "tab:orange",
+        "semOnly_maxHelp": "tab:green",
+        "semNeg_maxHelp": "tab:blue",
+        "semNegScal_maxHelp": "tab:purple"
+    }   # For consistency across difficulties
 
     # Aggregate and visualize: cumulative regret curve
     for diff, agg_stats in results_cumulRegs.items():
@@ -175,17 +182,18 @@ def main(cfg):
             ]
 
             # Plot mean curve
-            curve = ax.plot(
+            ax.plot(
                 [i+1 for i, _, _ in stats],
                 [mrg for _, mrg, _ in stats],
-                label=f"{semStratL}_{feedStratT}"
+                label=f"{semStratL}_{feedStratT}",
+                color=config_colors[f"{semStratL}_{feedStratT}"]
             )
             # Plot confidence intervals
             ax.fill_between(
                 [i+1 for i, _, _ in stats],
                 [mrg-cl for _, mrg, cl in stats],
                 [mrg+cl for _, mrg, cl in stats],
-                color=curve[0].get_color(), alpha=0.2
+                color=config_colors[f"{semStratL}_{feedStratT}"], alpha=0.2
             )
 
         # Plot curve
@@ -208,10 +216,10 @@ def main(cfg):
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"cumulRegs_{diff}.png"))
 
     # Aggregate and visualize: confusion matrices
-    last_num_exs = max(results_confMat)
-    for num_exs, agg_stats in results_confMat.items():
-        for diff, per_diff in agg_stats.items():
-            for exp_config, data in per_diff.items():
+    for diff, per_diff in results_confMat.items():
+        last_num_exs = max(per_diff)
+        for num_exs, per_config in per_diff.items():
+            for exp_config, data in per_config.items():
                 feedStratT, semStratL = exp_config
                 config_label = f"{semStratL}_{feedStratT}"
 
@@ -240,23 +248,28 @@ def main(cfg):
             ]
 
             # Plot mean curve
-            curve = ax.plot(
+            ax.plot(
                 [num_exs for num_exs, _, _ in stats],
                 [mmAP for _, mmAP, _ in stats],
-                label=f"{semStratL}_{feedStratT}"
+                label=f"{semStratL}_{feedStratT}",
+                color=config_colors[f"{semStratL}_{feedStratT}"]
+            )
+            ax.plot(
+                [0, stats[0][0]], [0, stats[0][1]],
+                color=config_colors[f"{semStratL}_{feedStratT}"], linestyle="dashed"
             )
             # Plot confidence intervals
             ax.fill_between(
-                [num_exs for num_exs, _, _ in stats],
-                [mmAP-cl for _, mmAP, cl in stats],
-                [mmAP+cl for _, mmAP, cl in stats],
-                color=curve[0].get_color(), alpha=0.2
+                [0]+[num_exs for num_exs, _, _ in stats],
+                [0]+[mmAP-cl for _, mmAP, cl in stats],
+                [0]+[mmAP+cl for _, mmAP, cl in stats],
+                color=config_colors[f"{semStratL}_{feedStratT}"], alpha=0.2
             )
 
         # Plot curve
         ax.set_xlabel("# training examples")
         ax.set_ylabel("mAP score")
-        ax.set_xlim(0, last_num_exs+5)
+        ax.set_xlim(0, stats[-1][0]+stats[0][0])
         ax.set_ylim(0, 1)
         ax.grid()
 
