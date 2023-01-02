@@ -273,7 +273,7 @@ def main(cfg):
         # Plot curve
         ax.set_xlabel("# training examples")
         ax.set_ylabel("mAP score")
-        ax.set_xlim(0, stats[-1][0]+stats[0][0])
+        ax.set_xlim(0, stats[-1][0])
         ax.set_ylim(0, 1)
         ax.grid()
 
