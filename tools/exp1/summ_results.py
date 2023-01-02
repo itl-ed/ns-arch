@@ -73,6 +73,8 @@ def main(cfg):
     results_confMat = defaultdict(lambda: defaultdict(dict))
     results_learningCurve = defaultdict(dict)
 
+    num_concepts = {}
+
     # Collect results
     for res_dir in tqdm.tqdm(dirs_with_results, total=len(dirs_with_results)):
         res_dir = os.path.join(outputs_root_dir, *res_dir, "exp1_res")
@@ -223,6 +225,8 @@ def main(cfg):
                 feedStratT, semStratL = exp_config
                 config_label = f"{semStratL}_{feedStratT}"
 
+                num_concepts[diff] = len(data["matrix"][0])
+
                 if num_exs == last_num_exs:
                     # Draw confusion matrix
                     fig = plt.figure()
@@ -255,14 +259,14 @@ def main(cfg):
                 color=config_colors[f"{semStratL}_{feedStratT}"]
             )
             ax.plot(
-                [0, stats[0][0]], [0, stats[0][1]],
+                [0, stats[0][0]], [1/num_concepts[diff], stats[0][1]],
                 color=config_colors[f"{semStratL}_{feedStratT}"], linestyle="dashed"
             )
             # Plot confidence intervals
             ax.fill_between(
                 [0]+[num_exs for num_exs, _, _ in stats],
-                [0]+[mmAP-cl for _, mmAP, cl in stats],
-                [0]+[mmAP+cl for _, mmAP, cl in stats],
+                [1/num_concepts[diff]]+[mmAP-cl for _, mmAP, cl in stats],
+                [1/num_concepts[diff]]+[mmAP+cl for _, mmAP, cl in stats],
                 color=config_colors[f"{semStratL}_{feedStratT}"], alpha=0.2
             )
 
