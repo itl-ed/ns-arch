@@ -251,6 +251,10 @@ def main(cfg):
                 for num_exs, mAPs in data
             ]
 
+            # Temporary adjustment
+            if diff=="fineEasy":
+                stats = [s for s in stats if s[0] <= 30]
+
             # Plot mean curve
             ax.plot(
                 [num_exs for num_exs, _, _ in stats],
@@ -292,29 +296,24 @@ def main(cfg):
 
     # Report final mAP scores on terminal
     for diff, agg_stats in results_learningCurve.items():
-        print("")
         first_num_exs = sorted(list(agg_stats.values())[0])[0]
-        logger.info(f"mAP scores after {first_num_exs} examples ({diff}):")
-
-        final_mAPs = {
-            f"{semStratL}_{feedStratT}": sorted(data.items())[0][1]
-            for (feedStratT, semStratL), data in agg_stats.items()
-        }
-        for cfg in sorted(final_mAPs, key=lambda x: config_ord.index(x)):
-            logger.info("\t"+f"{config_aliases.get(cfg, cfg)}: {float(np.mean(final_mAPs[cfg]))}")
-    
-    # Report final mAP scores on terminal
-    for diff, agg_stats in results_learningCurve.items():
-        print("")
+        middle_num_exs = sorted(list(agg_stats.values())[0])[2]
         last_num_exs = sorted(list(agg_stats.values())[0], reverse=True)[0]
-        logger.info(f"mAP scores after {last_num_exs} examples ({diff}):")
 
-        final_mAPs = {
-            f"{semStratL}_{feedStratT}": sorted(data.items(), reverse=True)[0][1]
-            for (feedStratT, semStratL), data in agg_stats.items()
-        }
-        for cfg in sorted(final_mAPs, key=lambda x: config_ord.index(x)):
-            logger.info("\t"+f"{config_aliases.get(cfg, cfg)}: {float(np.mean(final_mAPs[cfg]))}")
+        # Temporary adjustment
+        if diff=="fineEasy":
+            last_num_exs = 30
+
+        for num_exs in [first_num_exs, middle_num_exs, last_num_exs]:
+            print("")
+            logger.info(f"mAP scores after {num_exs} examples ({diff}):")
+
+            final_mAPs = {
+                f"{semStratL}_{feedStratT}": data[num_exs]
+                for (feedStratT, semStratL), data in agg_stats.items()
+            }
+            for cfg in sorted(final_mAPs, key=lambda x: config_ord.index(x)):
+                logger.info("\t"+f"{config_aliases.get(cfg, cfg)}: {float(np.mean(final_mAPs[cfg]))}")
 
 
 if __name__ == "__main__":
