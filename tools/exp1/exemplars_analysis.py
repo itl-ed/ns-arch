@@ -8,6 +8,7 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 )
 import uuid
+import random
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -18,6 +19,7 @@ import tqdm as tqdm
 import numpy as np
 import pandas as pd
 from omegaconf import OmegaConf
+from sklearn.svm import SVC
 from bokeh.io import save
 from bokeh.models import Title
 from bokeh.layouts import column
@@ -38,6 +40,7 @@ def main(cfg):
     agent = ITLAgent(cfg)
     exemplars = agent.lt_mem.exemplars
 
+    accs = {}
     for conc_type in ["cls", "att", "rel"]:
         if conc_type == "cls" or conc_type == "att":
             vectors = exemplars.storage_vec[conc_type]
@@ -56,6 +59,27 @@ def main(cfg):
             for c in tqdm.tqdm(pos_exs_inds, total=len(pos_exs_inds), desc=f"{conc_type}_embs"):
                 concept_name = agent.lt_mem.lexicon.d2s[(c, conc_type)][0][0]
                 concept_name = concept_name.replace("/", "_")
+
+                # Evaluating exemplar sets by binary classification performance on
+                # random 90:10 train/test split
+                pos_shuffled = random.sample(pos_exs_inds[c], len(pos_exs_inds[c]))
+                pos_train = pos_shuffled[:int(0.9*len(pos_shuffled))]
+                pos_test = pos_shuffled[int(0.9*len(pos_shuffled)):]
+                neg_shuffled = random.sample(neg_exs_inds[c], len(neg_exs_inds[c]))
+                neg_train = neg_shuffled[:int(0.9*len(neg_shuffled))]
+                neg_test = neg_shuffled[int(0.9*len(neg_shuffled)):]
+
+                X = vectors[pos_train + neg_train]
+                y = ([1] * len(pos_train)) + ([0] * len(neg_train))
+
+                # Fit classifier and run on test set
+                bin_clf = SVC(C=1.0, gamma=0.1, probability=True, random_state=42)
+                bin_clf.fit(X, y)
+                bin_clf.predict_proba(vectors[pos_test])
+                pos_results = bin_clf.predict_proba(vectors[pos_test])[:,1] > 0.5
+                neg_results = bin_clf.predict_proba(vectors[neg_test])[:,0] > 0.5
+                accs[(concept_name, conc_type)] = \
+                    (pos_results.sum()+neg_results.sum()) / (len(pos_test)+len(neg_test))
 
                 labels = [
                     "p" if fv_i in pos_exs_inds[c]
@@ -79,6 +103,9 @@ def main(cfg):
                 plots.append(p)
 
             save(column(*plots))
+    
+    for (concept_name, conc_type), acc in accs.items():
+        print(f"Accuracy for {concept_name} ({conc_type}): {acc:.3f}")
 
 if __name__ == "__main__":
     main()
