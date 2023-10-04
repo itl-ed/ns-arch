@@ -4,8 +4,8 @@ Codebase, datasets and trained vision model weights for the paper "Interactive A
 
 ## Datasets and models
 
-- Tabletop domain datasets, images + annotations: [Google drive link](https://drive.google.com/file/d/1BOHNoiCFCmLYRTPkzdneDkjoKwc_IgJo/view?usp=share_link)
-- Model weights for the custom extension modules added to Deformable DETR: [Google drive link](https://drive.google.com/file/d/1oWxQwfcx9GzxHox28q5qcPuQ_EUWe7Nt/view?usp=share_link)
+- Tabletop domain datasets, images + annotations: [Google drive link](https://drive.google.com/file/d/1oWxQwfcx9GzxHox28q5qcPuQ_EUWe7Nt/view?usp=share_link)
+- Model weights for the custom extension modules added to Deformable DETR: [Google drive link](https://drive.google.com/file/d/1BOHNoiCFCmLYRTPkzdneDkjoKwc_IgJo/view?usp=share_link)
 - (Datasets for training the custom feature extractor module, i.e. Visual Genome, not directly uploaded. Refer to `tools/vision/prepare_data.py` script for starts if interested in training the extension module from scratch with VG data.)
 
 ## Some important command-line arguments
